@@ -1,29 +1,24 @@
 /**
  * Aliyun Captcha V3 headless solver for start-plan tier.
  *
- * Captcha config (prefix/sceneId/region) is auto-fetched from
- * https://zcode.z.ai/api/v1/client/configs — no user configuration needed.
+ * Proactive traceless verification via jsdom + AliyunCaptcha.js (scene 11xygtvd).
+ * Config is auto-fetched from https://zcode.z.ai/api/v1/client/configs.
  *
- * When zcode.z.ai returns a captcha challenge (response header
- * `x-aliyun-captcha-verify-param`), this module solves it headlessly via
- * Playwright + the official AliyunCaptcha.js SDK, then returns the solved token.
- *
- * @see _reverse/zcode.cjs `o5r()` / `createZcodePlanCaptchaEmptyStreamBusinessError`
+ * @see https://github.com/TriDefender/zcode-api/issues/2
  */
 
-const CAPTCHA_HEADER = "x-aliyun-captcha-verify-param";
-const REGION_HEADER = "x-aliyun-captcha-verify-region";
-const ALIYUN_CAPTCHA_SDK_URL = "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js";
+import { invalidateJsdomCaptcha, solveCaptchaJsdom, type CaptchaConfig } from "./captcha-jsdom.js";
+
+export const CAPTCHA_HEADER = "x-aliyun-captcha-verify-param";
+export const REGION_HEADER = "x-aliyun-captcha-verify-region";
+export const RETRY_HEADERS = { PARAM: CAPTCHA_HEADER, REGION: REGION_HEADER };
+
 const CONFIGS_API = "https://zcode.z.ai/api/v1/client/configs";
+const DEFAULT_SCENE = "11xygtvd";
+const DEFAULT_PREFIX = "no8xfe";
+const DEFAULT_REGION = "sgp";
 
-interface FetchedCaptchaConfig {
-  enabled: boolean;
-  prefix: string;
-  sceneId: string;
-  region: string;
-}
-
-let cachedConfig: { value: FetchedCaptchaConfig | null; expiresAt: number } = { value: null, expiresAt: 0 };
+let cachedConfig: { value: CaptchaConfig | null; expiresAt: number } = { value: null, expiresAt: 0 };
 
 export function detectCaptchaChallenge(resp: Response): string | null {
   const v = resp.headers.get(CAPTCHA_HEADER);
@@ -32,133 +27,58 @@ export function detectCaptchaChallenge(resp: Response): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
-async function fetchCaptchaConfig(): Promise<FetchedCaptchaConfig | null> {
+export async function fetchCaptchaConfig(): Promise<CaptchaConfig> {
   if (cachedConfig.value && cachedConfig.expiresAt > Date.now()) {
     return cachedConfig.value;
   }
+
+  const defaults: CaptchaConfig = {
+    enabled: true,
+    prefix: DEFAULT_PREFIX,
+    sceneId: DEFAULT_SCENE,
+    region: DEFAULT_REGION,
+  };
+
   try {
-    const url = `${CONFIGS_API}?app_version=3.1.1&platform=win32-x64`;
+    const url = `${CONFIGS_API}?app_version=3.1.2&platform=win32-x64`;
     const resp = await fetch(url);
-    const json = (await resp.json()) as { code?: number; data?: { configs?: { captcha?: FetchedCaptchaConfig } } };
-    const cfg = json?.data?.configs?.captcha ?? null;
-    cachedConfig = { value: cfg, expiresAt: Date.now() + 60000 };
+    const json = (await resp.json()) as {
+      data?: { configs?: { captcha?: Partial<CaptchaConfig> } };
+    };
+    const cap = json?.data?.configs?.captcha;
+    const cfg: CaptchaConfig = {
+      enabled: cap?.enabled !== false,
+      prefix: String(cap?.prefix || DEFAULT_PREFIX),
+      sceneId: String(cap?.sceneId || DEFAULT_SCENE),
+      region: String(cap?.region || DEFAULT_REGION),
+    };
+    cachedConfig = { value: cfg, expiresAt: Date.now() + 60_000 };
     return cfg;
   } catch {
-    return null;
+    cachedConfig = { value: defaults, expiresAt: Date.now() + 60_000 };
+    return defaults;
   }
 }
 
-/**
- * Solve an Aliyun captcha challenge headlessly.
- *
- * Fetches captcha config from ZCode API, launches Chromium, loads
- * AliyunCaptcha.js, and waits for the SDK success callback.
- *
- * @returns Object with verifyParam and region for the retry request headers
- * @throws Error if config unavailable, Playwright missing, or solve times out
- */
-export async function solveCaptcha(challenge: string): Promise<{ verifyParam: string; region: string }> {
+/** Proactive traceless solve — attach verifyParam before the chat request. */
+export async function getProactiveCaptchaHeaders(): Promise<Record<string, string>> {
   const cfg = await fetchCaptchaConfig();
-  if (!cfg || !cfg.enabled || !cfg.prefix || !cfg.sceneId) {
-    throw new Error("Captcha config unavailable from ZCode API");
-  }
-
-  const playwright = await loadPlaywright();
-  const browser = await playwright.chromium.launch({ headless: true });
-  try {
-    const page = await browser.newPage();
-    await page.setContent(buildSolverHtml(cfg), { waitUntil: "domcontentloaded" });
-    await page.addScriptTag({ url: ALIYUN_CAPTCHA_SDK_URL });
-
-    const verifyParam = await page.evaluate(
-      (args: { prefix: string; sceneId: string; region: string }): Promise<string> => {
-        const { prefix, sceneId, region } = args;
-        return new Promise<string>((resolve, reject) => {
-          const timeout = setTimeout(() => reject(new Error("captcha solve timeout after 30s")), 30000);
-          const w = window as unknown as {
-            AliyunCaptchaConfig?: { region: string; prefix: string };
-            initAliyunCaptcha?: (opts: Record<string, unknown>) => void;
-          };
-          w.AliyunCaptchaConfig = { region, prefix };
-          if (!w.initAliyunCaptcha) {
-            clearTimeout(timeout);
-            reject(new Error("AliyunCaptcha.js failed to load"));
-            return;
-          }
-          w.initAliyunCaptcha({
-            SceneId: sceneId,
-            prefix,
-            mode: "popup",
-            language: "cn",
-            showErrorTip: false,
-            element: "#captcha-element",
-            button: "#captcha-button",
-            getInstance: () => {},
-            success: (param: string) => {
-              clearTimeout(timeout);
-              resolve(param);
-            },
-            fail: (err: unknown) => {
-              clearTimeout(timeout);
-              reject(new Error(`Aliyun SDK fail: ${JSON.stringify(err)}`));
-            },
-            onError: (err: unknown) => {
-              clearTimeout(timeout);
-              reject(new Error(`Aliyun SDK error: ${JSON.stringify(err)}`));
-            },
-          });
-        });
-      },
-      { prefix: cfg.prefix, sceneId: cfg.sceneId, region: cfg.region },
-    );
-
-    void challenge;
-    return { verifyParam, region: cfg.region };
-  } finally {
-    await browser.close();
-  }
-}
-
-function buildSolverHtml(cfg: FetchedCaptchaConfig): string {
-  return `<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>captcha-solver</title>
-<script>window.AliyunCaptchaConfig = { region: "${cfg.region}", prefix: "${cfg.prefix}" };</script>
-</head>
-<body>
-<div id="captcha-element"></div>
-<button id="captcha-button">verify</button>
-</body>
-</html>`;
-}
-
-export const RETRY_HEADERS = { PARAM: CAPTCHA_HEADER, REGION: REGION_HEADER };
-
-async function loadPlaywright(): Promise<PlaywrightModule> {
-  const moduleName = "playwright";
-  try {
-    const mod = await import(/* @vite-ignore */ moduleName);
-    return mod as unknown as PlaywrightModule;
-  } catch {
-    throw new Error(
-      "playwright is not installed. Install with: bun add -d playwright && bunx playwright install chromium",
-    );
-  }
-}
-
-interface PlaywrightModule {
-  chromium: {
-    launch(opts: { headless: boolean }): Promise<PlaywrightBrowser>;
+  const verifyParam = await solveCaptchaJsdom(cfg);
+  return {
+    [CAPTCHA_HEADER]: verifyParam,
+    [REGION_HEADER]: cfg.region,
   };
 }
 
-interface PlaywrightBrowser {
-  newPage(): Promise<PlaywrightPage>;
-  close(): Promise<void>;
+/**
+ * Solve captcha after a challenge header (legacy reactive path).
+ * Uses the same jsdom traceless solver.
+ */
+export async function solveCaptcha(_challenge: string): Promise<{ verifyParam: string; region: string }> {
+  invalidateJsdomCaptcha();
+  const cfg = await fetchCaptchaConfig();
+  const verifyParam = await solveCaptchaJsdom(cfg);
+  return { verifyParam, region: cfg.region };
 }
 
-interface PlaywrightPage {
-  setContent(html: string, opts: { waitUntil: string }): Promise<void>;
-  addScriptTag(opts: { url: string }): Promise<void>;
-  evaluate<T>(fn: (args: { prefix: string; sceneId: string; region: string }) => Promise<T>, args: { prefix: string; sceneId: string; region: string }): Promise<T>;
-}
+export { invalidateJsdomCaptcha };

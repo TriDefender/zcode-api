@@ -51,7 +51,11 @@ export function buildAuthHeaders(format: Format, cred: Credential, identity: Pro
   };
 
   if (format === "anthropic") {
-    base["x-api-key"] = credStr;
+    if (plan === "start-plan" && cred.jwt) {
+      base["authorization"] = `Bearer ${cred.jwt}`;
+    } else {
+      base["x-api-key"] = credStr;
+    }
     base["anthropic-version"] = ANTHROPIC_VERSION;
   } else {
     base["authorization"] = `Bearer ${credStr}`;

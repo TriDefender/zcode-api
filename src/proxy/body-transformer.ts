@@ -14,13 +14,17 @@
  *      is safe and matches ZCode's `applyCacheControl: true` default.
  *   3. Anthropic format + `ctx.userId` set → inject `metadata: { user_id }`.
  *      Mirrors `user_id: B.metadata.userId` at bundle offset ~4760586.
+ *   4. start-plan Anthropic → prepend official ZCode system gateway blocks (positions 0/1).
+ *      Without these upstream returns 3012 "method not allowed".
  *
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import type { Format } from "../translator/types.js";
+import { injectOfficialZcodeSystem } from "./system-prompt.js";
 
 export interface TransformContext {
   format: Format;
+  plan?: "coding-plan" | "start-plan";
   /** When set (OAuth mode), the Anthropic-format body gets `metadata.user_id` injected. */
   userId?: string;
 }
@@ -47,6 +51,9 @@ export function transformRequestBody(body: string | undefined, ctx: TransformCon
   }
   if (ctx.format === "anthropic") {
     const obj = parsed as Record<string, unknown>;
+    if (ctx.plan === "start-plan") {
+      modified = injectOfficialZcodeSystem(obj) || modified;
+    }
     modified = applyAnthropicCacheControl(obj) || modified;
     if (ctx.userId) {
       modified = applyAnthropicUserId(obj, ctx.userId) || modified;

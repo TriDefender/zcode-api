@@ -1,4 +1,5 @@
 node_modules/
+captcha_node/node_modules/
 *.log
 config.yaml
 .omo/evidence/

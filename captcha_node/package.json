@@ -1,0 +1,11 @@
+{
+  "name": "zcode-proxy-captcha-solver",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless Aliyun traceless captcha solver (jsdom)",
+  "type": "commonjs",
+  "main": "solver.js",
+  "dependencies": {
+    "jsdom": "^24.1.0"
+  }
+}
