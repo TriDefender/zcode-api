@@ -36,6 +36,8 @@ export interface OAuthResult {
   userId?: string;
   /** ZCode plan JWT for start-plan (zcode.z.ai). The OAuth poll/exchange response includes this alongside the provider access_token. */
   jwt?: string;
+  /** Raw OAuth user object (email, avatar, …) for desktop credential sync. */
+  user?: Record<string, unknown>;
 }
 
 export type FetchFn = typeof fetch;
@@ -142,6 +144,7 @@ export class ZaiOAuthClient {
     token?: string;
     zai?: { access_token?: string };
     userId?: string;
+    user?: Record<string, unknown>;
   }> {
     const resp = await this.fetchImpl(
       `${ZCODE_OAUTH_BASE}/oauth/cli/poll/${encodeURIComponent(flowId)}`,
@@ -174,12 +177,19 @@ export class ZaiOAuthClient {
       return { status };
     }
     if (status === "ready") {
-      const user = data.user as { user_id?: string } | undefined;
+      const user = data.user as Record<string, unknown> | undefined;
+      const userId =
+        typeof user?.user_id === "string"
+          ? user.user_id
+          : typeof user?.user_id === "number"
+            ? String(user.user_id)
+            : undefined;
       return {
         status: "ready",
         token: data.token as string | undefined,
         zai: data.zai as { access_token?: string } | undefined,
-        userId: typeof user?.user_id === "string" ? user.user_id : undefined,
+        userId,
+        user,
       };
     }
 
@@ -204,7 +214,13 @@ export class ZaiOAuthClient {
         if (!accessToken || typeof accessToken !== "string") {
           throw new Error("OAuth ready but no access_token in response");
         }
-        return { accessToken, provider: "zai", userId: result.userId, jwt: result.token };
+        return {
+          accessToken,
+          provider: "zai",
+          userId: result.userId,
+          jwt: result.token,
+          user: result.user,
+        };
       }
       if (result.status === "failed") {
         throw new Error("Authorization failed. Please retry login.");

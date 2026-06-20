@@ -68,11 +68,27 @@ bun run src/index.ts auth login bigmodel --import
 
 Start Plan uses `zcode.z.ai` with OAuth JWT and Aliyun traceless captcha — not the paid `api.z.ai` key.
 
-```bash
-# After logging into the ZCode desktop app:
-bun run src/index.ts auth import-jwt
+**New account (automated — recommended):**
 
-# config.yaml:
+```bash
+bun run src/index.ts auth onboard zai
+```
+
+This will:
+1. OAuth login in browser
+2. Write JWT into `~/.zcode/v2/credentials.json` (encrypted, same as desktop)
+3. Launch ZCode briefly to provision daily token buckets
+4. Save credentials to `~/.zcode-proxy/credentials.json`
+
+**Existing ZCode desktop login:**
+
+```bash
+bun run src/index.ts auth import-jwt
+```
+
+**Then configure and start:**
+
+```yaml
 auth:
   mode: oauth
   proxyApiKey: "your-proxy-secret"
@@ -80,13 +96,14 @@ plan: start-plan
 provider: zai
 
 identity:
-  appVersion: "3.1.2"   # match your ZCode app version
+  appVersion: "3.1.2"
+```
 
-# Start proxy (first request solves captcha via jsdom, ~5–40s)
+```bash
 bun run src/index.ts
 ```
 
-Requires Node.js for the captcha solver (`captcha_node/` — installed automatically on first use).
+Requires Node.js for captcha solver (`captcha_node/` — installed automatically on first use).
 
 ```bash
 curl http://localhost:8080/v1/messages \
@@ -95,7 +112,7 @@ curl http://localhost:8080/v1/messages \
   -d '{"model":"glm-5.2","max_tokens":32,"messages":[{"role":"user","content":"say ok"}]}'
 ```
 
-Re-run `auth import-jwt` after each ZCode re-login. **Test one message at a time** — burst captcha requests can trigger abuse block (3012).
+Re-run `auth import-jwt` or `auth onboard zai` after switching accounts. **Test one message at a time** — burst captcha requests can trigger abuse block (3012).
 
 Fixes #2.
 

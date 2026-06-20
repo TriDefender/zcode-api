@@ -10,6 +10,7 @@ import { loadCredential, saveCredential, clearCredential, getStorePath } from ".
 import { ZaiOAuthClient, BigmodelOAuthClient } from "./auth/oauth.js";
 import { KeyResolver } from "./auth/resolver.js";
 import { loadZcodeJwtFromDesktop, decodeJwtUserId } from "./auth/zcode-credentials.js";
+import { onboardStartPlan } from "./auth/onboard.js";
 import type { Credential } from "./auth/types.js";
 import type { ProviderId } from "./provider/types.js";
 import { spawn } from "node:child_process";
@@ -49,6 +50,7 @@ Usage:
   zcode-proxy auth login <provider> [--import]
                                     OAuth login, or import API key from ~/.zcode/v2/config.json
   zcode-proxy auth import-jwt [zai] Import Start Plan JWT from ~/.zcode/v2/credentials.json
+  zcode-proxy auth onboard <zai>      OAuth login + sync desktop + provision quota
   zcode-proxy auth logout           Clear stored credentials
   zcode-proxy auth status           Show current authentication state
   zcode-proxy version               Show version
@@ -58,6 +60,7 @@ Examples:
   zcode-proxy                       Start server with default config.yaml
   zcode-proxy auth login zai         OAuth login for Z.AI (captures start-plan JWT)
   zcode-proxy auth import-jwt        Import JWT from ZCode desktop (start-plan)
+  zcode-proxy auth onboard zai       Full new-account setup (OAuth → ZCode → quota)
   zcode-proxy auth status           Check if logged in
 `);
 }
@@ -121,14 +124,51 @@ function authCommand(args: string[]): void {
     authLogin(args.slice(1));
   } else if (sub === "import-jwt") {
     authImportJwt(args.slice(1));
+  } else if (sub === "onboard") {
+    authOnboard(args.slice(1));
   } else if (sub === "logout") {
     authLogout();
   } else if (sub === "status") {
     authStatus();
   } else {
-    console.error("Usage: zcode-proxy auth <login|import-jwt|logout|status>");
+    console.error("Usage: zcode-proxy auth <login|import-jwt|onboard|logout|status>");
     process.exit(1);
   }
+}
+
+async function authOnboard(args: string[]): Promise<void> {
+  const provider = (args.find((a) => a === "zai" || a === "bigmodel") ?? "zai") as ProviderId;
+  const skipDesktop = args.includes("--no-zcode");
+
+  if (provider !== "zai") {
+    console.error("Start Plan onboard currently supports: zai");
+    process.exit(1);
+  }
+
+  console.log("Start Plan onboard — OAuth login, sync ZCode desktop, provision quota\n");
+
+  const { accessToken, userId, jwt, user } = await runOAuth(provider);
+  if (!jwt?.trim()) {
+    console.error("OAuth succeeded but no Start Plan JWT in response. Try logging into ZCode desktop instead.");
+    process.exit(1);
+  }
+
+  const result = await onboardStartPlan({
+    provider,
+    jwt,
+    accessToken,
+    userId,
+    userInfo: user,
+    launchDesktop: !skipDesktop,
+  });
+
+  await saveCredential(result.credential);
+
+  console.log(`\nOnboard complete (${result.quotaReady ? "quota ready" : "quota pending"}).`);
+  console.log(`  User ID: ${result.credential.userId ?? "?"}`);
+  console.log(`  Proxy store: ${getStorePath()}`);
+  console.log("\nStart proxy: bun run src/index.ts");
+  if (!result.quotaReady) process.exit(1);
 }
 
 async function authImportJwt(args: string[]): Promise<void> {
@@ -221,7 +261,12 @@ async function authStatus(): Promise<void> {
   }
 }
 
-async function runOAuth(provider: ProviderId): Promise<{ accessToken: string; userId?: string; jwt?: string }> {
+async function runOAuth(provider: ProviderId): Promise<{
+  accessToken: string;
+  userId?: string;
+  jwt?: string;
+  user?: Record<string, unknown>;
+}> {
   if (provider === "bigmodel") {
     const oauth = new BigmodelOAuthClient();
     const result = await oauth.authorize((url) => {
@@ -243,7 +288,12 @@ async function runOAuth(provider: ProviderId): Promise<{ accessToken: string; us
   openBrowser(init.authorizeUrl);
 
   const result = await oauth.waitForAuth(init);
-  return { accessToken: result.accessToken, userId: result.userId, jwt: result.jwt };
+  return {
+    accessToken: result.accessToken,
+    userId: result.userId,
+    jwt: result.jwt,
+    user: result.user,
+  };
 }
 
 function importFromZCodeConfig(provider: ProviderId): Credential {
