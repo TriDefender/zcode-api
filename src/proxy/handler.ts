@@ -3,12 +3,21 @@
  * @see .omo/plans/zcode-proxy.md Task 6
  */
 import type { Format } from "../translator/types.js";
-import type { ProxyConfig } from "../config/types.js";
+import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
 import type { AuthManager } from "../auth/manager.js";
+import type { ProviderDef } from "../provider/types.js";
+import type { Credential } from "../auth/types.js";
 import { getProvider } from "../provider/providers.js";
 import { buildUpstreamRequest } from "./upstream.js";
 import { transformRequestBody } from "./body-transformer.js";
-import { detectCaptchaChallenge, solveCaptcha, RETRY_HEADERS } from "./captcha.js";
+import {
+  detectCaptchaChallenge,
+  getProactiveCaptchaHeaders,
+  invalidateJsdomCaptcha,
+  solveCaptcha,
+  RETRY_HEADERS,
+} from "./captcha.js";
+import { normalizeStartPlanBody } from "./start-plan-body.js";
 
 /** Options for the proxy handler. */
 export interface ProxyHandlerOptions {
@@ -65,8 +74,41 @@ export async function proxyRequest(
     return errorResponse(400, "unsupported_format", "start-plan only supports the Anthropic API format. Use POST /v1/messages instead of /v1/chat/completions.");
   }
 
-  const transformedBody = transformRequestBody(body, { format, userId: cred.userId });
-  let upstreamReq = buildUpstreamRequest(clientReq, format, provider, cred, transformedBody, config.identity, config.plan);
+  const transformedBody = transformRequestBody(body, {
+    format,
+    plan: config.plan,
+    userId: cred.userId,
+  });
+  const upstreamBody =
+    config.plan === "start-plan" ? normalizeStartPlanBody(transformedBody) : transformedBody;
+
+  let captchaHeaders: Record<string, string> = {};
+  if (config.plan === "start-plan") {
+    try {
+      captchaHeaders = await getProactiveCaptchaHeaders(config.identity.appVersion);
+      console.log(`${reqId} proactive captcha ready (${captchaHeaders[RETRY_HEADERS.PARAM]?.length ?? 0} chars)`);
+    } catch (err) {
+      printRow(reqId, format, meta, 503, started, Date.now(), 0, 0, 0);
+      return errorResponse(503, "captcha_solve_failed", (err as Error).message);
+    }
+  }
+
+  let upstreamReq: Request;
+  try {
+    upstreamReq = buildUpstreamRequest(
+      clientReq,
+      format,
+      provider,
+      cred,
+      upstreamBody,
+      config.identity,
+      config.plan,
+      captchaHeaders,
+    );
+  } catch (err) {
+    printRow(reqId, format, meta, 500, started, Date.now(), 0, 0, 0);
+    return errorResponse(500, "configuration_error", (err as Error).message);
+  }
 
   let upstreamResp: Response;
   try {
@@ -77,35 +119,34 @@ export async function proxyRequest(
   }
   const headersAt = Date.now();
 
-  if (upstreamResp.status === 401 && config.plan === "start-plan") {
-    printRow(reqId, format, meta, 401, started, headersAt, 0, 0, 0);
-    return errorResponse(401, "start_plan_jwt_invalid", "Start-plan JWT was rejected. Re-run: zcode-proxy auth login");
+  if (config.plan === "start-plan") {
+    const blocked = await readAccountBlock(upstreamResp);
+    if (blocked) {
+      printRow(reqId, format, meta, 405, started, headersAt, 0, 0, 0);
+      return errorResponse(405, "account_blocked", "Account blocked (3012). Use a fresh ZCode login; do not burst-test.");
+    }
+
+    const retried = await retryStartPlanIfNeeded({
+      fetchImpl,
+      clientReq,
+      format,
+      provider,
+      cred,
+      upstreamBody,
+      identity: config.identity,
+      reqId,
+      upstreamResp,
+    });
+    if (retried.error) {
+      printRow(reqId, format, meta, retried.error.status, started, Date.now(), 0, 0, 0);
+      return retried.error;
+    }
+    upstreamResp = retried.response;
   }
 
-  // start-plan captcha challenge: detect via response header, solve headlessly, retry once
-  if (config.plan === "start-plan") {
-    const challenge = detectCaptchaChallenge(upstreamResp);
-    if (challenge) {
-      try { upstreamResp.body?.cancel(); } catch {}
-      console.log(`${reqId} captcha challenge detected, solving headlessly...`);
-      const { verifyParam, region } = await solveCaptcha(challenge);
-      console.log(`${reqId} captcha solved (token ${verifyParam.length} chars), retrying...`);
-      upstreamReq = buildUpstreamRequest(clientReq, format, provider, cred, transformedBody, config.identity, config.plan, {
-        [RETRY_HEADERS.PARAM]: verifyParam,
-        [RETRY_HEADERS.REGION]: region,
-      });
-      try {
-        upstreamResp = await fetchImpl(upstreamReq, { decompress: false });
-      } catch (err) {
-        printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
-        return errorResponse(502, "upstream_unreachable", (err as Error).message);
-      }
-      if (detectCaptchaChallenge(upstreamResp)) {
-        try { upstreamResp.body?.cancel(); } catch {}
-        printRow(reqId, format, meta, 403, started, Date.now(), 0, 0, 0);
-        return errorResponse(403, "captcha_verification_failed", "Captcha was solved but upstream still rejected the token");
-      }
-    }
+  if (upstreamResp.status === 401 && config.plan === "start-plan") {
+    printRow(reqId, format, meta, 401, started, headersAt, 0, 0, 0);
+    return errorResponse(401, "start_plan_jwt_invalid", "Start-plan JWT rejected. Run: bun run src/index.ts auth import-jwt");
   }
 
   const isSSE = upstreamResp.headers.get("content-type")?.includes("text/event-stream") ?? false;
@@ -118,6 +159,118 @@ export async function proxyRequest(
 
   printRow(reqId, format, meta, upstreamResp.status, started, headersAt, 0, 0, 0);
   return passthroughResponse(upstreamResp);
+}
+
+async function retryStartPlanIfNeeded(opts: {
+  fetchImpl: typeof fetch;
+  clientReq: Request;
+  format: Format;
+  provider: ProviderDef;
+  cred: Credential;
+  upstreamBody: string | undefined;
+  identity: ProxyIdentity;
+  reqId: string;
+  upstreamResp: Response;
+}): Promise<{ response: Response; error?: Response }> {
+  const needsRetry =
+    detectCaptchaChallenge(opts.upstreamResp) !== null ||
+    (await isCaptchaFailure(opts.upstreamResp));
+
+  if (!needsRetry) {
+    return { response: opts.upstreamResp };
+  }
+
+  try {
+    opts.upstreamResp.body?.cancel();
+  } catch {}
+
+  console.log(`${opts.reqId} captcha rejected — re-solving traceless and retrying once...`);
+  invalidateJsdomCaptcha();
+
+  let captchaHeaders: Record<string, string>;
+  try {
+    captchaHeaders = await getProactiveCaptchaHeaders(opts.identity.appVersion);
+  } catch (err) {
+    return {
+      response: opts.upstreamResp,
+      error: errorResponse(503, "captcha_solve_failed", (err as Error).message),
+    };
+  }
+
+  const challenge = detectCaptchaChallenge(opts.upstreamResp);
+  if (challenge) {
+    try {
+      const { verifyParam, region } = await solveCaptcha(challenge, opts.identity.appVersion);
+      captchaHeaders = {
+        [RETRY_HEADERS.PARAM]: verifyParam,
+        [RETRY_HEADERS.REGION]: region,
+      };
+    } catch (err) {
+      return {
+        response: opts.upstreamResp,
+        error: errorResponse(503, "captcha_solve_failed", (err as Error).message),
+      };
+    }
+  }
+
+  const upstreamReq = buildUpstreamRequest(
+    opts.clientReq,
+    opts.format,
+    opts.provider,
+    opts.cred,
+    opts.upstreamBody,
+    opts.identity,
+    "start-plan",
+    captchaHeaders,
+  );
+
+  try {
+    const upstreamResp = await opts.fetchImpl(upstreamReq, { decompress: false });
+    if (await readAccountBlock(upstreamResp)) {
+      try {
+        upstreamResp.body?.cancel();
+      } catch {}
+      return {
+        response: upstreamResp,
+        error: errorResponse(405, "account_blocked", "Account blocked (3012). Use a fresh ZCode login."),
+      };
+    }
+    if (detectCaptchaChallenge(upstreamResp) || (await isCaptchaFailure(upstreamResp))) {
+      try {
+        upstreamResp.body?.cancel();
+      } catch {}
+      return {
+        response: upstreamResp,
+        error: errorResponse(
+          403,
+          "captcha_verification_failed",
+          "Captcha was solved but upstream still rejected the token",
+        ),
+      };
+    }
+    return { response: upstreamResp };
+  } catch (err) {
+    return {
+      response: opts.upstreamResp,
+      error: errorResponse(502, "upstream_unreachable", (err as Error).message),
+    };
+  }
+}
+
+/** 3012 = abuse block — never treat as captcha retry. */
+async function readAccountBlock(resp: Response): Promise<boolean> {
+  if (resp.status !== 405) return false;
+  const text = await resp.clone().text().catch(() => "");
+  return text.includes("3012");
+}
+
+/** Narrow captcha detection — avoid masking unrelated 403s (PR review #3). */
+async function isCaptchaFailure(resp: Response): Promise<boolean> {
+  if (detectCaptchaChallenge(resp)) return true;
+  const text = await resp.clone().text().catch(() => "");
+  const low = text.toLowerCase();
+  if (low.includes("3012")) return false;
+  return low.includes("3007") || (low.includes("captcha") && resp.status === 403);
 }
 
 /** Read the request body as a string, returning undefined for empty bodies. */

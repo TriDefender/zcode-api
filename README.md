@@ -64,6 +64,41 @@ If you already use the ZCode desktop app, import the API key directly:
 bun run src/index.ts auth login bigmodel --import
 ```
 
+### Option 4: ZCode Start Plan (free tier, JWT + captcha)
+
+Start Plan uses `zcode.z.ai` with OAuth JWT and Aliyun traceless captcha — not the paid `api.z.ai` key.
+
+```bash
+# After logging into the ZCode desktop app:
+bun run src/index.ts auth import-jwt
+
+# config.yaml:
+auth:
+  mode: oauth
+  proxyApiKey: "your-proxy-secret"
+plan: start-plan
+provider: zai
+
+identity:
+  appVersion: "3.1.2"   # match your ZCode app version
+
+# Start proxy (first request solves captcha via jsdom, ~5–40s)
+bun run src/index.ts
+```
+
+Requires Node.js for the captcha solver (`captcha_node/` — installed automatically on first use).
+
+```bash
+curl http://localhost:8080/v1/messages \
+  -H "x-api-key: your-proxy-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"glm-5.2","max_tokens":32,"messages":[{"role":"user","content":"say ok"}]}'
+```
+
+Re-run `auth import-jwt` after each ZCode re-login. **Test one message at a time** — burst captcha requests can trigger abuse block (3012).
+
+Fixes #2.
+
 ## Endpoints
 
 | Method | Path | Description |
@@ -129,7 +164,8 @@ curl http://localhost:8080/v1/models \
 | `auth.apiKey` | `ZCODE_API_KEY` | — | Upstream API key |
 | `auth.proxyApiKey` | `ZCODE_PROXY_API_KEY` | — | Client auth key |
 | `provider` | `ZCODE_PROVIDER` | `zai` | Upstream provider |
-| `identity.appVersion` | `ZCODE_APP_VERSION` | `3.1.1` | `User-Agent: ZCode/{version}` |
+| `identity.appVersion` | `ZCODE_APP_VERSION` | `3.1.2` | `User-Agent: ZCode/{version}` |
+| `plan` | — | `coding-plan` | `start-plan` for ZCode free tier (JWT + captcha) |
 | `identity.sourceTitle` | `ZCODE_SOURCE_TITLE` | `cli` | `X-Title: Z Code@{title}` |
 | `identity.refererOrigin` | `ZCODE_REFERER_ORIGIN` | `https://zcode.z.ai` | `HTTP-Referer` URL |
 

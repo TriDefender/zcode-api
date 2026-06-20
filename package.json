@@ -10,9 +10,6 @@
   "dependencies": {
     "yaml": "^2.5.0"
   },
-  "optionalDependencies": {
-    "playwright": "^1.61.0"
-  },
   "devDependencies": {
     "@types/bun": "latest"
   }

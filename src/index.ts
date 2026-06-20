@@ -9,6 +9,7 @@ import { startServer } from "./server/server.js";
 import { loadCredential, saveCredential, clearCredential, getStorePath } from "./auth/store.js";
 import { ZaiOAuthClient, BigmodelOAuthClient } from "./auth/oauth.js";
 import { KeyResolver } from "./auth/resolver.js";
+import { loadZcodeJwtFromDesktop, decodeJwtUserId } from "./auth/zcode-credentials.js";
 import type { Credential } from "./auth/types.js";
 import type { ProviderId } from "./provider/types.js";
 import { spawn } from "node:child_process";
@@ -45,9 +46,9 @@ function printHelp(): void {
 
 Usage:
   zcode-proxy serve [config.yaml]   Start the proxy server (default)
-  zcode-proxy auth login <provider> Login via OAuth (provider: zai | bigmodel)
-  zcode-proxy auth login <provider> --import
-                                    Import API key from ~/.zcode/v2/config.json
+  zcode-proxy auth login <provider> [--import]
+                                    OAuth login, or import API key from ~/.zcode/v2/config.json
+  zcode-proxy auth import-jwt [zai] Import Start Plan JWT from ~/.zcode/v2/credentials.json
   zcode-proxy auth logout           Clear stored credentials
   zcode-proxy auth status           Show current authentication state
   zcode-proxy version               Show version
@@ -55,9 +56,8 @@ Usage:
 
 Examples:
   zcode-proxy                       Start server with default config.yaml
-  zcode-proxy auth login bigmodel   OAuth login for Bigmodel
-  zcode-proxy auth login bigmodel --import
-                                    Import existing key from ZCode config
+  zcode-proxy auth login zai         OAuth login for Z.AI (captures start-plan JWT)
+  zcode-proxy auth import-jwt        Import JWT from ZCode desktop (start-plan)
   zcode-proxy auth status           Check if logged in
 `);
 }
@@ -70,6 +70,11 @@ async function serve(configPath?: string): Promise<void> {
     console.log(`Edit auth.apiKey, or run: zcode-proxy auth login <zai|bigmodel>\n`);
   }
   const config = loadConfig(path);
+
+  if (config.plan === "start-plan" && config.auth.mode !== "oauth") {
+    console.error("start-plan requires auth.mode: oauth (set plan: start-plan and auth.mode: oauth in config.yaml)");
+    process.exit(1);
+  }
 
   const auth = new AuthManager({
     mode: config.auth.mode,
@@ -84,6 +89,10 @@ async function serve(configPath?: string): Promise<void> {
       process.exit(1);
     }
     auth.setOAuthCredential(cred);
+    if (config.plan === "start-plan" && !cred.jwt?.trim()) {
+      console.error("start-plan requires a JWT. Run: bun run src/index.ts auth import-jwt");
+      process.exit(1);
+    }
   }
 
   const server = startServer({ config, auth });
@@ -110,14 +119,45 @@ function authCommand(args: string[]): void {
 
   if (sub === "login") {
     authLogin(args.slice(1));
+  } else if (sub === "import-jwt") {
+    authImportJwt(args.slice(1));
   } else if (sub === "logout") {
     authLogout();
   } else if (sub === "status") {
     authStatus();
   } else {
-    console.error("Usage: zcode-proxy auth <login|logout|status>");
+    console.error("Usage: zcode-proxy auth <login|import-jwt|logout|status>");
     process.exit(1);
   }
+}
+
+async function authImportJwt(args: string[]): Promise<void> {
+  const provider = (args[0] ?? "zai") as ProviderId;
+  if (provider !== "zai" && provider !== "bigmodel") {
+    console.error("Usage: zcode-proxy auth import-jwt [zai|bigmodel]");
+    process.exit(1);
+  }
+
+  const jwt = loadZcodeJwtFromDesktop();
+  if (!jwt) {
+    console.error("No JWT in ~/.zcode/v2/credentials.json.");
+    console.error("Log into the ZCode desktop app first, then retry.");
+    process.exit(1);
+  }
+
+  const cred: Credential = {
+    apiKey: "start-plan",
+    provider,
+    jwt,
+    userId: decodeJwtUserId(jwt),
+  };
+
+  await saveCredential(cred);
+  console.log(`\nImported start-plan JWT for ${provider}.`);
+  if (cred.userId) console.log(`  User ID: ${cred.userId}`);
+  console.log(`  JWT:     ${jwt.slice(0, 16)}...`);
+  console.log(`  Stored:  ${getStorePath()}`);
+  console.log("\nSet config.yaml: auth.mode: oauth, plan: start-plan, then run serve.");
 }
 
 async function authLogin(args: string[]): Promise<void> {
@@ -145,7 +185,10 @@ async function authLogin(args: string[]): Promise<void> {
 
   await saveCredential(cred);
   console.log(`\nLogged in as ${provider}.`);
-  console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);
+  if (cred.apiKey && cred.apiKey !== "start-plan") {
+    console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);
+  }
+  if (cred.jwt) console.log(`  Start-plan JWT: ${cred.jwt.slice(0, 16)}...`);
   if (cred.userId) console.log(`  User ID: ${cred.userId}`);
   console.log(`  Stored:  ${getStorePath()}`);
 }
@@ -167,8 +210,15 @@ async function authStatus(): Promise<void> {
     return;
   }
   console.log(`Logged in: ${cred.provider}`);
-  console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);
+  if (cred.userId) console.log(`  User ID: ${cred.userId}`);
+  if (cred.apiKey && cred.apiKey !== "start-plan") {
+    console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);
+  }
+  if (cred.jwt) console.log(`  Start-plan JWT: ${cred.jwt.slice(0, 16)}...`);
   console.log(`  Store:   ${getStorePath()}`);
+  if (!cred.jwt) {
+    console.log("\n  For start-plan: bun run src/index.ts auth import-jwt");
+  }
 }
 
 async function runOAuth(provider: ProviderId): Promise<{ accessToken: string; userId?: string; jwt?: string }> {
@@ -221,7 +271,8 @@ function importFromZCodeConfig(provider: ProviderId): Credential {
   }
 
   const startPlanKey = `builtin:${provider}-start-plan`;
-  const jwt = config.provider?.[startPlanKey]?.options?.apiKey?.trim() || undefined;
+  let jwt = config.provider?.[startPlanKey]?.options?.apiKey?.trim() || undefined;
+  if (!jwt) jwt = loadZcodeJwtFromDesktop() ?? undefined;
 
   console.log(`Imported from ${configPath}`);
   if (jwt) console.log(`  Start-plan JWT: ${jwt.slice(0, 12)}...`);

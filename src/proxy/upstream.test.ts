@@ -46,6 +46,12 @@ describe("buildUpstreamURL", () => {
     );
   });
 
+  it("builds start-plan URL on zcode.z.ai", () => {
+    expect(buildUpstreamURL("anthropic", ZAI_PROVIDER, "start-plan")).toBe(
+      "https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages",
+    );
+  });
+
   it("builds OpenAI URL for Bigmodel", () => {
     expect(buildUpstreamURL("openai", BIGMODEL_PROVIDER)).toBe(
       "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions",
@@ -99,6 +105,19 @@ describe("buildAuthHeaders", () => {
     expect(h1["x-request-id"]).not.toBe(h2["x-request-id"]);
     expect(h1["x-zcode-trace-id"]).not.toBe(h2["x-zcode-trace-id"]);
     expect(h1["x-query-id"]).not.toBe(h2["x-query-id"]);
+  });
+
+  it("uses Bearer JWT for start-plan (no x-api-key, no anthropic-version)", () => {
+    const cred: Credential = { apiKey: "unused", provider: "zai", jwt: "eyJ.test.jwt" };
+    const h = buildAuthHeaders("anthropic", cred, IDENTITY, "start-plan");
+    expect(h.authorization).toBe("Bearer eyJ.test.jwt");
+    expect(h["x-api-key"]).toBeUndefined();
+    expect(h["anthropic-version"]).toBeUndefined();
+  });
+
+  it("throws when start-plan has no JWT", () => {
+    const cred: Credential = { apiKey: "k", provider: "zai" };
+    expect(() => buildAuthHeaders("anthropic", cred, IDENTITY, "start-plan")).toThrow(/JWT/);
   });
 });
 

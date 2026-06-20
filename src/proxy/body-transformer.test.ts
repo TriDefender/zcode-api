@@ -221,3 +221,26 @@ describe("transformRequestBody — metadata.user_id (Anthropic)", () => {
     expect(parsed.metadata).toBeUndefined();
   });
 });
+
+describe("transformRequestBody — start-plan system blocks", () => {
+  it("injects official ZCode gateway blocks for start-plan anthropic requests", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const out = transformRequestBody(body, { format: "anthropic", plan: "start-plan" });
+    const parsed = JSON.parse(out as string);
+    expect(Array.isArray(parsed.system)).toBe(true);
+    expect(parsed.system.length).toBeGreaterThanOrEqual(2);
+    expect(parsed.system[0].text).toContain("ZCode");
+  });
+
+  it("does NOT inject system blocks for coding-plan", () => {
+    const body = JSON.stringify({
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const out = transformRequestBody(body, { format: "anthropic", plan: "coding-plan" });
+    const parsed = JSON.parse(out as string);
+    expect(parsed.system).toBeUndefined();
+  });
+});

@@ -41,7 +41,6 @@ export function buildUpstreamURL(format: Format, provider: ProviderDef, plan: "c
 }
 
 export function buildAuthHeaders(format: Format, cred: Credential, identity: ProxyIdentity, plan: "coding-plan" | "start-plan" = "coding-plan"): Record<string, string> {
-  const credStr = plan === "start-plan" && cred.jwt ? cred.jwt : credentialString(cred);
   const base: Record<string, string> = {
     ...buildIdentityHeaders(identity),
     "x-request-id": crypto.randomUUID(),
@@ -50,11 +49,22 @@ export function buildAuthHeaders(format: Format, cred: Credential, identity: Pro
     "x-session-id": crypto.randomUUID(),
   };
 
+  // Start Plan: JWT as Bearer on zcode-plan — no anthropic-version (matches ZCode rollout).
+  if (plan === "start-plan") {
+    const jwt = cred.jwt?.trim();
+    if (!jwt) {
+      throw new Error("start-plan requires OAuth JWT — run: bun run src/index.ts auth login zai");
+    }
+    base.authorization = `Bearer ${jwt}`;
+    return base;
+  }
+
+  const credStr = credentialString(cred);
   if (format === "anthropic") {
     base["x-api-key"] = credStr;
     base["anthropic-version"] = ANTHROPIC_VERSION;
   } else {
-    base["authorization"] = `Bearer ${credStr}`;
+    base.authorization = `Bearer ${credStr}`;
   }
 
   return base;

@@ -3,11 +3,11 @@ server:
   host: "0.0.0.0"
 
 auth:
-  # "apikey" = use a pre-obtained API key directly
-  # "oauth"  = use OAuth login flow (run `bun run src/cli/login.ts` first)
+  # "apikey" = use a pre-obtained API key directly (coding-plan)
+  # "oauth"  = use OAuth or import-jwt (required for start-plan)
   mode: apikey
 
-  # For apikey mode:
+  # For apikey mode (coding-plan):
   #   Z.AI:     "yourApiKey.yourSecretKey"
   #   Bigmodel: "yourApiKey"
   apiKey: "YOUR_API_KEY_HERE"
@@ -16,15 +16,12 @@ auth:
   # Set to null/omit to disable client auth.
   proxyApiKey: "your-proxy-secret"
 
-  # For oauth mode (path to stored credentials from login flow):
-  # oauthCredentialsPath: "~/.zcode-proxy/credentials.json"
-
 # Which upstream provider to use: "zai" or "bigmodel"
 provider: zai
 
 # Which plan tier to use:
-#   "coding-plan" (default) — direct upstream endpoints, permanent API key
-#   "start-plan"            — routes through zcode.z.ai with JWT auth (requires `auth login`)
+#   "coding-plan" (default) — api.z.ai with API key, no captcha
+#   "start-plan"            — zcode.z.ai with JWT + Aliyun captcha (see README)
 plan: coding-plan
 
 providers:
@@ -48,17 +45,10 @@ models:
   - glm-5.1
   - glm-5.2
 
-# Identity headers injected on every upstream request to mimic the ZCode
-# desktop client (User-Agent, X-ZCode-App-Version, X-Title, X-ZCode-Agent,
-# HTTP-Referer). All optional; env vars override YAML, which overrides defaults.
 identity:
-  # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
-  # Must be printable ASCII; non-conforming values fall back to the default.
-  # Default: "3.1.1" (current ZCode release). Override to match your real client.
-  appVersion: "3.1.1"
-  # X-Title suffix → "Z Code@{sourceTitle}". Default "cli".
+  # Must match your ZCode desktop app version for start-plan.
+  appVersion: "3.1.2"
   sourceTitle: "cli"
-  # HTTP-Referer URL. Default "https://zcode.z.ai".
   refererOrigin: "https://zcode.z.ai"
 
 logging:
