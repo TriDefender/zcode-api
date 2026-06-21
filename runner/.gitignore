@@ -1,0 +1,5 @@
+profiles/
+results/
+state/
+.env
+explore-chrome-profile/

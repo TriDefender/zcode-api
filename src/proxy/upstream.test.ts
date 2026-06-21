@@ -183,6 +183,7 @@ describe("proxyRequest", () => {
     models: ["glm-4.6"],
     identity: IDENTITY,
     logging: { level: "info" },
+    pool: { enabled: false, maxAccountAttempts: 5 },
   };
 
   it("forwards request to upstream with injected auth", async () => {

@@ -101,6 +101,7 @@ export function loadConfig(path: string): ProxyConfig {
     models,
     identity,
     logging: { level: logLevel },
+    pool: resolvePool(parsed.pool),
   };
 
   validate(config);
@@ -129,6 +130,28 @@ function resolveProvider(raw: unknown): "zai" | "bigmodel" {
 function resolvePlan(raw: unknown): "coding-plan" | "start-plan" {
   if (raw === "start-plan") return "start-plan";
   return DEFAULTS.PLAN;
+}
+
+function resolvePool(raw: unknown): ProxyConfig["pool"] {
+  if (!raw || typeof raw !== "object") {
+    return { enabled: true, maxAccountAttempts: 5, quotaRefreshIntervalSec: 300, quotaFetchDelaySec: 5 };
+  }
+  const p = raw as Record<string, unknown>;
+  return {
+    enabled: p.enabled !== false,
+    maxAccountAttempts:
+      typeof p.maxAccountAttempts === "number" && p.maxAccountAttempts > 0
+        ? p.maxAccountAttempts
+        : 5,
+    quotaRefreshIntervalSec:
+      typeof p.quotaRefreshIntervalSec === "number" && p.quotaRefreshIntervalSec > 0
+        ? p.quotaRefreshIntervalSec
+        : 300,
+    quotaFetchDelaySec:
+      typeof p.quotaFetchDelaySec === "number" && p.quotaFetchDelaySec >= 0
+        ? p.quotaFetchDelaySec
+        : 5,
+  };
 }
 
 /** Resolve log level with fallback. */

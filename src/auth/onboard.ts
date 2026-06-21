@@ -20,6 +20,8 @@ export interface OnboardOptions {
   /** Launch ZCode GUI to trigger bucket allocation (default true). */
   launchDesktop?: boolean;
   quotaTimeoutMs?: number;
+  /** Delay between billing polls while waiting for buckets (default 5s). */
+  quotaPollIntervalMs?: number;
 }
 
 export interface OnboardResult {
@@ -54,6 +56,7 @@ export async function onboardStartPlan(opts: OnboardOptions): Promise<OnboardRes
   console.log("Waiting for billing balance buckets...");
   const balance = await waitForQuotaBuckets(opts.jwt, {
     timeoutMs: opts.quotaTimeoutMs ?? 120_000,
+    intervalMs: opts.quotaPollIntervalMs ?? 5_000,
   });
 
   if (opts.launchDesktop !== false) {

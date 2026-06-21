@@ -51,5 +51,11 @@ identity:
   sourceTitle: "cli"
   refererOrigin: "https://zcode.z.ai"
 
+pool:
+  enabled: true
+  maxAccountAttempts: 5
+  quotaRefreshIntervalSec: 300
+  quotaFetchDelaySec: 5
+
 logging:
   level: info

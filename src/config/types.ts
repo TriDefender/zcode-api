@@ -72,4 +72,15 @@ export interface ProxyConfig {
   logging: {
     level: "debug" | "info" | "warn" | "error";
   };
+  /** Start-plan multi-account pool (optional). */
+  pool?: {
+    /** Enable JWT account rotation for start-plan (default: true when accounts exist). */
+    enabled?: boolean;
+    /** Max accounts to try per client request (default 5). */
+    maxAccountAttempts?: number;
+    /** How often to run a full staggered billing refresh cycle (seconds, default 300). */
+    quotaRefreshIntervalSec?: number;
+    /** Delay between each account billing API call within a cycle (seconds, default 5). */
+    quotaFetchDelaySec?: number;
+  };
 }

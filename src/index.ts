@@ -11,6 +11,11 @@ import { ZaiOAuthClient, BigmodelOAuthClient } from "./auth/oauth.js";
 import { KeyResolver } from "./auth/resolver.js";
 import { loadZcodeJwtFromDesktop, decodeJwtUserId } from "./auth/zcode-credentials.js";
 import { onboardStartPlan } from "./auth/onboard.js";
+import { AccountPool } from "./auth/account-pool.js";
+import { OnboardJobManager } from "./auth/onboard-jobs.js";
+import { RequestLogStore } from "./server/request-logs.js";
+import { QuotaCache } from "./auth/quota-cache.js";
+import { getProactiveCaptchaHeaders } from "./proxy/captcha.js";
 import type { Credential } from "./auth/types.js";
 import type { ProviderId } from "./provider/types.js";
 import { spawn } from "node:child_process";
@@ -50,11 +55,17 @@ Usage:
   zcode-proxy auth login <provider> [--import]
                                     OAuth login, or import API key from ~/.zcode/v2/config.json
   zcode-proxy auth import-jwt [zai] Import Start Plan JWT from ~/.zcode/v2/credentials.json
-  zcode-proxy auth onboard <zai>      OAuth login + sync desktop + provision quota
+  zcode-proxy auth onboard <zai>      OAuth + sync desktop + provision quota (adds to pool)
+  zcode-proxy auth accounts           List account pool
+  zcode-proxy auth add [name]         Add JWT to pool (desktop or --jwt)
+  zcode-proxy auth remove <id>        Remove account from pool
   zcode-proxy auth logout           Clear stored credentials
   zcode-proxy auth status           Show current authentication state
   zcode-proxy version               Show version
   zcode-proxy help                  Show this help
+
+Web dashboard (recommended): open http://localhost:8080/app after starting the server.
+Manage accounts, OAuth onboard, and test requests from the browser.
 
 Examples:
   zcode-proxy                       Start server with default config.yaml
@@ -79,6 +90,22 @@ async function serve(configPath?: string): Promise<void> {
     process.exit(1);
   }
 
+  const accountPool = new AccountPool();
+  await accountPool.migrateFromLegacyCredential();
+
+  if (accountPool.size() === 0 && config.plan === "start-plan") {
+    const desktopJwt = loadZcodeJwtFromDesktop();
+    if (desktopJwt) {
+      accountPool.addFromCredential({
+        apiKey: "start-plan",
+        provider: config.provider,
+        jwt: desktopJwt,
+        userId: decodeJwtUserId(desktopJwt),
+      });
+      console.log("Auto-imported Start Plan JWT from ZCode desktop");
+    }
+  }
+
   const auth = new AuthManager({
     mode: config.auth.mode,
     provider: config.provider,
@@ -86,32 +113,66 @@ async function serve(configPath?: string): Promise<void> {
   });
 
   if (config.auth.mode === "oauth") {
-    const cred = await loadCredential();
-    if (!cred) {
-      console.error("Not logged in. Run: zcode-proxy auth login " + config.provider);
-      process.exit(1);
-    }
-    auth.setOAuthCredential(cred);
-    if (config.plan === "start-plan" && !cred.jwt?.trim()) {
-      console.error("start-plan requires a JWT. Run: bun run src/index.ts auth import-jwt");
-      process.exit(1);
+    if (config.plan === "start-plan") {
+      if (accountPool.activeCount() === 0) {
+        const cred = await loadCredential();
+        if (cred?.jwt) {
+          accountPool.addFromCredential(cred);
+        }
+      }
+      const cred = await loadCredential();
+      if (cred) auth.setOAuthCredential(cred);
+    } else {
+      const cred = await loadCredential();
+      if (!cred) {
+        console.error("Not logged in. Run: zcode-proxy auth login " + config.provider);
+        process.exit(1);
+      }
+      auth.setOAuthCredential(cred);
     }
   }
 
-  const server = startServer({ config, auth });
+  const onboardJobs = new OnboardJobManager();
+  const requestLogs = new RequestLogStore();
+
+  let quotaCache: QuotaCache | undefined;
+  if (config.plan === "start-plan" && config.pool?.enabled !== false) {
+    const cycleSec = config.pool?.quotaRefreshIntervalSec ?? 300;
+    const delaySec = config.pool?.quotaFetchDelaySec ?? 5;
+    quotaCache = new QuotaCache(accountPool, cycleSec, delaySec);
+    quotaCache.start();
+  }
+
+  const server = startServer({ config, auth, accountPool, onboardJobs, requestLogs, quotaCache });
   const url = `http://${server.hostname}:${server.port}`;
   console.log(`zcode-proxy listening on ${url}`);
+  console.log(`  dashboard: ${url}/app`);
   console.log(`  provider: ${config.provider}`);
   console.log(`  plan: ${config.plan}`);
   console.log(`  auth mode: ${config.auth.mode}`);
   console.log(`  models: ${config.models.length} available`);
+  if (config.plan === "start-plan") {
+    const n = accountPool.activeCount();
+    const cycleSec = config.pool?.quotaRefreshIntervalSec ?? 300;
+    const delaySec = config.pool?.quotaFetchDelaySec ?? 5;
+    console.log(`  account pool: ${n}/${accountPool.size()} active`);
+    console.log(`  quota cache: cycle ${cycleSec}s, ${delaySec}s between Z.AI billing calls`);
+    if (n === 0) {
+      console.log(`  → add accounts at ${url}/app`);
+    }
+    void getProactiveCaptchaHeaders(config.identity.appVersion)
+      .then(() => console.log("  captcha: pre-warmed"))
+      .catch((err) => console.warn("  captcha pre-warm failed:", (err as Error).message));
+  }
 
   process.on("SIGINT", () => {
     console.log("\nShutting down...");
+    quotaCache?.stop();
     server.stop(true);
     process.exit(0);
   });
   process.on("SIGTERM", () => {
+    quotaCache?.stop();
     server.stop(true);
     process.exit(0);
   });
@@ -126,12 +187,18 @@ function authCommand(args: string[]): void {
     authImportJwt(args.slice(1));
   } else if (sub === "onboard") {
     authOnboard(args.slice(1));
+  } else if (sub === "accounts") {
+    authAccounts();
+  } else if (sub === "add") {
+    authAdd(args.slice(1));
+  } else if (sub === "remove") {
+    authRemove(args.slice(1));
   } else if (sub === "logout") {
     authLogout();
   } else if (sub === "status") {
     authStatus();
   } else {
-    console.error("Usage: zcode-proxy auth <login|import-jwt|onboard|logout|status>");
+    console.error("Usage: zcode-proxy auth <login|import-jwt|onboard|accounts|add|remove|logout|status>");
     process.exit(1);
   }
 }
@@ -163,10 +230,13 @@ async function authOnboard(args: string[]): Promise<void> {
   });
 
   await saveCredential(result.credential);
+  const pool = new AccountPool();
+  const poolId = pool.addFromCredential(result.credential);
 
   console.log(`\nOnboard complete (${result.quotaReady ? "quota ready" : "quota pending"}).`);
   console.log(`  User ID: ${result.credential.userId ?? "?"}`);
-  console.log(`  Proxy store: ${getStorePath()}`);
+  console.log(`  Pool id: ${poolId}`);
+  console.log(`  Pool:    ${getAccountsStorePath()}`);
   console.log("\nStart proxy: bun run src/index.ts");
   if (!result.quotaReady) process.exit(1);
 }
@@ -193,11 +263,13 @@ async function authImportJwt(args: string[]): Promise<void> {
   };
 
   await saveCredential(cred);
+  const pool = new AccountPool();
+  const poolId = pool.addFromCredential(cred);
+
   console.log(`\nImported start-plan JWT for ${provider}.`);
   if (cred.userId) console.log(`  User ID: ${cred.userId}`);
+  console.log(`  Pool id: ${poolId}`);
   console.log(`  JWT:     ${jwt.slice(0, 16)}...`);
-  console.log(`  Stored:  ${getStorePath()}`);
-  console.log("\nSet config.yaml: auth.mode: oauth, plan: start-plan, then run serve.");
 }
 
 async function authLogin(args: string[]): Promise<void> {
@@ -234,15 +306,72 @@ async function authLogin(args: string[]): Promise<void> {
 }
 
 function authLogout(): void {
+  const pool = new AccountPool();
+  pool.clear();
   if (!existsSync(getStorePath())) {
     console.log("Not logged in.");
     return;
   }
   clearCredential();
-  console.log("Logged out. Credentials removed.");
+  console.log("Logged out. Credentials and account pool cleared.");
+}
+
+function authAccounts(): void {
+  const pool = new AccountPool();
+  const accounts = pool.listPublic();
+  if (accounts.length === 0) {
+    console.log("Account pool is empty.");
+    console.log("Run: bun run src/index.ts auth onboard zai");
+    return;
+  }
+  console.log(`Account pool (${pool.activeCount()} active / ${accounts.length} total)\n`);
+  console.log("ID       | Status    | Name                 | User ID                              | Uses");
+  console.log("---------|-----------|----------------------|--------------------------------------|-----");
+  for (const a of accounts) {
+    console.log(
+      `${a.id.padEnd(8)} | ${a.status.padEnd(9)} | ${a.name.slice(0, 20).padEnd(20)} | ${(a.userId ?? "-").padEnd(36)} | ${a.usageCount}`,
+    );
+  }
+  console.log(`\nStore: ${getAccountsStorePath()}`);
+}
+
+async function authAdd(args: string[]): Promise<void> {
+  const jwtFlag = args.findIndex((a) => a === "--jwt");
+  const jwt =
+    jwtFlag >= 0 && args[jwtFlag + 1]
+      ? args[jwtFlag + 1]!.trim()
+      : loadZcodeJwtFromDesktop();
+  if (!jwt) {
+    console.error("No JWT. Use --jwt <token> or log into ZCode desktop first.");
+    process.exit(1);
+  }
+  const pool = new AccountPool();
+  const id = pool.addFromCredential(
+    { apiKey: "start-plan", provider: "zai", jwt, userId: decodeJwtUserId(jwt) },
+  );
+  console.log(`Added to pool: ${decodeJwtUserId(jwt) ?? id} (${id})`);
+}
+
+function authRemove(args: string[]): void {
+  const id = args[0];
+  if (!id) {
+    console.error("Usage: zcode-proxy auth remove <account-id>");
+    process.exit(1);
+  }
+  const pool = new AccountPool();
+  if (!pool.remove(id)) {
+    console.error(`Account not found: ${id}`);
+    process.exit(1);
+  }
+  console.log(`Removed account ${id}`);
 }
 
 async function authStatus(): Promise<void> {
+  const pool = new AccountPool();
+  if (pool.size() > 0) {
+    authAccounts();
+    return;
+  }
   const cred = await loadCredential();
   if (!cred) {
     console.log("Not logged in.");

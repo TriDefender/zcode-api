@@ -22,6 +22,7 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
     defaultModel: "glm-4.6",
     models: ["glm-4.6"],
     identity: { appVersion: "test-1.0.0", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai" },
+    pool: { enabled: false, maxAccountAttempts: 5 },
     logging: { level: "info" },
     ...overrides,
   };
@@ -104,6 +105,18 @@ describe("server routing", () => {
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.status).toBe("ok");
+  });
+
+  it("GET /app returns dashboard HTML", async () => {
+    const config = makeConfig();
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const handler = createFetchHandler({ config, auth });
+
+    const resp = await handler(new Request("http://localhost/app"));
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get("content-type")).toContain("text/html");
+    const html = await resp.text();
+    expect(html).toContain("ZCode Proxy");
   });
 
   it("unknown route returns 404", async () => {
@@ -195,5 +208,64 @@ describe("route handler exports", () => {
 
   it("handleMessages is a function", () => {
     expect(typeof handleMessages).toBe("function");
+  });
+});
+
+describe("responses and model metadata routes", () => {
+  it("GET /v1/models/glm-5.2 returns model", async () => {
+    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test" } });
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
+
+    const resp = await handler(new Request("http://localhost/v1/models/glm-5.2"));
+    expect(resp.status).toBe(200);
+    const body = await resp.json() as { id: string };
+    expect(body.id).toBe("glm-5.2");
+  });
+
+  it("GET /v1/models/glm-5.2/info returns Codex metadata", async () => {
+    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test" } });
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
+
+    const resp = await handler(new Request("http://localhost/v1/models/glm-5.2/info"));
+    expect(resp.status).toBe(200);
+    const body = await resp.json() as { id: string; supportedReasoningEfforts: unknown[] };
+    expect(body.id).toBe("glm-5.2");
+    expect(body.supportedReasoningEfforts.length).toBe(5);
+  });
+
+  it("POST /responses is routed (not 404)", async () => {
+    const config = makeConfig({
+      auth: { mode: "apikey", apiKey: "test" },
+      plan: "start-plan",
+      pool: { enabled: false, maxAccountAttempts: 5 },
+    });
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const handler = createFetchHandler({
+      config,
+      auth,
+      fetchImpl: async (req: Request) => {
+        if (req.url.includes("/v1/messages")) {
+          const sse = [
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":1}}}\n\n",
+            "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n",
+            "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+          ].join("");
+          return new Response(sse, {
+            status: 200,
+            headers: { "content-type": "text/event-stream" },
+          });
+        }
+        return new Response("{}", { status: 404 });
+      },
+    });
+
+    const resp = await handler(new Request("http://localhost/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "glm-5.2", input: "hello" }),
+    }));
+    expect(resp.status).not.toBe(404);
   });
 });

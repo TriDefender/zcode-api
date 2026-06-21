@@ -9,3 +9,6 @@ dist/
 /.omo
 /_reverse
 /zcode-proxy.exe
+runner/__pycache__/*
+runner/explore
+runner/lib/__pycache__

@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ZCode Proxy</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #070a0f;
+      --surface: #0e131b;
+      --surface-2: #141b26;
+      --border: #1f2a3d;
+      --text: #e6edf7;
+      --muted: #7d8da8;
+      --accent: #4ade9a;
+      --accent-dim: #1a4d38;
+      --warn: #f5c451;
+      --danger: #f87171;
+      --bar-bg: #1a2333;
+      --font: "DM Sans", system-ui, sans-serif;
+      --mono: "IBM Plex Mono", ui-monospace, monospace;
+      --radius: 12px;
+    }
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); }
+    body { background: radial-gradient(ellipse 70% 45% at 50% -10%, rgba(74,222,154,0.07), transparent), var(--bg); }
+    .shell { max-width: 960px; margin: 0 auto; padding: 1.5rem 1.1rem 3rem; }
+    .top { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    .top-actions { display: flex; align-items: center; gap: 0.65rem; flex-wrap: wrap; }
+    .cache-timer { font-size: 0.72rem; color: var(--muted); font-family: var(--mono); white-space: nowrap; }
+    .cache-timer.refreshing { color: var(--accent); }
+    .brand h1 { margin: 0; font-size: 1.2rem; font-weight: 600; letter-spacing: -0.02em; }
+    .brand p { margin: 0.1rem 0 0; color: var(--muted); font-size: 0.82rem; }
+    nav { display: flex; gap: 0.35rem; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 0.25rem; }
+    nav a {
+      text-decoration: none; color: var(--muted); font-size: 0.85rem; font-weight: 500;
+      padding: 0.45rem 0.9rem; border-radius: 999px; transition: 0.15s;
+    }
+    nav a.active { background: var(--surface-2); color: var(--text); }
+    nav a:hover:not(.active) { color: var(--text); }
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 1.15rem 1.2rem; margin-bottom: 1rem;
+    }
+    .card h2 {
+      margin: 0 0 1rem; font-size: 0.7rem; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted);
+    }
+    .hero-signin {
+      text-align: center; padding: 2rem 1rem;
+    }
+    .hero-signin p { color: var(--muted); margin: 0 0 1.25rem; font-size: 0.95rem; max-width: 36ch; margin-inline: auto; }
+    button {
+      appearance: none; border: none; cursor: pointer; font-family: var(--font);
+      font-size: 0.92rem; font-weight: 600; padding: 0.7rem 1.4rem; border-radius: 10px;
+      transition: transform 0.1s, filter 0.15s;
+    }
+    button:active { transform: scale(0.98); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .btn-zai {
+      background: linear-gradient(135deg, #2d6b52, var(--accent));
+      color: #04140d; box-shadow: 0 4px 24px rgba(74,222,154,0.2);
+    }
+    .btn-zai:hover:not(:disabled) { filter: brightness(1.05); }
+    .btn-zai.btn-sm { font-size: 0.82rem; padding: 0.5rem 0.9rem; }
+    .btn-ghost { background: var(--surface-2); color: var(--text); border: 1px solid var(--border); font-weight: 500; font-size: 0.8rem; padding: 0.4rem 0.75rem; }
+    .btn-danger { background: transparent; color: var(--danger); border: 1px solid rgba(248,113,113,0.35); font-size: 0.8rem; padding: 0.4rem 0.75rem; font-weight: 500; }
+    .account-block { border-top: 1px solid var(--border); padding-top: 1rem; margin-top: 1rem; }
+    .account-block:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+    .account-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.75rem; margin-bottom: 0.85rem; flex-wrap: wrap; }
+    .account-head .uid { font-family: var(--mono); font-size: 0.78rem; color: var(--muted); word-break: break-all; }
+    .badge {
+      display: inline-block; padding: 0.18rem 0.45rem; border-radius: 5px;
+      font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .badge-active { background: rgba(74,222,154,0.12); color: var(--accent); }
+    .badge-exhausted { background: rgba(245,196,81,0.12); color: var(--warn); }
+    .badge-blocked, .badge-disabled { background: rgba(125,141,168,0.12); color: var(--muted); }
+    .quota-row { margin-bottom: 0.9rem; }
+    .quota-row:last-child { margin-bottom: 0; }
+    .quota-label { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.35rem; font-size: 0.88rem; }
+    .quota-label span:last-child { font-family: var(--mono); font-size: 0.75rem; color: var(--muted); }
+    .bar { height: 8px; background: var(--bar-bg); border-radius: 999px; overflow: hidden; }
+    .bar-fill {
+      height: 100%; border-radius: 999px;
+      background: linear-gradient(90deg, var(--accent-dim), var(--accent));
+      transition: width 0.4s ease;
+    }
+    .bar-fill.low { background: linear-gradient(90deg, #6b4a1a, var(--warn)); }
+    .bar-fill.empty { background: var(--danger); width: 0 !important; }
+    .reset { font-size: 0.75rem; color: var(--muted); margin-top: 0.25rem; }
+    .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.65rem; margin-bottom: 1rem; }
+    @media (max-width: 640px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+    .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 0.75rem 0.85rem; }
+    .stat b { display: block; font-size: 1.35rem; font-weight: 600; letter-spacing: -0.03em; }
+    .stat small { color: var(--muted); font-size: 0.72rem; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+    th {
+      text-align: left; padding: 0.5rem 0.4rem; color: var(--muted);
+      font-weight: 500; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.06em;
+      border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface);
+    }
+    td { padding: 0.55rem 0.4rem; border-bottom: 1px solid rgba(31,42,61,0.7); vertical-align: middle; }
+    .mono { font-family: var(--mono); font-size: 0.75rem; }
+    .ok { color: var(--accent); }
+    .err { color: var(--danger); }
+    .log-wrap { max-height: 62vh; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(4,8,14,0.8);
+      display: none; align-items: center; justify-content: center; z-index: 100; padding: 1rem;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal {
+      width: min(400px, 100%); background: var(--surface);
+      border: 1px solid var(--border); border-radius: 14px; padding: 1.4rem;
+    }
+    .modal h3 { margin: 0 0 0.5rem; }
+    .modal p { margin: 0 0 1rem; color: var(--muted); font-size: 0.88rem; line-height: 1.5; }
+    .steps { margin: 1rem 0; }
+    .step { display: flex; gap: 0.65rem; padding: 0.5rem 0; font-size: 0.85rem; color: var(--muted); }
+    .step.active { color: var(--text); }
+    .step.done { color: var(--accent); }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); margin-top: 0.35rem; flex-shrink: 0; }
+    .step.active .dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+    .step.done .dot { background: var(--accent); }
+    input {
+      width: 100%; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 8px; padding: 0.65rem; color: var(--text); margin-bottom: 0.75rem;
+    }
+    .toast {
+      position: fixed; bottom: 1rem; right: 1rem; z-index: 200;
+      background: var(--surface-2); border: 1px solid var(--border);
+      padding: 0.7rem 1rem; border-radius: 8px; font-size: 0.85rem;
+      transform: translateY(120%); opacity: 0; transition: 0.25s;
+    }
+    .toast.show { transform: translateY(0); opacity: 1; }
+    .toast.error { border-color: rgba(248,113,113,0.5); color: var(--danger); }
+    .hidden { display: none !important; }
+    .page { display: none; }
+    .page.active { display: block; }
+    .quota-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.85rem; }
+    .quota-summary { font-size: 0.88rem; color: var(--muted); }
+    .quota-summary strong { color: var(--text); font-weight: 600; }
+    .btn-link {
+      background: none; border: none; color: var(--accent); font-size: 0.82rem; font-weight: 500;
+      padding: 0.35rem 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+    }
+    .btn-link:hover { filter: brightness(1.1); }
+  </style>
+</head>
+<body>
+  <div id="app" class="shell">
+    <div class="top">
+      <div class="brand">
+        <h1>ZCode Proxy</h1>
+        <p id="header-sub">—</p>
+      </div>
+      <div class="top-actions">
+        <span id="cache-timer" class="cache-timer hidden" title="Server-side Z.AI billing refresh schedule"></span>
+        <button class="btn-zai btn-sm hidden" id="btn-add-account" type="button">Add account — Sign in with Z.AI</button>
+        <nav>
+          <a href="#/" id="nav-quota" class="active">Quota</a>
+          <a href="#/logs" id="nav-logs">Logs</a>
+        </nav>
+      </div>
+    </div>
+
+    <div id="page-quota" class="page active">
+      <div class="card" id="signin-card">
+        <div class="hero-signin">
+          <p>Sign in with Z.AI to add your Start Plan quota. Provisioning runs automatically on this machine.</p>
+          <button class="btn-zai" id="btn-signin-empty" type="button">Sign in with Z.AI</button>
+        </div>
+      </div>
+      <div class="card hidden" id="quota-card">
+        <h2>Quota</h2>
+        <div class="quota-toolbar">
+          <p class="quota-summary" id="quota-summary">—</p>
+          <button type="button" class="btn-link" id="btn-show-accounts">Show all accounts</button>
+        </div>
+        <div id="quota-list"></div>
+      </div>
+    </div>
+
+    <div id="page-logs" class="page">
+      <div class="stats" id="log-stats"></div>
+      <div class="card">
+        <h2>Request log</h2>
+        <p class="quota-summary" style="margin:0 0 1rem;color:var(--muted);font-size:0.9rem;line-height:1.45">
+          Prompt caching: the proxy marks the last message block with <code>cache_control: ephemeral</code> (same as ZCode).
+          Repeat requests with the same prefix bill fewer input tokens — <strong>cached</strong> shows how many were read from cache.
+        </p>
+        <div class="log-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>ID</th>
+                <th>Model</th>
+                <th>Account</th>
+                <th>Stat</th>
+                <th>TTFB</th>
+                <th>In</th>
+                <th>Out</th>
+                <th>Cache</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody id="log-body"></tbody>
+          </table>
+        </div>
+        <p id="log-empty" class="hidden" style="text-align:center;color:var(--muted);padding:2rem 0;margin:0">No requests yet.</p>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="onboard-modal">
+    <div class="modal">
+      <h3>Signing in</h3>
+      <p>Complete sign-in in the browser tab. Quota provisioning starts when authorization finishes.</p>
+      <div class="steps">
+        <div class="step active" id="step-oauth"><span class="dot"></span> Waiting for Z.AI sign-in</div>
+        <div class="step" id="step-provision"><span class="dot"></span> Provisioning quota</div>
+        <div class="step" id="step-done"><span class="dot"></span> Ready</div>
+      </div>
+      <button class="btn-zai" id="onboard-open" disabled style="width:100%;margin-bottom:0.5rem">Open sign-in</button>
+      <button class="btn-ghost" id="onboard-close" style="width:100%">Cancel</button>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    let onboardPoll = null;
+    let refreshTimer = null;
+    let cacheTimerTick = null;
+    let lastQuotaData = null;
+    let accountsExpanded = false;
+
+    const UI_POLL_MS = 60_000;
+    const LOGS_POLL_MS = 60_000;
+    const ONBOARD_POLL_MS = 4_000;
+
+    const $ = (id) => document.getElementById(id);
+
+    async function api(path, opts = {}) {
+      const resp = await fetch(path, {
+        ...opts,
+        headers: { "content-type": "application/json", ...(opts.headers || {}) },
+      });
+      const text = await resp.text();
+      let data = null;
+      try { data = text ? JSON.parse(text) : null; } catch {}
+      if (!resp.ok) throw new Error(data?.error?.message || data?.error || text || resp.statusText);
+      return data;
+    }
+
+    function toast(msg, err = false) {
+      const el = $("toast");
+      el.textContent = msg;
+      el.className = "toast show" + (err ? " error" : "");
+      clearTimeout(el._t);
+      el._t = setTimeout(() => el.classList.remove("show"), 3500);
+    }
+
+    function fmtTokens(n) {
+      if (n == null) return "—";
+      if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
+      return String(n);
+    }
+
+    function fmtReset(periodEnd, serverTime) {
+      if (!periodEnd) return "";
+      const now = serverTime ? serverTime * 1000 : Date.now();
+      const end = periodEnd * 1000;
+      const diff = end - now;
+      if (diff <= 0) return "Resets soon";
+      const h = Math.floor(diff / 3600000);
+      const m = Math.floor((diff % 3600000) / 60000);
+      const at = new Date(end).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      return `Resets ${at} (${h}h ${m}m)`;
+    }
+
+    function shortUid(uid) {
+      if (!uid) return "—";
+      if (uid.length <= 16) return uid;
+      return uid.slice(0, 8) + "…" + uid.slice(-4);
+    }
+
+    function badge(s) {
+      return `<span class="badge badge-${s || "disabled"}">${s}</span>`;
+    }
+
+    function renderQuota(data) {
+      const list = $("quota-list");
+      const card = $("quota-card");
+      const signin = $("signin-card");
+      const addBtn = $("btn-add-account");
+      lastQuotaData = data;
+
+      if (!data.accounts?.length) {
+        card.classList.add("hidden");
+        signin.classList.remove("hidden");
+        addBtn.classList.add("hidden");
+        accountsExpanded = false;
+        return;
+      }
+      signin.classList.add("hidden");
+      card.classList.remove("hidden");
+      addBtn.classList.remove("hidden");
+
+      const active = data.accounts.filter((a) => a.status === "active" && a.enabled).length;
+      $("quota-summary").innerHTML =
+        `<strong>${data.accounts.length}</strong> account${data.accounts.length === 1 ? "" : "s"} · ` +
+        `<strong>${active}</strong> active`;
+
+      const showBtn = $("btn-show-accounts");
+      showBtn.textContent = accountsExpanded
+        ? "Hide accounts"
+        : `Show all accounts (${data.accounts.length})`;
+
+      if (!accountsExpanded) {
+        list.innerHTML =
+          `<p style="color:var(--muted);font-size:0.85rem;margin:0">` +
+          `Quota bars load from cache — expand to view per-account usage. ` +
+          `Billing refreshes slowly to avoid Z.AI rate limits.</p>`;
+        bindAccountActions(list);
+        updateCacheTimer(data.cache);
+        return;
+      }
+
+      list.innerHTML = data.accounts.map((acct) => {
+        const buckets = acct.balances?.length
+          ? acct.balances.map((b) => {
+              const total = b.total_units || 1;
+              const rem = b.remaining_units ?? 0;
+              const pct = Math.max(0, Math.min(100, (rem / total) * 100));
+              const low = pct < 15;
+              return `
+                <div class="quota-row">
+                  <div class="quota-label">
+                    <strong>${esc(b.show_name || "Model")}</strong>
+                    <span>${fmtTokens(rem)} / ${fmtTokens(total)}</span>
+                  </div>
+                  <div class="bar"><div class="bar-fill${low ? " low" : ""}${rem <= 0 ? " empty" : ""}" style="width:${pct}%"></div></div>
+                  <div class="reset">${fmtReset(b.period_end, acct.serverTime)}</div>
+                </div>`;
+            }).join("")
+          : `<p style="color:var(--muted);font-size:0.85rem;margin:0">No quota buckets yet — send a message in ZCode or wait for provisioning.</p>`;
+
+        return `
+          <div class="account-block">
+            <div class="account-head">
+              <div>
+                ${badge(acct.status)}
+                <div class="uid">${esc(acct.userId || acct.id)}</div>
+              </div>
+              <div style="display:flex;gap:0.35rem">
+                ${acct.enabled
+                  ? `<button class="btn-ghost" data-pause="${acct.id}">Pause</button>`
+                  : `<button class="btn-ghost" data-enable="${acct.id}">Enable</button>`}
+                <button class="btn-danger" data-remove="${acct.id}">Remove</button>
+              </div>
+            </div>
+            ${buckets}
+          </div>`;
+      }).join("");
+
+      bindAccountActions(list);
+      updateCacheTimer(data.cache);
+    }
+
+    function bindAccountActions(list) {
+      list.querySelectorAll("[data-remove]").forEach((btn) => {
+        btn.onclick = async () => {
+          if (!confirm("Remove this account?")) return;
+          await api(`/admin/accounts/${btn.dataset.remove}`, { method: "DELETE" });
+          toast("Removed");
+          await refreshQuota();
+        };
+      });
+      list.querySelectorAll("[data-pause]").forEach((btn) => {
+        btn.onclick = async () => {
+          await api(`/admin/accounts/${btn.dataset.pause}/disable`, { method: "POST" });
+          await refreshQuota();
+        };
+      });
+      list.querySelectorAll("[data-enable]").forEach((btn) => {
+        btn.onclick = async () => {
+          await api(`/admin/accounts/${btn.dataset.enable}/enable`, { method: "POST" });
+          await refreshQuota();
+        };
+      });
+    }
+
+    function fmtCountdown(ms) {
+      if (ms <= 0) return "soon";
+      const s = Math.ceil(ms / 1000);
+      const m = Math.floor(s / 60);
+      const r = s % 60;
+      return m > 0 ? `${m}m ${r}s` : `${r}s`;
+    }
+
+    function updateCacheTimer(cache) {
+      const el = $("cache-timer");
+      if (!cache) {
+        el.classList.add("hidden");
+        return;
+      }
+      el.classList.remove("hidden");
+      if (cache.refreshing) {
+        el.textContent = "Refreshing quota from Z.AI…";
+        el.classList.add("refreshing");
+        return;
+      }
+      el.classList.remove("refreshing");
+      const next = cache.nextRefreshAt ? cache.nextRefreshAt - Date.now() : null;
+      if (next != null && next > 0) {
+        el.textContent = `Next billing refresh in ${fmtCountdown(next)}`;
+      } else if (cache.lastCompletedAt) {
+        el.textContent = `Quota cache updated · cycle ${cache.cycleIntervalSec}s`;
+      } else {
+        el.textContent = `Quota cache warming up…`;
+      }
+    }
+
+    function startCacheCountdown() {
+      clearInterval(cacheTimerTick);
+      cacheTimerTick = setInterval(() => {
+        if (lastQuotaData?.cache) updateCacheTimer(lastQuotaData.cache);
+      }, 1000);
+    }
+
+    function renderLogs(data) {
+      const body = $("log-body");
+      const empty = $("log-empty");
+      const stats = $("log-stats");
+      const s = data.summary;
+      stats.innerHTML = `
+        <div class="stat"><b>${s.last24h}</b><small>requests (24h)</small></div>
+        <div class="stat"><b>${s.successRate}%</b><small>success rate</small></div>
+        <div class="stat"><b>${fmtTokens(s.totalInputTokens24h)}</b><small>input tokens (24h)</small></div>
+        <div class="stat"><b>${fmtTokens(s.totalOutputTokens24h)}</b><small>output tokens (24h)</small></div>
+        <div class="stat"><b>${fmtTokens(s.totalCachedTokens24h)}</b><small>cached tokens (24h)</small></div>
+        <div class="stat"><b>${s.cacheHitRate24h}%</b><small>cache hit rate</small></div>
+        <div class="stat"><b>${data.total}</b><small>logged total</small></div>`;
+
+      if (!data.entries?.length) {
+        body.innerHTML = "";
+        empty.classList.remove("hidden");
+        return;
+      }
+      empty.classList.add("hidden");
+      body.innerHTML = data.entries.map((e) => {
+        const t = new Date(e.at);
+        const time = t.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        const ok = e.status >= 200 && e.status < 300;
+        const tok = (n) => (n > 0 ? fmtTokens(n) : "—");
+        return `<tr>
+          <td class="mono">${time}</td>
+          <td class="mono">${esc(e.id)}</td>
+          <td>${esc(e.model)}</td>
+          <td class="mono">${esc(shortUid(e.accountUserId))}</td>
+          <td class="${ok ? "ok" : "err"}">${e.status}</td>
+          <td class="mono">${e.ttfbMs}ms</td>
+          <td class="mono">${tok(e.inputTokens)}</td>
+          <td class="mono">${tok(e.outputTokens ?? e.tokens)}</td>
+          <td class="mono">${tok(e.cachedTokens)}</td>
+          <td class="mono">${e.totalMs}ms</td>
+        </tr>`;
+      }).join("");
+    }
+
+    function esc(s) {
+      return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    async function refreshStatus() {
+      const status = await api("/admin/status");
+      $("header-sub").textContent = `${status.plan} · ${status.provider} · :${status.server.port}`;
+      return status;
+    }
+
+    async function refreshQuota() {
+      const quota = await api("/admin/quota");
+      renderQuota(quota);
+    }
+
+    async function refreshQuotaPage() {
+      await refreshStatus();
+      await refreshQuota();
+    }
+
+    async function refreshLogs() {
+      const data = await api("/admin/logs?limit=200");
+      renderLogs(data);
+    }
+
+    function setOnboardPhase(phase) {
+      const map = { oauth_pending: "step-oauth", provisioning: "step-provision", done: "step-done" };
+      ["step-oauth", "step-provision", "step-done"].forEach((id) => {
+        const el = $(id);
+        el.classList.remove("active", "done");
+        if (id === map[phase]) el.classList.add("active");
+        else if (
+          (phase === "provisioning" && id === "step-oauth") ||
+          (phase === "done" && id !== "step-done")
+        ) el.classList.add("done");
+        if (phase === "done") $("step-done").classList.add("done", "active");
+      });
+    }
+
+    function pollOnboard(jobId) {
+      clearInterval(onboardPoll);
+      onboardPoll = setInterval(async () => {
+        try {
+          const job = await api(`/admin/onboard/${jobId}`);
+          setOnboardPhase(job.phase);
+          if (job.phase === "done") {
+            clearInterval(onboardPoll);
+            toast("Signed in — quota ready");
+            $("onboard-modal").classList.remove("open");
+            await refreshQuota();
+          } else if (job.phase === "error") {
+            clearInterval(onboardPoll);
+            toast(job.error || "Sign-in failed", true);
+          }
+        } catch (e) {
+          clearInterval(onboardPoll);
+          toast(e.message, true);
+        }
+      }, ONBOARD_POLL_MS);
+    }
+
+    async function startSignIn() {
+      $("onboard-modal").classList.add("open");
+      $("onboard-open").disabled = true;
+      setOnboardPhase("oauth_pending");
+      try {
+        const job = await api("/admin/onboard/start", {
+          method: "POST",
+          body: JSON.stringify({ launchDesktop: true }),
+        });
+        $("onboard-open").disabled = false;
+        $("onboard-open").onclick = () => window.open(job.authorizeUrl, "_blank", "noopener");
+        window.open(job.authorizeUrl, "_blank", "noopener");
+        pollOnboard(job.id);
+      } catch (e) {
+        toast(e.message, true);
+        $("onboard-modal").classList.remove("open");
+      }
+    }
+
+    $("btn-add-account").onclick = startSignIn;
+    $("btn-signin-empty").onclick = startSignIn;
+
+    $("btn-show-accounts").onclick = () => {
+      accountsExpanded = !accountsExpanded;
+      if (lastQuotaData) renderQuota(lastQuotaData);
+      else refreshQuota().catch((e) => toast(e.message, true));
+    };
+
+    $("onboard-close").onclick = () => {
+      clearInterval(onboardPoll);
+      $("onboard-modal").classList.remove("open");
+    };
+
+    function route() {
+      const hash = location.hash || "#/";
+      const logs = hash.startsWith("#/logs");
+      $("page-quota").classList.toggle("active", !logs);
+      $("page-logs").classList.toggle("active", logs);
+      $("nav-quota").classList.toggle("active", !logs);
+      $("nav-logs").classList.toggle("active", logs);
+      if (logs) refreshLogs().catch((e) => toast(e.message, true));
+      else refreshQuotaPage().catch((e) => toast(e.message, true));
+    }
+
+    function startRefresh() {
+      clearInterval(refreshTimer);
+      const logs = (location.hash || "#/").startsWith("#/logs");
+      refreshTimer = setInterval(() => {
+        const onLogs = (location.hash || "#/").startsWith("#/logs");
+        if (onLogs) refreshLogs().catch(() => {});
+        else {
+          refreshStatus().catch(() => {});
+          refreshQuota().catch(() => {});
+        }
+      }, logs ? LOGS_POLL_MS : UI_POLL_MS);
+    }
+
+    window.addEventListener("hashchange", () => {
+      route();
+      startRefresh();
+    });
+
+    async function init() {
+      const probe = await fetch("/admin/status");
+      if (!probe.ok) throw new Error("Cannot reach proxy — run: bun run src/index.ts");
+      route();
+      startRefresh();
+      startCacheCountdown();
+    }
+
+    init().catch((e) => toast(String(e.message || e), true));
+  </script>
+</body>
+</html>

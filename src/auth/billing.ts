@@ -4,15 +4,22 @@
 const BILLING_BASE = "https://zcode.z.ai/api/v1/zcode-plan/billing";
 
 export interface BalanceBucket {
-  entitlement_id?: string;
+  bucket_id?: string;
   show_name?: string;
+  entitlement_id?: string;
+  total_units?: number;
+  used_units?: number;
   remaining_units?: number;
   available_units?: number;
+  period_start?: number;
+  period_end?: number;
+  expires_at?: number;
 }
 
 export interface BalanceResponse {
   ok: boolean;
   status: number;
+  serverTime?: number;
   balances: BalanceBucket[];
   raw?: string;
 }
@@ -30,9 +37,17 @@ export async function fetchBillingBalance(jwt: string): Promise<BalanceResponse>
   const resp = await fetch(`${BILLING_BASE}/balance`, { headers: authHeaders(jwt) });
   const text = await resp.text();
   try {
-    const json = JSON.parse(text) as { data?: { balances?: BalanceBucket[] } };
+    const json = JSON.parse(text) as {
+      data?: { balances?: BalanceBucket[]; server_time?: number };
+    };
     const balances = json?.data?.balances ?? [];
-    return { ok: resp.ok, status: resp.status, balances, raw: text };
+    return {
+      ok: resp.ok,
+      status: resp.status,
+      serverTime: json?.data?.server_time,
+      balances,
+      raw: text,
+    };
   } catch {
     return { ok: resp.ok, status: resp.status, balances: [], raw: text };
   }

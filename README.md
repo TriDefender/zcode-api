@@ -15,6 +15,9 @@ cp config.example.yaml config.yaml
 # Start the proxy
 bun run src/index.ts
 
+# Open the web dashboard
+# http://localhost:8080/app
+
 # Or specify a config path
 bun run src/index.ts /path/to/config.yaml
 ```
@@ -68,22 +71,20 @@ bun run src/index.ts auth login bigmodel --import
 
 Start Plan uses `zcode.z.ai` with OAuth JWT and Aliyun traceless captcha — not the paid `api.z.ai` key.
 
-**New account (automated — recommended):**
+**Web dashboard (recommended):**
 
 ```bash
-bun run src/index.ts auth onboard zai
+bun run src/index.ts
+# open http://localhost:8080/app
 ```
 
-This will:
-1. OAuth login in browser
-2. Write JWT into `~/.zcode/v2/credentials.json` (encrypted, same as desktop)
-3. Launch ZCode briefly to provision daily token buckets
-4. Save credentials to `~/.zcode-proxy/credentials.json`
+Click **Add account (OAuth)** — sign in, quota provisioning, and pool setup happen automatically.
 
-**Existing ZCode desktop login:**
+**CLI alternatives:**
 
 ```bash
-bun run src/index.ts auth import-jwt
+bun run src/index.ts auth onboard zai          # new account
+bun run src/index.ts auth import-jwt             # existing ZCode desktop login
 ```
 
 **Then configure and start:**
@@ -114,6 +115,43 @@ curl http://localhost:8080/v1/messages \
 
 Re-run `auth import-jwt` or `auth onboard zai` after switching accounts. **Test one message at a time** — burst captcha requests can trigger abuse block (3012).
 
+### Multi-account pool (one app, load balancing)
+
+**Use the web dashboard** at `http://localhost:8080/app` — add accounts via OAuth, import from desktop, paste JWTs, pause/remove accounts, and send test messages. No CLI required.
+
+Add multiple Start Plan accounts; the proxy round-robins and auto-fails over on quota (`1005`), abuse block (`3012`), or bad JWT (`401`).
+
+```bash
+# Add accounts (each runs OAuth + optional ZCode provisioning)
+bun run src/index.ts auth onboard zai --name acct-1
+bun run src/index.ts auth onboard zai --name acct-2
+
+# Or add an existing JWT
+bun run src/index.ts auth add acct-3 --jwt eyJ...
+
+# List / remove
+bun run src/index.ts auth accounts
+bun run src/index.ts auth remove <account-id>
+```
+
+Enable in `config.yaml` (default when accounts exist):
+
+```yaml
+pool:
+  enabled: true
+  maxAccountAttempts: 5   # try up to N accounts per request
+```
+
+HTTP admin (requires `auth.proxyApiKey`):
+
+```bash
+curl http://localhost:8080/admin/accounts -H "x-api-key: your-proxy-secret"
+curl -X POST http://localhost:8080/admin/accounts/<id>/enable -H "x-api-key: your-proxy-secret"
+curl -X DELETE http://localhost:8080/admin/accounts/<id> -H "x-api-key: your-proxy-secret"
+```
+
+`GET /health` includes pool summary (account count, enabled, last errors).
+
 Fixes #2.
 
 ## Endpoints
@@ -123,7 +161,11 @@ Fixes #2.
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions (streaming + non-streaming) |
 | `POST` | `/v1/messages` | Anthropic-format messages (streaming + non-streaming) |
 | `GET` | `/v1/models` | List available models |
-| `GET` | `/health` | Health check |
+| `GET` | `/app` | Web dashboard (account management UI) |
+| `GET` | `/health` | Health check (+ pool summary when enabled) |
+| `GET` | `/admin/accounts` | List account pool (proxy API key required) |
+| `POST` | `/admin/accounts/:id/enable` | Re-enable a disabled account |
+| `DELETE` | `/admin/accounts/:id` | Remove account from pool |
 
 ## Usage Examples
 
