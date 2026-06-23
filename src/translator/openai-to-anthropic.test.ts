@@ -94,6 +94,280 @@ describe("translateRequestOpenAIToAnthropic", () => {
     expect(result.tools![0].description).toBe("Search the web");
     expect(result.tools![0].input_schema).toBeDefined();
   });
+
+  it("translates tool_choice='auto' to Anthropic {type:'auto'}", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "Hi" }],
+      tools: [{ type: "function", function: { name: "fn" } }],
+      tool_choice: "auto",
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.tool_choice).toEqual({ type: "auto" });
+  });
+
+  it("translates tool_choice='required' to Anthropic {type:'any'}", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "Hi" }],
+      tools: [{ type: "function", function: { name: "fn" } }],
+      tool_choice: "required",
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.tool_choice).toEqual({ type: "any" });
+  });
+
+  it("translates tool_choice={type:'function',function:{name}} to Anthropic {type:'tool',name}", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "Hi" }],
+      tools: [{ type: "function", function: { name: "specific_tool" } }],
+      tool_choice: { type: "function", function: { name: "specific_tool" } },
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.tool_choice).toEqual({ type: "tool", name: "specific_tool" });
+  });
+
+  it("omits tool_choice when not specified (Anthropic defaults to auto when tools present)", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "Hi" }],
+      tools: [{ type: "function", function: { name: "fn" } }],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.tool_choice).toBeUndefined();
+  });
+
+  it("omits tool_choice for 'none' (Anthropic has no 'none' type — see next test for tools handling)", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "Hi" }],
+      tools: [{ type: "function", function: { name: "fn" } }],
+      tool_choice: "none",
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.tool_choice).toBeUndefined();
+  });
+
+  it("tool_choice='none' strips the tools array so Anthropic does not auto-call tools", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "Hi" }],
+      tools: [{ type: "function", function: { name: "fn" } }],
+      tool_choice: "none",
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.tool_choice).toBeUndefined();
+    expect(result.tools).toBeUndefined();
+  });
+
+  it("translates assistant message with tool_calls into assistant content with tool_use blocks", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "What's the weather?" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "call_abc",
+            type: "function",
+            function: { name: "get_weather", arguments: '{"city":"SF"}' },
+          }],
+        },
+      ],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const assistant = result.messages[1];
+    expect(assistant.role).toBe("assistant");
+    expect(Array.isArray(assistant.content)).toBe(true);
+    const blocks = assistant.content as unknown[];
+    expect(blocks).toHaveLength(1);
+    expect((blocks[0] as any).type).toBe("tool_use");
+    expect((blocks[0] as any).id).toBe("call_abc");
+    expect((blocks[0] as any).name).toBe("get_weather");
+    expect((blocks[0] as any).input).toEqual({ city: "SF" });
+  });
+
+  it("preserves assistant text alongside tool_calls (text block first, then tool_use blocks)", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "Hi" },
+        {
+          role: "assistant",
+          content: "Let me check the weather.",
+          tool_calls: [{
+            id: "call_1",
+            type: "function",
+            function: { name: "get_weather", arguments: '{"city":"SF"}' },
+          }],
+        },
+      ],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const blocks = result.messages[1].content as any[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toEqual({ type: "text", text: "Let me check the weather." });
+    expect(blocks[1].type).toBe("tool_use");
+  });
+
+  it("translates role:'tool' message into user message with tool_result block", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "weather?" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "call_xyz",
+            type: "function",
+            function: { name: "get_weather", arguments: '{"city":"SF"}' },
+          }],
+        },
+        { role: "tool", tool_call_id: "call_xyz", content: "62°F and sunny" },
+      ],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const toolResultMsg = result.messages[2];
+    expect(toolResultMsg.role).toBe("user");
+    const blocks = toolResultMsg.content as any[];
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("tool_result");
+    expect(blocks[0].tool_use_id).toBe("call_xyz");
+    expect(blocks[0].content).toBe("62°F and sunny");
+  });
+
+  it("coalesces consecutive role:'tool' messages into a single user message with multiple tool_result blocks", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "weather in SF and NYC" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_a", type: "function", function: { name: "get_weather", arguments: '{"city":"SF"}' } },
+            { id: "call_b", type: "function", function: { name: "get_weather", arguments: '{"city":"NYC"}' } },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_a", content: "62°F" },
+        { role: "tool", tool_call_id: "call_b", content: "58°F" },
+      ],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.messages).toHaveLength(3);
+    const coalesced = result.messages[2];
+    expect(coalesced.role).toBe("user");
+    const blocks = coalesced.content as any[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toMatchObject({ type: "tool_result", tool_use_id: "call_a", content: "62°F" });
+    expect(blocks[1]).toMatchObject({ type: "tool_result", tool_use_id: "call_b", content: "58°F" });
+  });
+
+  it("handles malformed tool_call arguments JSON by falling back to empty object input", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "x" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{
+            id: "call_bad",
+            type: "function",
+            function: { name: "fn", arguments: "not-valid-json" },
+          }],
+        },
+      ],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const block = (result.messages[1].content as any[])[0];
+    expect(block.type).toBe("tool_use");
+    expect(block.input).toEqual({});
+  });
+
+  it("preserves image parts in role:'tool' content (data: URL → Anthropic image block)", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "x" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "c1", type: "function", function: { name: "fn", arguments: "{}" } }],
+        },
+        {
+          role: "tool",
+          tool_call_id: "c1",
+          content: [
+            { type: "text", text: "screenshot:" },
+            { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } },
+          ],
+        },
+      ],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const toolResultMsg = result.messages[2];
+    expect(toolResultMsg.role).toBe("user");
+    const blocks = toolResultMsg.content as any[];
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("tool_result");
+    const inner = blocks[0].content;
+    expect(Array.isArray(inner)).toBe(true);
+    expect(inner).toHaveLength(2);
+    expect(inner[0]).toEqual({ type: "text", text: "screenshot:" });
+    expect(inner[1].type).toBe("image");
+    expect(inner[1].source).toEqual({ type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" });
+  });
+
+  it("falls back to text block for non-data: image URLs in tool results (does not silently drop)", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "x" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "c1", type: "function", function: { name: "fn", arguments: "{}" } }],
+        },
+        {
+          role: "tool",
+          tool_call_id: "c1",
+          content: [
+            { type: "text", text: "see:" },
+            { type: "image_url", image_url: { url: "https://example.com/img.png" } },
+          ],
+        },
+      ],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const inner = (result.messages[2].content as any[])[0].content;
+    expect(Array.isArray(inner)).toBe(true);
+    expect(inner).toHaveLength(2);
+    expect(inner[0].type).toBe("text");
+    expect(inner[1].type).toBe("text");
+    expect(inner[1].text).toContain("https://example.com/img.png");
+  });
+
+  it("preserves message order and alternation: user → assistant → user (tool_result) → assistant", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "weather?" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "c1", type: "function", function: { name: "w", arguments: "{}" } }],
+        },
+        { role: "tool", tool_call_id: "c1", content: "62" },
+        { role: "assistant", content: "The weather is 62°F" },
+      ],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+  });
 });
 
 describe("translateResponseAnthropicToOpenAI", () => {

@@ -48,10 +48,22 @@ interface TranslationState {
   roleSent: boolean;
   inputTokens: number;
   outputTokens: number;
+  toolCallIndex: number;
+  blockIndexToToolCallIndex: Map<number, number>;
+  finishReasonSent: boolean;
 }
 
 function initState(model: string): TranslationState {
-  return { messageId: "", model, roleSent: false, inputTokens: 0, outputTokens: 0 };
+  return {
+    messageId: "",
+    model,
+    roleSent: false,
+    inputTokens: 0,
+    outputTokens: 0,
+    toolCallIndex: 0,
+    blockIndexToToolCallIndex: new Map(),
+    finishReasonSent: false,
+  };
 }
 
 function makeChunk(
@@ -155,13 +167,41 @@ function translateEvent(state: TranslationState, sse: ParsedSSE): string | null 
       return null;
     }
 
+    case "content_block_start": {
+      if (data.type !== "content_block_start") return null;
+      const block = data.content_block;
+      const blockIdx = data.index;
+      if (block.type === "tool_use") {
+        const myIndex = state.toolCallIndex++;
+        state.blockIndexToToolCallIndex.set(blockIdx, myIndex);
+        return makeChunk(state, {
+          tool_calls: [{
+            index: myIndex,
+            id: block.id,
+            type: "function",
+            function: { name: block.name, arguments: "" },
+          }],
+        });
+      }
+      return null;
+    }
+
     case "content_block_delta": {
-      const delta = (data as any).delta;
-      if (delta?.type === "text_delta") {
+      if (data.type !== "content_block_delta") return null;
+      const delta = data.delta;
+      const blockIdx = data.index;
+      if (delta.type === "text_delta") {
         return makeChunk(state, { content: delta.text });
       }
-      if (delta?.type === "input_json_delta") {
-        return null;
+      if (delta.type === "input_json_delta") {
+        const myIndex = state.blockIndexToToolCallIndex.get(blockIdx);
+        if (myIndex === undefined) return null;
+        return makeChunk(state, {
+          tool_calls: [{
+            index: myIndex,
+            function: { arguments: delta.partial_json ?? "" },
+          }],
+        });
       }
       return null;
     }
@@ -174,6 +214,7 @@ function translateEvent(state: TranslationState, sse: ParsedSSE): string | null 
       }
       if (delta?.stop_reason) {
         const finishReason = mapStopReason(delta.stop_reason);
+        state.finishReasonSent = true;
         return makeChunk(state, {}, finishReason, {
           prompt_tokens: state.inputTokens,
           completion_tokens: state.outputTokens,
@@ -184,6 +225,7 @@ function translateEvent(state: TranslationState, sse: ParsedSSE): string | null 
     }
 
     case "message_stop": {
+      if (state.finishReasonSent) return null;
       return makeChunk(state, {}, "stop", {
         prompt_tokens: state.inputTokens,
         completion_tokens: state.outputTokens,
@@ -192,7 +234,6 @@ function translateEvent(state: TranslationState, sse: ParsedSSE): string | null 
     }
 
     case "ping":
-    case "content_block_start":
     case "content_block_stop":
       return null;
 

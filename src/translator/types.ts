@@ -67,7 +67,7 @@ export interface OpenAIChatRequest {
   logit_bias?: Record<string, number>;
   user?: string;
   tools?: OpenAIToolDefinition[];
-  tool_choice?: "none" | "auto" | { type: "function"; function: { name: string } };
+  tool_choice?: "none" | "auto" | "required" | { type: "function"; function: { name: string } };
   response_format?: { type: "text" | "json_object" };
   seed?: number;
 }

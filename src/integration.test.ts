@@ -11,6 +11,7 @@ let proxyServer: ReturnType<typeof Bun.serve>;
 let mockUpstreamServer: ReturnType<typeof Bun.serve>;
 let proxyPort: number;
 let mockPort: number;
+let capturedUpstreamBodies: string[] = [];
 
 function findFreePort(): number {
   return 18000 + Math.floor(Math.random() * 1000);
@@ -30,6 +31,49 @@ beforeAll(() => {
       try { parsed = JSON.parse(rawBody); } catch {}
 
       if (url.pathname.includes("/v1/messages")) {
+        capturedUpstreamBodies.push(rawBody);
+        let hasToolResult = false;
+        let hasToolsDefined = false;
+        try {
+          const parsedAny = JSON.parse(rawBody) as {
+            messages?: Array<{ content?: unknown }>;
+            tools?: unknown[];
+          };
+          hasToolResult = (parsedAny.messages ?? []).some(
+            (m) => Array.isArray(m.content) && m.content.some((b: any) => b?.type === "tool_result"),
+          );
+          hasToolsDefined = (parsedAny.tools?.length ?? 0) > 0;
+        } catch {}
+
+        if (hasToolResult) {
+          return new Response(JSON.stringify({
+            id: "msg_after_tool",
+            type: "message",
+            role: "assistant",
+            content: [{ type: "text", text: "Tool result acknowledged" }],
+            model: "glm-4.6",
+            stop_reason: "end_turn",
+            stop_sequence: null,
+            usage: { input_tokens: 25, output_tokens: 4 },
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+
+        if (hasToolsDefined && !parsed.stream) {
+          return new Response(JSON.stringify({
+            id: "msg_tool_call",
+            type: "message",
+            role: "assistant",
+            content: [
+              { type: "text", text: "Calling tool." },
+              { type: "tool_use", id: "toolu_http_1", name: "get_weather", input: { city: "SF" } },
+            ],
+            model: "glm-4.6",
+            stop_reason: "tool_use",
+            stop_sequence: null,
+            usage: { input_tokens: 15, output_tokens: 12 },
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+
         if (parsed.stream) {
           const sse = [
             'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_int","model":"glm-4.6"}}\n\n',
@@ -146,6 +190,70 @@ describe("integration: OpenAI streaming translation", () => {
     const text = await resp.text();
     expect(text).toContain("chat.completion.chunk");
     expect(text).toContain("data: [DONE]");
+  });
+});
+
+describe("integration: OpenAI tool-call roundtrip (HTTP layer)", () => {
+  it("returns OpenAI tool_calls on turn 1, accepts tool_result on turn 2, upstream receives valid Anthropic shape", async () => {
+    const tools = [{ type: "function", function: { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }];
+
+    const resp1 = await fetch(proxyUrl("/v1/chat/completions"), {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        model: "glm-4.6",
+        messages: [{ role: "user", content: "weather in SF?" }],
+        tools,
+        tool_choice: "auto",
+      }),
+    });
+    expect(resp1.status).toBe(200);
+    const body1 = await resp1.json();
+    expect(body1.choices[0].finish_reason).toBe("tool_calls");
+    const toolCall = body1.choices[0].message.tool_calls?.[0];
+    expect(toolCall).toBeDefined();
+    expect(toolCall.id).toBe("toolu_http_1");
+    expect(toolCall.function.name).toBe("get_weather");
+    expect(JSON.parse(toolCall.function.arguments)).toEqual({ city: "SF" });
+
+    const resp2 = await fetch(proxyUrl("/v1/chat/completions"), {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        model: "glm-4.6",
+        messages: [
+          { role: "user", content: "weather in SF?" },
+          { role: "assistant", content: null, tool_calls: [toolCall] },
+          { role: "tool", tool_call_id: toolCall.id, content: "62°F" },
+        ],
+        tools,
+      }),
+    });
+    expect(resp2.status).toBe(200);
+    const body2 = await resp2.json();
+    expect(body2.choices[0].finish_reason).toBe("stop");
+    expect(body2.choices[0].message.content).toBe("Tool result acknowledged");
+
+    const toolResultBody = capturedUpstreamBodies
+      .map((b) => JSON.parse(b))
+      .filter((b) => (b.messages ?? []).some((m: any) => Array.isArray(m.content) && m.content.some((c: any) => c?.type === "tool_result")));
+    expect(toolResultBody).toHaveLength(1);
+    const upstreamReq = toolResultBody[0];
+    expect(upstreamReq.messages).toHaveLength(3);
+    expect(upstreamReq.messages[0].role).toBe("user");
+    expect(upstreamReq.messages[1].role).toBe("assistant");
+    const assistantBlocks = upstreamReq.messages[1].content;
+    expect(Array.isArray(assistantBlocks)).toBe(true);
+    const toolUseBlock = assistantBlocks.find((b: any) => b.type === "tool_use");
+    expect(toolUseBlock).toMatchObject({ id: "toolu_http_1", name: "get_weather", input: { city: "SF" } });
+    expect(upstreamReq.messages[2].role).toBe("user");
+    const userBlocks = upstreamReq.messages[2].content;
+    expect(Array.isArray(userBlocks)).toBe(true);
+    const toolResultBlock = userBlocks.find((b: any) => b.type === "tool_result");
+    expect(toolResultBlock).toMatchObject({ tool_use_id: "toolu_http_1", content: "62°F" });
+    expect(upstreamReq.tools).toHaveLength(1);
+    expect(upstreamReq.tools[0]).toMatchObject({ name: "get_weather" });
+    expect(upstreamReq.tool_choice).toBeUndefined();
   });
 });
 

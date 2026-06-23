@@ -26,6 +26,12 @@ export interface ProxyHandlerOptions {
   auth: AuthManager;
   /** Override the global fetch (for testing). Defaults to global `fetch`. */
   fetchImpl?: typeof fetch;
+  /**
+   * When true, emit additional per-request diagnostic lines: upstream URL,
+   * redacted request headers, body preview, upstream response status and
+   * selected response headers. Activated by `zcode-proxy serve debug`.
+   */
+  debug?: boolean;
 }
 
 /**
@@ -50,6 +56,7 @@ export async function proxyRequest(
 ): Promise<Response> {
   const { config, auth } = opts;
   const fetchImpl = opts.fetchImpl ?? fetch;
+  const debug = opts.debug === true;
   const started = Date.now();
   const reqId = nextReqId();
 
@@ -68,6 +75,7 @@ export async function proxyRequest(
   try {
     cred = await auth.getCredential();
   } catch (err) {
+    if (debug) debugError(reqId, "credential_unavailable", (err as Error).message);
     printRow(reqId, format, meta, 503, started, Date.now(), 0, 0, 0);
     return errorResponse(503, "credential_unavailable", (err as Error).message);
   }
@@ -84,9 +92,13 @@ export async function proxyRequest(
     const translated = translateOpenAIBody(body);
     if (translated instanceof Response) return translated;
     upstreamBody = translated;
+    if (debug) debugLine(reqId, `translated OpenAI→Anthropic (bytes=${upstreamBody?.length ?? 0})`);
   }
 
   const transformedBody = transformRequestBody(upstreamBody, { format: upstreamFormat, userId: cred.userId, startPlan: config.plan === "start-plan" });
+  if (debug && transformedBody !== upstreamBody) {
+    debugLine(reqId, `body transformed (upstreamFormat=${upstreamFormat}, startPlan=${config.plan === "start-plan"}, bytes=${transformedBody?.length ?? 0})`);
+  }
 
   let captchaHeaders: Record<string, string> | undefined;
   if (config.plan === "start-plan") {
@@ -100,22 +112,36 @@ export async function proxyRequest(
 
   let upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders);
 
+  if (debug) {
+    debugLine(reqId, `→ POST ${upstreamReq.url}`);
+    debugLine(reqId, `  ${formatHeaderPairs(upstreamReq.headers)}`);
+    if (transformedBody) debugLine(reqId, `  body preview: ${previewBody(transformedBody)}`);
+  }
+
   let upstreamResp: Response;
   try {
     upstreamResp = await fetchImpl(upstreamReq, translateMode ? {} : { decompress: false });
   } catch (err) {
+    if (debug) debugError(reqId, "upstream_unreachable", (err as Error).message);
     printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
     return errorResponse(502, "upstream_unreachable", (err as Error).message);
   }
   const headersAt = Date.now();
 
+  if (debug) {
+    debugLine(reqId, `← ${upstreamResp.status} ${upstreamResp.statusText}`);
+    debugLine(reqId, `  ${formatResponseHeaders(upstreamResp.headers)}`);
+  }
+
   if (upstreamResp.status === 401 && config.plan === "start-plan") {
+    if (debug) debugError(reqId, "start_plan_jwt_invalid", "JWT rejected upstream");
     printRow(reqId, format, meta, 401, started, headersAt, 0, 0, 0);
     return errorResponse(401, "start_plan_jwt_invalid", "Start-plan JWT was rejected. Re-run: zcode-proxy auth login");
   }
 
   // start-plan: on 403 captcha challenge, force re-solve and retry once
   if (config.plan === "start-plan" && (upstreamResp.status === 403 || detectCaptchaChallenge(upstreamResp))) {
+    if (debug) debugLine(reqId, "403/captcha challenge — re-solving and retrying once");
     try { upstreamResp.body?.cancel(); } catch {}
     console.log(`${reqId} captcha challenge, re-solving...`);
     invalidateCaptchaToken();
@@ -127,10 +153,13 @@ export async function proxyRequest(
         [RETRY_HEADERS.REGION]: fresh.region,
       });
       upstreamResp = await fetchImpl(upstreamReq, translateMode ? {} : { decompress: false }).catch((err: Error) => {
+        if (debug) debugError(reqId, "upstream_unreachable", err.message);
         printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
         return errorResponse(502, "upstream_unreachable", err.message);
       });
+      if (debug) debugLine(reqId, `← retry ${upstreamResp.status} ${upstreamResp.statusText}`);
     } catch (err) {
+      if (debug) debugError(reqId, "captcha_solver_failed", (err as Error).message);
       printRow(reqId, format, meta, 503, started, Date.now(), 0, 0, 0);
       return errorResponse(503, "captcha_solver_failed", (err as Error).message);
     }
@@ -338,6 +367,59 @@ function localTime(ms: number): string {
 
 function nextReqId(): string {
   return `#${String(++reqCounter).padStart(3, "0")}`;
+}
+
+const DEBUG_BODY_PREVIEW = 200;
+const SENSITIVE_HEADERS = new Set(["authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization"]);
+
+function debugLine(reqId: string, msg: string): void {
+  console.log(`${reqId} debug: ${msg}`);
+}
+
+function debugError(reqId: string, kind: string, msg: string): void {
+  console.log(`${reqId} debug: ERROR ${kind}: ${msg}`);
+}
+
+function redactHeaderVal(key: string, val: string): string {
+  const k = key.toLowerCase();
+  if (!SENSITIVE_HEADERS.has(k)) return val;
+  if (k === "authorization") {
+    const sp = val.indexOf(" ");
+    return sp > 0 ? `${val.slice(0, sp)} <redacted>` : "<redacted>";
+  }
+  if (val.length <= 10) return "<redacted>";
+  return `${val.slice(0, 6)}...${val.slice(-4)}`;
+}
+
+function formatHeaderPairs(headers: Headers): string {
+  const pairs: string[] = [];
+  for (const [k, v] of headers.entries()) {
+    pairs.push(`${k}=${redactHeaderVal(k, v)}`);
+  }
+  return pairs.join(" ");
+}
+
+function formatResponseHeaders(headers: Headers): string {
+  const interesting = [
+    "content-type",
+    "content-encoding",
+    "content-length",
+    "x-request-id",
+    "anthropic-ratelimit-requests-remaining",
+    "anthropic-ratelimit-tokens-remaining",
+  ];
+  const pairs: string[] = [];
+  for (const h of interesting) {
+    const v = headers.get(h);
+    if (v) pairs.push(`${h}=${v}`);
+  }
+  return pairs.length > 0 ? pairs.join(" ") : "(no notable headers)";
+}
+
+function previewBody(body: string): string {
+  const flat = body.replace(/\s+/g, " ").trim();
+  if (flat.length <= DEBUG_BODY_PREVIEW) return flat;
+  return `${flat.slice(0, DEBUG_BODY_PREVIEW)}…(${flat.length} bytes total)`;
 }
 
 function printHeader(): void {

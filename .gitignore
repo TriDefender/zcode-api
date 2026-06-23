@@ -8,3 +8,4 @@ dist/
 /.omo
 /_reverse
 /zcode-proxy.exe
+/zcode-proxy-linux-*

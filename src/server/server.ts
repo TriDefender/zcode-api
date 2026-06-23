@@ -13,12 +13,14 @@ interface ServerOptions {
   auth: AuthManager;
   /** Override fetch for testing. */
   fetchImpl?: typeof fetch;
+  /** When true, enable per-request debug diagnostics in the proxy handler. */
+  debug?: boolean;
 }
 
 /** Create a Bun.serve-compatible fetch handler. */
 export function createFetchHandler(opts: ServerOptions): (req: Request) => Promise<Response> {
   const { config, auth } = opts;
-  const proxyOpts = { config, auth, fetchImpl: opts.fetchImpl };
+  const proxyOpts = { config, auth, fetchImpl: opts.fetchImpl, debug: opts.debug === true };
 
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);

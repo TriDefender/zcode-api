@@ -27,6 +27,29 @@ async function collectStream(stream: ReadableStream<Uint8Array>): Promise<string
   return result;
 }
 
+interface ParsedChunk {
+  choices: Array<{
+    delta: {
+      role?: string;
+      content?: string;
+      tool_calls?: Array<{
+        index: number;
+        id?: string;
+        type?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
+    };
+    finish_reason: string | null;
+  }>;
+}
+
+function parseChunks(output: string): ParsedChunk[] {
+  return output
+    .split('\n')
+    .filter((l) => l.startsWith('data: ') && l !== 'data: [DONE]')
+    .map((l) => JSON.parse(l.slice(6)) as ParsedChunk);
+}
+
 const ANTHROPIC_SSE = [
   'event: message_start',
   'data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"glm-4.6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}',
@@ -101,6 +124,192 @@ describe("anthropicSseToOpenaiSse", () => {
     const input = makeStream(sse);
     const output = await collectStream(anthropicSseToOpenaiSse(input, "glm-4.6"));
     expect(output).toContain('"finish_reason":"length"');
+  });
+
+  it("emits OpenAI tool_calls delta with id+name+empty arguments on tool_use content_block_start", async () => {
+    const sse = [
+      'event: message_start',
+      'data: {"type":"message_start","message":{"id":"msg_1","model":"glm-4.6"}}',
+      '',
+      'event: content_block_start',
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_abc","name":"get_weather","input":{}}}',
+      '',
+      'event: content_block_stop',
+      'data: {"type":"content_block_stop","index":0}',
+      '',
+      'event: message_delta',
+      'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n');
+    const input = makeStream(sse);
+    const output = await collectStream(anthropicSseToOpenaiSse(input, "glm-4.6"));
+    const chunks = parseChunks(output);
+    const toolCallChunks = chunks.filter((c) => c.choices?.[0]?.delta?.tool_calls);
+    expect(toolCallChunks).toHaveLength(1);
+    const tc = toolCallChunks[0].choices[0].delta.tool_calls![0];
+    expect(tc).toEqual({
+      index: 0,
+      id: "toolu_abc",
+      type: "function",
+      function: { name: "get_weather", arguments: "" },
+    });
+    const finishReasons = chunks
+      .flatMap((c) => c.choices ?? [])
+      .map((ch) => ch.finish_reason)
+      .filter((fr): fr is string => fr !== null && fr !== undefined);
+    expect(finishReasons).toEqual(["tool_calls"]);
+  });
+
+  it("streams input_json_delta as OpenAI tool_calls.function.arguments deltas", async () => {
+    const deltaLine = (partial: string) =>
+      `data: ${JSON.stringify({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "input_json_delta", partial_json: partial },
+      })}`;
+    const sse = [
+      'event: message_start',
+      `data: ${JSON.stringify({ type: "message_start", message: { id: "msg_1", model: "glm-4.6" } })}`,
+      '',
+      'event: content_block_start',
+      `data: ${JSON.stringify({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "tool_use", id: "toolu_1", name: "get_weather", input: {} },
+      })}`,
+      '',
+      'event: content_block_delta',
+      deltaLine('{"city":'),
+      '',
+      'event: content_block_delta',
+      deltaLine('"SF"}'),
+      '',
+      'event: content_block_stop',
+      `data: ${JSON.stringify({ type: "content_block_stop", index: 0 })}`,
+      '',
+      'event: message_delta',
+      `data: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "tool_use" } })}`,
+      '',
+      'event: message_stop',
+      `data: ${JSON.stringify({ type: "message_stop" })}`,
+      '',
+    ].join('\n');
+    const input = makeStream(sse);
+    const output = await collectStream(anthropicSseToOpenaiSse(input, "glm-4.6"));
+    const chunks = output
+      .split('\n')
+      .filter((l) => l.startsWith('data: ') && l !== 'data: [DONE]')
+      .map((l) => JSON.parse(l.slice(6)) as { choices: Array<{ delta: { tool_calls?: Array<{ index: number; function?: { arguments?: string } }> } }> });
+    const argChunks = chunks
+      .flatMap((c) => c.choices?.[0]?.delta?.tool_calls ?? []);
+    expect(argChunks.length).toBe(3);
+    expect(argChunks[0]).toMatchObject({ index: 0, id: "toolu_1" });
+    expect(argChunks[0].function?.arguments).toBe("");
+    expect(argChunks[1].function?.arguments).toBe('{"city":');
+    expect(argChunks[2].function?.arguments).toBe('"SF"}');
+    const assembled = (argChunks.map((c) => c.function?.arguments ?? "").join(""));
+    expect(JSON.parse(assembled)).toEqual({ city: "SF" });
+  });
+
+  it("uses separate incrementing OpenAI tool_calls index for multiple parallel tool_use blocks", async () => {
+    const sse = [
+      'event: message_start',
+      'data: {"type":"message_start","message":{"id":"msg_1","model":"glm-4.6"}}',
+      '',
+      'event: content_block_start',
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_a","name":"w","input":{}}}',
+      '',
+      'event: content_block_start',
+      'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_b","name":"w","input":{}}}',
+      '',
+      'event: message_delta',
+      'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n');
+    const input = makeStream(sse);
+    const output = await collectStream(anthropicSseToOpenaiSse(input, "glm-4.6"));
+    const chunks = parseChunks(output);
+    const toolCallChunks = chunks.filter((c) => c.choices?.[0]?.delta?.tool_calls);
+    expect(toolCallChunks).toHaveLength(2);
+    expect(toolCallChunks[0].choices[0].delta.tool_calls![0]).toEqual({
+      index: 0,
+      id: "toolu_a",
+      type: "function",
+      function: { name: "w", arguments: "" },
+    });
+    expect(toolCallChunks[1].choices[0].delta.tool_calls![0]).toEqual({
+      index: 1,
+      id: "toolu_b",
+      type: "function",
+      function: { name: "w", arguments: "" },
+    });
+  });
+
+  it("does not emit tool_calls for text-only streams (regression)", async () => {
+    const input = makeStream(ANTHROPIC_SSE);
+    const output = await collectStream(anthropicSseToOpenaiSse(input, "glm-4.6"));
+    expect(output).not.toContain('"tool_calls"');
+  });
+
+  it("emits exactly one non-null finish_reason per stream (no duplicate from message_stop)", async () => {
+    const sse = [
+      'event: message_start',
+      `data: ${JSON.stringify({ type: "message_start", message: { id: "msg_1", model: "glm-4.6" } })}`,
+      '',
+      'event: content_block_start',
+      `data: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "toolu_1", name: "w", input: {} } })}`,
+      '',
+      'event: message_delta',
+      `data: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "tool_use" } })}`,
+      '',
+      'event: message_stop',
+      `data: ${JSON.stringify({ type: "message_stop" })}`,
+      '',
+    ].join('\n');
+    const input = makeStream(sse);
+    const output = await collectStream(anthropicSseToOpenaiSse(input, "glm-4.6"));
+    const chunks = output
+      .split('\n')
+      .filter((l) => l.startsWith('data: ') && l !== 'data: [DONE]')
+      .map((l) => JSON.parse(l.slice(6)) as { choices: Array<{ finish_reason: string | null }> });
+    const finishReasons = chunks
+      .flatMap((c) => c.choices ?? [])
+      .map((ch) => ch.finish_reason)
+      .filter((fr): fr is string => fr !== null && fr !== undefined);
+    expect(finishReasons).toHaveLength(1);
+    expect(finishReasons[0]).toBe("tool_calls");
+  });
+
+  it("still emits finish_reason='stop' via message_stop when message_delta lacks stop_reason", async () => {
+    const sse = [
+      'event: message_start',
+      `data: ${JSON.stringify({ type: "message_start", message: { id: "msg_1", model: "glm-4.6" } })}`,
+      '',
+      'event: content_block_delta',
+      `data: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Hi" } })}`,
+      '',
+      'event: message_stop',
+      `data: ${JSON.stringify({ type: "message_stop" })}`,
+      '',
+    ].join('\n');
+    const input = makeStream(sse);
+    const output = await collectStream(anthropicSseToOpenaiSse(input, "glm-4.6"));
+    const chunks = output
+      .split('\n')
+      .filter((l) => l.startsWith('data: ') && l !== 'data: [DONE]')
+      .map((l) => JSON.parse(l.slice(6)) as { choices: Array<{ finish_reason: string | null }> });
+    const finishReasons = chunks
+      .flatMap((c) => c.choices ?? [])
+      .map((ch) => ch.finish_reason)
+      .filter((fr): fr is string => fr !== null && fr !== undefined);
+    expect(finishReasons).toHaveLength(1);
+    expect(finishReasons[0]).toBe("stop");
   });
 });
 

@@ -614,6 +614,170 @@ describe("proxyRequest — regression: Anthropic passthrough unchanged", () => {
   });
 });
 
+describe("proxyRequest — tool-call roundtrip (OpenAI client through Anthropic upstream)", () => {
+  const testConfig: ProxyConfig = {
+    server: { port: 8080, host: "0.0.0.0" },
+    auth: { mode: "apikey", apiKey: "testkey.testsecret" },
+    provider: "zai",
+    plan: "coding-plan",
+    providers: {
+      zai: { anthropicBase: "https://api.z.ai/api/anthropic", openaiBase: "https://api.z.ai/api/coding/paas/v4" },
+      bigmodel: { anthropicBase: "https://open.bigmodel.cn/api/anthropic", openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4" },
+    },
+    defaultModel: "glm-4.6",
+    models: ["glm-4.6"],
+    identity: IDENTITY,
+    logging: { level: "info" },
+  };
+
+  function makeOpenAIReq(body: string): Request {
+    return new Request("http://localhost:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+  }
+
+  it("translates a full OpenAI tool-call roundtrip to Anthropic tool_use + tool_result", async () => {
+    let upstreamBody2: string | undefined;
+    const fetchMock = mock(async (req: Request): Promise<Response> => {
+      const bodyText = await req.text();
+      const parsed = JSON.parse(bodyText) as { messages: Array<{ role: string; content: unknown }> };
+
+      const hasToolResultInHistory = parsed.messages.some(
+        (m) => Array.isArray(m.content) && m.content.some((b: any) => b?.type === "tool_result"),
+      );
+
+      if (!hasToolResultInHistory) {
+        return new Response(JSON.stringify({
+          id: "msg_tool_1",
+          type: "message",
+          role: "assistant",
+          content: [
+            { type: "text", text: "Let me check." },
+            { type: "tool_use", id: "toolu_xyz", name: "get_weather", input: { city: "SF" } },
+          ],
+          model: "glm-4.6",
+          stop_reason: "tool_use",
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 8 },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
+
+      upstreamBody2 = bodyText;
+      return new Response(JSON.stringify({
+        id: "msg_final",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text: "It's 62°F in SF." }],
+        model: "glm-4.6",
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 25, output_tokens: 6 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+
+    const req1Body = JSON.stringify({
+      model: "glm-4.6",
+      messages: [{ role: "user", content: "What's the weather in SF?" }],
+      tools: [{ type: "function", function: { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }],
+      tool_choice: "auto",
+    });
+    const resp1 = await proxyRequest(makeOpenAIReq(req1Body), "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    expect(resp1.status).toBe(200);
+    const resp1Body = await resp1.json();
+    expect(resp1Body.choices[0].finish_reason).toBe("tool_calls");
+    const toolCall = resp1Body.choices[0].message.tool_calls?.[0];
+    expect(toolCall).toBeDefined();
+    expect(toolCall.id).toBe("toolu_xyz");
+    expect(toolCall.function.name).toBe("get_weather");
+    expect(JSON.parse(toolCall.function.arguments)).toEqual({ city: "SF" });
+
+    const req2Body = JSON.stringify({
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "What's the weather in SF?" },
+        { role: "assistant", content: null, tool_calls: [toolCall] },
+        { role: "tool", tool_call_id: toolCall.id, content: "62°F and sunny" },
+      ],
+      tools: [{ type: "function", function: { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }],
+    });
+    const resp2 = await proxyRequest(makeOpenAIReq(req2Body), "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    expect(resp2.status).toBe(200);
+    const resp2Body = await resp2.json();
+    expect(resp2Body.choices[0].message.content).toBe("It's 62°F in SF.");
+    expect(resp2Body.choices[0].finish_reason).toBe("stop");
+
+    expect(upstreamBody2).toBeDefined();
+    const upstreamReq = JSON.parse(upstreamBody2!);
+    expect(upstreamReq.messages).toHaveLength(3);
+    expect(upstreamReq.messages[0].role).toBe("user");
+    expect(upstreamReq.messages[1].role).toBe("assistant");
+    const assistantBlocks = upstreamReq.messages[1].content;
+    expect(Array.isArray(assistantBlocks)).toBe(true);
+    const toolUseBlock = assistantBlocks.find((b: any) => b.type === "tool_use");
+    expect(toolUseBlock).toMatchObject({ id: "toolu_xyz", name: "get_weather", input: { city: "SF" } });
+
+    expect(upstreamReq.messages[2].role).toBe("user");
+    const userBlocks = upstreamReq.messages[2].content;
+    expect(Array.isArray(userBlocks)).toBe(true);
+    const toolResultBlock = userBlocks.find((b: any) => b.type === "tool_result");
+    expect(toolResultBlock).toMatchObject({ tool_use_id: "toolu_xyz", content: "62°F and sunny" });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("coalesces parallel tool results into one Anthropic user message at the upstream", async () => {
+    let upstreamBody: string | undefined;
+    const fetchMock = mock(async (req: Request): Promise<Response> => {
+      upstreamBody = await req.text();
+      return new Response(JSON.stringify({
+        id: "msg_done",
+        type: "message",
+        role: "assistant",
+        content: [{ type: "text", text: "ok" }],
+        model: "glm-4.6",
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 1 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+
+    const body = JSON.stringify({
+      model: "glm-4.6",
+      messages: [
+        { role: "user", content: "weather in SF and NYC" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            { id: "call_a", type: "function", function: { name: "w", arguments: '{"city":"SF"}' } },
+            { id: "call_b", type: "function", function: { name: "w", arguments: '{"city":"NYC"}' } },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_a", content: "62°F" },
+        { role: "tool", tool_call_id: "call_b", content: "58°F" },
+      ],
+    });
+
+    const resp = await proxyRequest(makeOpenAIReq(body), "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    expect(resp.status).toBe(200);
+
+    const upstreamReq = JSON.parse(upstreamBody!);
+    expect(upstreamReq.messages).toHaveLength(3);
+    expect(upstreamReq.messages[2].role).toBe("user");
+    const blocks = upstreamReq.messages[2].content;
+    expect(Array.isArray(blocks)).toBe(true);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toMatchObject({ type: "tool_result", tool_use_id: "call_a", content: "62°F" });
+    expect(blocks[1]).toMatchObject({ type: "tool_result", tool_use_id: "call_b", content: "58°F" });
+  });
+});
+
 describe("errorResponse", () => {
   it("builds JSON error with correct status", () => {
     const resp = errorResponse(401, "auth_error", "Invalid API key");

@@ -11,6 +11,7 @@ import { ZaiOAuthClient, BigmodelOAuthClient } from "./auth/oauth.js";
 import { KeyResolver } from "./auth/resolver.js";
 import type { Credential } from "./auth/types.js";
 import type { ProviderId } from "./provider/types.js";
+import type { ProxyConfig } from "./config/types.js";
 import { spawn } from "node:child_process";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -18,7 +19,27 @@ import { homedir } from "node:os";
 
 const VERSION = "2.0.1";
 
-main();
+if (import.meta.main) main();
+
+export interface ServeArgs {
+  configPath?: string;
+  debug: boolean;
+}
+
+/**
+ * Parse `serve` subcommand arguments. The token `debug` toggles debug mode;
+ * any other token is treated as the config path. Order-independent:
+ *   []                → { debug: false }
+ *   ["debug"]         → { debug: true }
+ *   ["my.yaml"]       → { configPath: "my.yaml", debug: false }
+ *   ["debug","x.yaml"] → { configPath: "x.yaml", debug: true }
+ *   ["x.yaml","debug"] → { configPath: "x.yaml", debug: true }
+ */
+export function parseServeArgs(args: string[]): ServeArgs {
+  const debug = args.includes("debug");
+  const configPath = args.find((a) => a !== "debug");
+  return { configPath, debug };
+}
 
 function main(): void {
   const args = process.argv.slice(2);
@@ -27,8 +48,10 @@ function main(): void {
   if (cmd === "auth") {
     authCommand(args.slice(1));
   } else if (cmd === "serve" || cmd.endsWith(".yaml") || cmd.endsWith(".yml")) {
-    const configPath = cmd === "serve" ? args[1] : cmd;
-    serve(configPath);
+    const serveArgs = cmd === "serve"
+      ? parseServeArgs(args.slice(1))
+      : parseServeArgs(args);
+    serve(serveArgs.configPath, serveArgs.debug);
   } else if (cmd === "version" || cmd === "--version" || cmd === "-v") {
     console.log(`zcode-proxy ${VERSION}`);
   } else if (cmd === "help" || cmd === "--help" || cmd === "-h") {
@@ -45,6 +68,8 @@ function printHelp(): void {
 
 Usage:
   zcode-proxy serve [config.yaml]   Start the proxy server (default)
+  zcode-proxy serve debug [config.yaml]
+                                    Start with verbose per-request diagnostics
   zcode-proxy auth login <provider> Login via OAuth (provider: zai | bigmodel)
   zcode-proxy auth login <provider> --import
                                     Import API key from ~/.zcode/v2/config.json
@@ -55,6 +80,7 @@ Usage:
 
 Examples:
   zcode-proxy                       Start server with default config.yaml
+  zcode-proxy serve debug           Start with extra debug logging
   zcode-proxy auth login bigmodel   OAuth login for Bigmodel
   zcode-proxy auth login bigmodel --import
                                     Import existing key from ZCode config
@@ -62,7 +88,7 @@ Examples:
 `);
 }
 
-async function serve(configPath?: string): Promise<void> {
+async function serve(configPath: string | undefined, debug: boolean): Promise<void> {
   const path = configPath ?? process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
   if (!existsSync(path)) {
     writeFileSync(path, EXAMPLE_CONFIG_YAML, "utf-8");
@@ -86,13 +112,16 @@ async function serve(configPath?: string): Promise<void> {
     auth.setOAuthCredential(cred);
   }
 
-  const server = startServer({ config, auth });
+  if (debug) printDebugBanner(config, path);
+
+  const server = startServer({ config, auth, debug });
   const url = `http://${server.hostname}:${server.port}`;
   console.log(`zcode-proxy listening on ${url}`);
   console.log(`  provider: ${config.provider}`);
   console.log(`  plan: ${config.plan}`);
   console.log(`  auth mode: ${config.auth.mode}`);
   console.log(`  models: ${config.models.length} available`);
+  if (debug) console.log(`  debug: ON`);
 
   process.on("SIGINT", () => {
     console.log("\nShutting down...");
@@ -103,6 +132,25 @@ async function serve(configPath?: string): Promise<void> {
     server.stop(true);
     process.exit(0);
   });
+}
+
+function printDebugBanner(config: ProxyConfig, path: string): void {
+  const cred = config.providers[config.provider].credential ?? config.auth.apiKey;
+  const credShape = cred ? `${cred.slice(0, 6)}...${cred.slice(-4)} (${cred.length} chars)` : "(none — oauth)";
+  const active = config.providers[config.provider];
+  console.log("=== zcode-proxy DEBUG MODE ===");
+  console.log(`  config file: ${path}`);
+  console.log(`  server: ${config.server.host}:${config.server.port}`);
+  console.log(`  proxy api key: ${config.auth.proxyApiKey ? "required" : "open (no client auth)"}`);
+  console.log(`  provider: ${config.provider}`);
+  console.log(`  plan: ${config.plan}`);
+  console.log(`  identity: appVersion=${config.identity.appVersion} sourceTitle=${config.identity.sourceTitle} referer=${config.identity.refererOrigin}`);
+  console.log(`  anthropic base: ${active.anthropicBase}`);
+  console.log(`  openai base:    ${active.openaiBase}`);
+  console.log(`  credential: ${credShape}`);
+  console.log(`  models (${config.models.length}): ${config.models.join(", ")}`);
+  console.log(`  log level: ${config.logging.level}`);
+  console.log("===============================");
 }
 
 function authCommand(args: string[]): void {
