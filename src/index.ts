@@ -232,15 +232,12 @@ async function runOAuth(provider: ProviderId): Promise<{ accessToken: string; us
   }
 
   const oauth = new ZaiOAuthClient();
-  const init = await oauth.init("zai");
-
-  console.log("Open this URL to authorize:\n");
-  console.log(`  ${init.authorizeUrl}\n`);
-  console.log(`Waiting... (expires in ${Math.floor((init.expiresAt - Date.now()) / 1000)}s)\n`);
-
-  openBrowser(init.authorizeUrl);
-
-  const result = await oauth.waitForAuth(init);
+  const result = await oauth.authorize((url) => {
+    console.log("Open this URL to authorize:\n");
+    console.log(`  ${url}\n`);
+    console.log("Waiting for authorization... (expires in 300s)\n");
+    openBrowser(url);
+  });
   return { accessToken: result.accessToken, userId: result.userId, jwt: result.jwt };
 }
 

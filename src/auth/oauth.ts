@@ -1,8 +1,18 @@
 /**
- * OAuth flow handlers for Z.AI (device/poll) and Bigmodel (auth-code/callback).
- * @see .omo/plans/zcode-proxy.md Task 9
+ * OAuth flow handlers for Z.AI and Bigmodel.
+ *
+ * Both providers use the **same auth-code flow** (verified against the ZCode
+ * 3.1.x desktop bundle, `out/host/index.js` provider adapters): the client
+ * starts a localhost callback server, opens the provider's authorize URL in a
+ * browser, then exchanges the returned `code` at a shared zcode.z.ai token
+ * endpoint. The previous Z.AI device/poll flow (`/oauth/cli/init` +
+ * `/oauth/cli/poll`) was **removed upstream** — those endpoints now 404.
+ *
+ * Provider-specific bits are isolated in `AuthCodeConfig`:
+ * - Z.AI:      authorize `chat.z.ai/api/oauth/authorize`, appId `client_P8X5CMWmlaRO9gyO-KSqtg`, token field `data.zai.access_token`
+ * - Bigmodel:  authorize `bigmodel.cn/login`,             appId `zcode`,                       token field `data.bigmodel.access_token`
+ *
  * @see _reverse/NOTEPAD.md "Method 1: OAuth Flow"
- * @see _reverse/zcode.cjs: Act (createZaiCliOAuthClient), p3r (createBigmodelOAuthClient), Wro (loginBigmodelCodingPlan)
  */
 import type { ProviderId } from "../provider/types.js";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
@@ -12,246 +22,96 @@ import { randomBytes } from "node:crypto";
 // Constants (from bundle)
 // ---------------------------------------------------------------------------
 
-const ZCODE_OAUTH_BASE = "https://zcode.z.ai/api/v1";
+/** Shared token-exchange endpoint (both providers). Bundle: `tokenUrl`. */
+const ZCODE_TOKEN_ENDPOINT = "https://zcode.z.ai/api/v1/oauth/token";
+/** Default Bigmodel authorize host (bundle `BIGMODEL_OAUTH_AUTHORIZE_URL`). */
 const BIGMODEL_HOST = "https://bigmodel.cn";
+/** Default Bigmodel app id (bundle `BIGMODEL_OAUTH_APP_ID`). */
 const BIGMODEL_APP_ID = "zcode";
-const BIGMODEL_CALLBACK_PATH = "/oauth/callback/bigmodel";
 
 // ---------------------------------------------------------------------------
 // Shared types
 // ---------------------------------------------------------------------------
 
-export interface OAuthInitResponse {
-  flowId: string;
-  pollToken: string;
-  authorizeUrl: string;
-  expiresAt: number; // milliseconds
-  pollIntervalSec: number;
-}
-
-interface OAuthResult {
+export interface OAuthResult {
   accessToken: string;
   provider: ProviderId;
   /** Upstream user identifier, when the OAuth response included one. Passed through to `metadata.user_id` on Anthropic-format requests. */
   userId?: string;
-  /** ZCode plan JWT for start-plan (zcode.z.ai). The OAuth poll/exchange response includes this alongside the provider access_token. */
+  /** ZCode plan JWT for start-plan (zcode.z.ai). The token-exchange response includes this alongside the provider access_token. */
   jwt?: string;
 }
 
 export type FetchFn = typeof fetch;
 
-// ---------------------------------------------------------------------------
-// Z.AI envelope helper — {code, data, msg}
-// ---------------------------------------------------------------------------
+/**
+ * Per-provider auth-code configuration. Captures the only points where Z.AI and
+ * Bigmodel diverge (verified against the ZCode 3.1.x bundle adapters `Fm`/`ed`).
+ */
+interface AuthCodeConfig {
+  readonly provider: ProviderId;
+  /** Base authorize URL (`?appId=&redirect=&state=` appended). */
+  readonly authorizeUrl: string;
+  readonly appId: string;
+  /** Shared zcode.z.ai token-exchange endpoint. */
+  readonly tokenUrl: string;
+  /** Path served by the localhost callback server. */
+  readonly callbackPath: string;
+  /** Key under `data` holding the provider access token: `data[field].access_token`. */
+  readonly accessTokenField: string;
+}
 
-interface ZaiEnvelope {
-  code: number;
-  data?: Record<string, unknown>;
+/** Shape of the zcode.z.ai token-exchange response (`{code, data, msg}`). */
+interface TokenExchangeResponse {
+  code?: number;
+  data?: {
+    token?: string;
+    user?: { user_id?: string };
+  } & Record<string, unknown>;
   msg?: string;
 }
 
-/**
- * Validate and unwrap the Z.AI {code, data, msg} envelope.
- * @see bundle k3r (requestJsonEnvelope): code must be number, must be 0 for success.
- */
-function unwrapZaiEnvelope(raw: unknown, httpStatus: number): Record<string, unknown> {
-  const env = raw as ZaiEnvelope;
-  if (typeof env?.code !== "number") {
-    throw new Error(`Invalid OAuth response envelope (httpStatus=${httpStatus}): missing numeric code field`);
-  }
-  if (env.code !== 0) {
-    throw new Error(env.msg ?? `OAuth business error: code=${env.code}`);
-  }
-  return env.data ?? {};
-}
-
 // ---------------------------------------------------------------------------
-// Z.AI OAuth — device/poll flow (Act / createZaiCliOAuthClient)
+// Shared auth-code client — Z.AI & Bigmodel use identical machinery
 // ---------------------------------------------------------------------------
-
-/** Generate a random 32-byte hex poll token. @see bundle I3r / createZaiCliOAuthPollToken */
-function generatePollToken(): string {
-  return randomBytes(32).toString("hex");
-}
 
 /**
- * Z.AI CLI OAuth client.
+ * Auth-code OAuth client: localhost callback server + token exchange.
  *
- * Flow (from bundle Vro / loginZCodeCli):
- *   1. Client generates 32-byte hex pollToken
- *   2. POST /oauth/cli/init with Authorization: Bearer {pollToken}, body {provider:"zai"}
- *      Response: {code:0, data:{flow_id, poll_token, authorize_url, expires_at, poll_interval_sec}}
- *   3. User opens authorize_url in browser
- *   4. GET /oauth/cli/poll/{flowId} with Authorization: Bearer {pollToken}
- *      Response: {code:0, data:{status:"pending"|"ready"|"failed", token, zai:{access_token}, user}}
- *   5. Extract zai.access_token for credential resolution
+ * Flow (mirrors the ZCode desktop `oauthService`):
+ *   1. Start localhost HTTP server on a random port
+ *   2. Build authorize URL: `{authorizeUrl}?appId={appId}&redirect={localhost}&state={state}`
+ *   3. User opens the URL, authorizes on the provider's site
+ *   4. Provider redirects to localhost callback with `?authCode=...&state=...`
+ *   5. POST `{tokenUrl}` body `{provider, code, redirect_uri, state}`
+ *   6. zcode.z.ai exchanges (holding the app secret server-side) and returns
+ *      `{code:0, data:{token:<jwt>, <provider>:{access_token}, user:{user_id}}}`
  */
-export class ZaiOAuthClient {
-  constructor(private fetchImpl: FetchFn = fetch) {}
-
-  async init(provider: ProviderId = "zai"): Promise<OAuthInitResponse> {
-    const pollToken = generatePollToken();
-
-    const resp = await this.fetchImpl(`${ZCODE_OAUTH_BASE}/oauth/cli/init`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${pollToken}`,
-      },
-      body: JSON.stringify({ provider }),
-    });
-
-    const raw = safeJsonParse(await resp.text());
-    if (!resp.ok) {
-      const env = raw as ZaiEnvelope | null;
-      throw new Error(
-        `OAuth init failed: ${resp.status} ${env?.msg ?? ""}`.trim(),
-      );
-    }
-    if (!raw) {
-      throw new Error(`OAuth init failed: invalid JSON response (status ${resp.status})`);
-    }
-
-    // Unwrap {code, data, msg} envelope
-    const data = unwrapZaiEnvelope(raw, resp.status);
-
-    // Validate required fields (bundle parseInitData / $ro)
-    if (
-      typeof data.flow_id !== "string" ||
-      typeof data.authorize_url !== "string" ||
-      typeof data.expires_at !== "number" ||
-      typeof data.poll_interval_sec !== "number"
-    ) {
-      throw new Error(
-        `Invalid OAuth init data: ${JSON.stringify(data).substring(0, 200)}`,
-      );
-    }
-
-    // expires_at is in seconds (bundle: initData.expires_at * 1e3)
-    return {
-      flowId: data.flow_id,
-      pollToken,
-      authorizeUrl: data.authorize_url,
-      expiresAt: data.expires_at * 1000,
-      pollIntervalSec: data.poll_interval_sec,
-    };
-  }
-
-  async poll(flowId: string, pollToken: string): Promise<{
-    status: "pending" | "ready" | "failed";
-    token?: string;
-    zai?: { access_token?: string };
-    userId?: string;
-  }> {
-    const resp = await this.fetchImpl(
-      `${ZCODE_OAUTH_BASE}/oauth/cli/poll/${encodeURIComponent(flowId)}`,
-      {
-        method: "GET",
-        headers: { authorization: `Bearer ${pollToken}` },
-      },
-    );
-
-    const raw = safeJsonParse(await resp.text());
-    if (!resp.ok) {
-      // 400/408/404 -> treat as failed/expired rather than fatal
-      if (resp.status === 400 || resp.status === 408 || resp.status === 404) {
-        return { status: "failed" as const };
-      }
-      const env = raw as ZaiEnvelope | null;
-      throw new Error(
-        `OAuth poll failed: ${resp.status} ${env?.msg ?? ""}`.trim(),
-      );
-    }
-    if (!raw) {
-      throw new Error(`OAuth poll failed: invalid JSON response (status ${resp.status})`);
-    }
-
-    // Unwrap envelope
-    const data = unwrapZaiEnvelope(raw, resp.status);
-    const status = data.status as string;
-
-    if (status === "pending" || status === "failed") {
-      return { status };
-    }
-    if (status === "ready") {
-      const user = data.user as { user_id?: string } | undefined;
-      return {
-        status: "ready",
-        token: data.token as string | undefined,
-        zai: data.zai as { access_token?: string } | undefined,
-        userId: typeof user?.user_id === "string" ? user.user_id : undefined,
-      };
-    }
-
-    throw new Error(`Invalid OAuth poll status: ${status}`);
-  }
-
-  async waitForAuth(
-    init: OAuthInitResponse,
-    onAuthorizeUrl?: (url: string) => void,
-  ): Promise<OAuthResult> {
-    onAuthorizeUrl?.(init.authorizeUrl);
-
-    const deadline = init.expiresAt;
-    const intervalMs = Math.max(1000, init.pollIntervalSec * 1000);
-
-    while (Date.now() < deadline) {
-      await sleep(intervalMs);
-      const result = await this.poll(init.flowId, init.pollToken);
-
-      if (result.status === "ready") {
-        const accessToken = result.zai?.access_token ?? result.token;
-        if (!accessToken || typeof accessToken !== "string") {
-          throw new Error("OAuth ready but no access_token in response");
-        }
-        return { accessToken, provider: "zai", userId: result.userId, jwt: result.token };
-      }
-      if (result.status === "failed") {
-        throw new Error("Authorization failed. Please retry login.");
-      }
-      // pending -> keep polling
-    }
-    throw new Error("Authorization timed out. Please retry login.");
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Bigmodel OAuth — via zcode.z.ai proxy (Electron host process flow)
-// ---------------------------------------------------------------------------
-
-const ZCODE_TOKEN_ENDPOINT = "https://zcode.z.ai/api/v1/oauth/token";
-
-/**
- * Bigmodel OAuth client.
- *
- * The ZCode Electron app proxies the Bigmodel OAuth token exchange through
- * zcode.z.ai so the appSecret stays server-side. We replicate that flow:
- *
- *   1. Start localhost HTTP server on random port
- *   2. Build authorize URL: bigmodel.cn/login?appId=zcode&redirect={localhost}&state={state}
- *   3. User opens URL, authorizes on bigmodel.cn
- *   4. Bigmodel redirects to localhost callback with ?code=...&state=...
- *   5. POST https://zcode.z.ai/api/v1/oauth/token
- *      body: {provider:"bigmodel", code, redirect_uri, state}
- *   6. zcode.z.ai server uses its own appSecret to exchange with Bigmodel
- *   7. Returns access_token
- *
- * @see ~/.zcode/v2/logs — [bigmodelOAuth] zcode token request
- */
-export class BigmodelOAuthClient {
+export abstract class AuthCodeOAuthClient {
   private server: Server | null = null;
+  private callbackResult: { code: string; error: string | null } | null = null;
+  private callbackWaiters: Array<(result: { code: string; error: string | null }) => void> = [];
 
   constructor(
-    private fetchImpl: FetchFn = fetch,
-    private host: string = BIGMODEL_HOST,
-    private appId: string = BIGMODEL_APP_ID,
+    protected readonly config: AuthCodeConfig,
+    protected readonly fetchImpl: FetchFn = fetch,
   ) {}
 
+  /** Build the provider authorize URL with the localhost redirect + state. */
+  protected buildAuthorizeUrl(callbackUrl: string, state: string): string {
+    const params = new URLSearchParams({
+      appId: this.config.appId,
+      redirect: callbackUrl,
+      state,
+    });
+    return `${this.config.authorizeUrl}?${params.toString()}`;
+  }
+
   /**
-   * Run the full Bigmodel OAuth flow: start callback server, return authorize URL.
-   * Call waitForCallback() afterwards, then close().
+   * Start the localhost callback server and return the authorize URL.
+   * Call `waitForCallback()` (or `authorize()`) afterwards, then `close()`.
    */
-  async start(): Promise<{ authorizeUrl: string; callbackUrl: string; state: string }> {
+  start(): Promise<{ authorizeUrl: string; callbackUrl: string; state: string }> {
     const state = randomBytes(32).toString("hex");
 
     return new Promise((resolve, reject) => {
@@ -266,27 +126,16 @@ export class BigmodelOAuthClient {
           reject(new Error("Failed to bind localhost callback server"));
           return;
         }
-        const port = addr.port;
-        const callbackUrl = `http://127.0.0.1:${port}${BIGMODEL_CALLBACK_PATH}`;
-
-        const params = new URLSearchParams({
-          appId: this.appId,
-          redirect: callbackUrl,
-          state,
-        });
-        const authorizeUrl = `${this.host}/login?${params.toString()}`;
-
+        const callbackUrl = `http://127.0.0.1:${addr.port}${this.config.callbackPath}`;
+        const authorizeUrl = this.buildAuthorizeUrl(callbackUrl, state);
         resolve({ authorizeUrl, callbackUrl, state });
       });
     });
   }
 
-  private callbackResult: { code: string; error: string | null } | null = null;
-  private callbackWaiters: Array<(result: { code: string; error: string | null }) => void> = [];
-
   private handleCallback(req: IncomingMessage, res: ServerResponse, expectedState: string): void {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    if (url.pathname !== BIGMODEL_CALLBACK_PATH) {
+    if (url.pathname !== this.config.callbackPath) {
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("Not found");
       return;
@@ -314,13 +163,13 @@ export class BigmodelOAuthClient {
     }
   }
 
-  /** Wait for the OAuth callback redirect. Resolves with authCode. */
-  async waitForCallback(timeoutMs: number = 300_000): Promise<string> {
+  /** Wait for the OAuth callback redirect. Resolves with the auth code. */
+  waitForCallback(timeoutMs: number = 300_000): Promise<string> {
     if (this.callbackResult?.code) {
-      return this.callbackResult.code;
+      return Promise.resolve(this.callbackResult.code);
     }
     if (this.callbackResult?.error) {
-      throw new Error(this.callbackResult.error);
+      return Promise.reject(new Error(this.callbackResult.error));
     }
 
     return new Promise<string>((resolve, reject) => {
@@ -340,53 +189,50 @@ export class BigmodelOAuthClient {
   }
 
   /**
-   * Exchange auth code via zcode.z.ai proxy.
-   * The ZCode server holds the appSecret and performs the real Bigmodel exchange.
-   * Returns `{ accessToken, userId }` — userId is captured from the response's
-   * `data.user.user_id` when present.
+   * Exchange the auth code at the shared zcode.z.ai token endpoint.
+   * The ZCode server holds the app secret and performs the real provider exchange.
+   * Returns `{ accessToken, userId, jwt }`.
    */
   async exchangeCode(
     authCode: string,
     redirectUri: string,
     state: string,
   ): Promise<{ accessToken: string; userId?: string; jwt?: string }> {
-    const resp = await this.fetchImpl(ZCODE_TOKEN_ENDPOINT, {
+    const resp = await this.fetchImpl(this.config.tokenUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        provider: "bigmodel",
+        provider: this.config.provider,
         code: authCode,
         redirect_uri: redirectUri,
         state,
       }),
     });
 
-    const raw = safeJsonParse(await resp.text()) as {
-      code?: number;
-      data?: {
-        token?: string;
-        user?: { user_id?: string };
-        bigmodel?: { access_token?: string };
-      };
-      msg?: string;
-    } | null;
+    const raw = safeJsonParse(await resp.text()) as TokenExchangeResponse | null;
 
     if (!resp.ok || (raw && typeof raw.code === "number" && raw.code !== 0)) {
+      const label = this.config.provider;
       throw new Error(
-        `Bigmodel token exchange failed: status=${resp.status} msg=${raw?.msg ?? "(none)"}`,
+        `${label} token exchange failed: status=${resp.status} msg=${raw?.msg ?? "(none)"}`,
       );
     }
 
-    const accessToken = raw?.data?.bigmodel?.access_token?.trim() ?? "";
+    const providerToken = raw?.data?.[this.config.accessTokenField] as
+      | { access_token?: string }
+      | undefined;
+    const accessToken = providerToken?.access_token?.trim() ?? "";
 
     if (!accessToken) {
-      throw new Error("Bigmodel token response missing bigmodel.access_token");
+      throw new Error(`${this.config.provider} token response missing data.${this.config.accessTokenField}.access_token`);
     }
+
     const userId = raw?.data?.user?.user_id;
     const jwt = raw?.data?.token?.trim() ?? undefined;
     return { accessToken, userId: typeof userId === "string" ? userId : undefined, jwt };
   }
 
+  /** Run the full flow: start server, surface authorize URL, exchange code. */
   async authorize(
     onAuthorizeUrl?: (url: string) => void,
     timeoutMs: number = 300_000,
@@ -397,7 +243,7 @@ export class BigmodelOAuthClient {
     try {
       const authCode = await this.waitForCallback(timeoutMs);
       const { accessToken, userId, jwt } = await this.exchangeCode(authCode, callbackUrl, state);
-      return { accessToken, provider: "bigmodel", userId, jwt };
+      return { accessToken, provider: this.config.provider, userId, jwt };
     } finally {
       await this.close();
     }
@@ -414,12 +260,66 @@ export class BigmodelOAuthClient {
 }
 
 // ---------------------------------------------------------------------------
-// Utility
+// Provider configs (verified against ZCode 3.1.x bundle `out/host/index.js`)
 // ---------------------------------------------------------------------------
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
+/**
+ * Z.AI auth-code config.
+ * Bundle `Fm`: authorizeUrl `chat.z.ai/api/oauth/authorize`, appId
+ * `client_P8X5CMWmlaRO9gyO-KSqtg`, token field `data.zai.access_token`.
+ * (The legacy `oauth/cli/init` device/poll flow is gone — those endpoints 404.)
+ */
+const ZAI_AUTH_CODE_CONFIG: AuthCodeConfig = {
+  provider: "zai",
+  authorizeUrl: "https://chat.z.ai/api/oauth/authorize",
+  appId: "client_P8X5CMWmlaRO9gyO-KSqtg",
+  tokenUrl: ZCODE_TOKEN_ENDPOINT,
+  callbackPath: "/oauth/callback/zai",
+  accessTokenField: "zai",
+};
+
+/**
+ * Bigmodel auth-code config.
+ * Bundle `ed`: authorizeUrl `bigmodel.cn/login`, appId `zcode`,
+ * token field `data.bigmodel.access_token`.
+ */
+const BIGMODEL_AUTH_CODE_CONFIG: AuthCodeConfig = {
+  provider: "bigmodel",
+  authorizeUrl: `${BIGMODEL_HOST}/login`,
+  appId: BIGMODEL_APP_ID,
+  tokenUrl: ZCODE_TOKEN_ENDPOINT,
+  callbackPath: "/oauth/callback/bigmodel",
+  accessTokenField: "bigmodel",
+};
+
+/** Z.AI OAuth client (auth-code flow via chat.z.ai + zcode.z.ai token exchange). */
+export class ZaiOAuthClient extends AuthCodeOAuthClient {
+  constructor(fetchImpl: FetchFn = fetch) {
+    super(ZAI_AUTH_CODE_CONFIG, fetchImpl);
+  }
 }
+
+/**
+ * Bigmodel OAuth client (auth-code flow via bigmodel.cn + zcode.z.ai token
+ * exchange). `host`/`appId` are overridable to mirror the bundle's env vars
+ * (`BIGMODEL_OAUTH_AUTHORIZE_URL`, `BIGMODEL_OAUTH_APP_ID`).
+ */
+export class BigmodelOAuthClient extends AuthCodeOAuthClient {
+  constructor(
+    fetchImpl: FetchFn = fetch,
+    host: string = BIGMODEL_HOST,
+    appId: string = BIGMODEL_APP_ID,
+  ) {
+    super(
+      { ...BIGMODEL_AUTH_CODE_CONFIG, authorizeUrl: `${host}/login`, appId },
+      fetchImpl,
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
 
 function safeJsonParse(text: string): unknown {
   try {

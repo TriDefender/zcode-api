@@ -38,10 +38,10 @@ provider: zai  # or bigmodel
 ### Option 2: OAuth Login (browser-based, both providers)
 
 ```bash
-# Z.AI device/poll flow
+# Z.AI auth-code flow (chat.z.ai authorize → zcode.z.ai token exchange)
 bun run src/index.ts auth login zai
 
-# Bigmodel auth-code flow (via zcode.z.ai proxy)
+# Bigmodel auth-code flow (bigmodel.cn authorize → zcode.z.ai token exchange)
 bun run src/index.ts auth login bigmodel
 
 # This will:
