@@ -59,6 +59,13 @@ interface AuthCodeConfig {
   readonly callbackPath: string;
   /** Key under `data` holding the provider access token: `data[field].access_token`. */
   readonly accessTokenField: string;
+  /**
+   * Authorize query-param scheme (verified against the ZCode 3.1.x bundle —
+   * the two adapters build the URL differently):
+   * - `"oauth2"`: standard OAuth2 — `response_type=code&client_id&redirect_uri&state` (Z.AI, `chat.z.ai/api/oauth/authorize`)
+   * - `"zcode"`: custom — `appId&redirect&state` (Bigmodel, `bigmodel.cn/login`)
+   */
+  readonly authorizeParamStyle: "oauth2" | "zcode";
 }
 
 /** Shape of the zcode.z.ai token-exchange response (`{code, data, msg}`). */
@@ -99,11 +106,19 @@ export abstract class AuthCodeOAuthClient {
 
   /** Build the provider authorize URL with the localhost redirect + state. */
   protected buildAuthorizeUrl(callbackUrl: string, state: string): string {
-    const params = new URLSearchParams({
-      appId: this.config.appId,
-      redirect: callbackUrl,
-      state,
-    });
+    const params =
+      this.config.authorizeParamStyle === "oauth2"
+        ? new URLSearchParams({
+            redirect_uri: callbackUrl,
+            response_type: "code",
+            client_id: this.config.appId,
+            state,
+          })
+        : new URLSearchParams({
+            appId: this.config.appId,
+            redirect: callbackUrl,
+            state,
+          });
     return `${this.config.authorizeUrl}?${params.toString()}`;
   }
 
@@ -276,6 +291,7 @@ const ZAI_AUTH_CODE_CONFIG: AuthCodeConfig = {
   tokenUrl: ZCODE_TOKEN_ENDPOINT,
   callbackPath: "/oauth/callback/zai",
   accessTokenField: "zai",
+  authorizeParamStyle: "oauth2",
 };
 
 /**
@@ -290,6 +306,7 @@ const BIGMODEL_AUTH_CODE_CONFIG: AuthCodeConfig = {
   tokenUrl: ZCODE_TOKEN_ENDPOINT,
   callbackPath: "/oauth/callback/bigmodel",
   accessTokenField: "bigmodel",
+  authorizeParamStyle: "zcode",
 };
 
 /** Z.AI OAuth client (auth-code flow via chat.z.ai + zcode.z.ai token exchange). */

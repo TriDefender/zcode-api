@@ -19,15 +19,16 @@ function envelope(data: Record<string, unknown>): string {
 }
 
 describe("ZaiOAuthClient (auth-code flow)", () => {
-  it("buildAuthorizeUrl targets chat.z.ai with the ZAI appId + redirect + state", async () => {
+  it("buildAuthorizeUrl targets chat.z.ai with standard OAuth2 params (response_type/client_id/redirect_uri)", async () => {
     const client = new ZaiOAuthClient();
     const { authorizeUrl } = await client.start();
     try {
       const url = new URL(authorizeUrl);
       expect(url.origin + url.pathname).toBe("https://chat.z.ai/api/oauth/authorize");
-      expect(url.searchParams.get("appId")).toBe("client_P8X5CMWmlaRO9gyO-KSqtg");
-      expect(url.searchParams.get("redirect")).toStartWith("http://127.0.0.1:");
-      expect(url.searchParams.get("redirect")).toEndWith("/oauth/callback/zai");
+      expect(url.searchParams.get("response_type")).toBe("code");
+      expect(url.searchParams.get("client_id")).toBe("client_P8X5CMWmlaRO9gyO-KSqtg");
+      expect(url.searchParams.get("redirect_uri")).toStartWith("http://127.0.0.1:");
+      expect(url.searchParams.get("redirect_uri")).toEndWith("/oauth/callback/zai");
       expect(url.searchParams.get("state") ?? "").toMatch(/^[0-9a-f]{64}$/);
     } finally {
       await client.close();
@@ -109,10 +110,9 @@ describe("ZaiOAuthClient (auth-code flow)", () => {
     const result = await client.authorize((url) => {
       capturedUrl = url;
       const parsed = new URL(url);
-      const redirect = parsed.searchParams.get("redirect") ?? "";
+      const redirectUri = parsed.searchParams.get("redirect_uri") ?? "";
       const state = parsed.searchParams.get("state") ?? "";
-      // Fire-and-forget the simulated OAuth redirect (uses real localhost HTTP).
-      fetch(`${redirect}?authCode=code_from_provider&state=${state}`).catch(() => {});
+      fetch(`${redirectUri}?authCode=code_from_provider&state=${state}`).catch(() => {});
     });
 
     expect(capturedUrl).toContain("chat.z.ai/api/oauth/authorize");
