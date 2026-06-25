@@ -63,6 +63,14 @@ export function buildUpstreamURL(format: Format, provider: ProviderDef, plan: "c
  * - Anthropic upstream, start-plan  → `Authorization: Bearer {jwt}` + `anthropic-version`
  * - OpenAI upstream (coding-plan)   → `Authorization: Bearer {cred}`
  *
+ * Trace/attribution headers mirror the bundle's `wdt`
+ * ("createModelRequestAttributionHeaders"). That helper emits `x-request-id`
+ * and `x-zcode-trace-id` unconditionally, and `x-query-id` / `x-session-id`
+ * only when those IDs exist — with their internal prefixes stripped
+ * (`query_`, `sess_`, `subagent_agent_`), so the wire values are bare UUIDs.
+ * The proxy has no session lifecycle, so it always synthesizes fresh bare UUIDs
+ * for all four (matching what a live ZCode turn sends on the wire).
+ *
  * See module header for translation semantics.
  */
 export function buildAuthHeaders(format: Format, cred: Credential, identity: ProxyIdentity, plan: "coding-plan" | "start-plan" = "coding-plan"): Record<string, string> {
@@ -71,7 +79,8 @@ export function buildAuthHeaders(format: Format, cred: Credential, identity: Pro
     ...buildIdentityHeaders(identity),
     "x-request-id": crypto.randomUUID(),
     "x-zcode-trace-id": crypto.randomUUID(),
-    "x-query-id": `query_${crypto.randomUUID()}`,
+    // `wdt` strips the `query_` / `sess_` internal prefixes — wire values are bare UUIDs.
+    "x-query-id": crypto.randomUUID(),
     "x-session-id": crypto.randomUUID(),
   };
 

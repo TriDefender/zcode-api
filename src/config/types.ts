@@ -30,13 +30,13 @@ interface AuthConfig {
 
 /**
  * Identity headers injected on every upstream request to mimic the ZCode
- * desktop client. Mirrors the `eYn` builder in the reverse-engineered bundle
+ * desktop client. Mirrors the `pio` builder in the reverse-engineered bundle
  * (`_reverse/zcode.cjs`); see `_reverse/NOTEPAD.md` "How Credential is Used".
  *
  * Resolution: env var (matches ZCode's own convention) → YAML override → default.
  * `appVersion` must be printable ASCII (`/^[\x20-\x7e]+$/`); non-conforming
  * values are silently dropped and fall back to the default (current ZCode
- * release), exactly like `rYn` in the bundle.
+ * release), exactly like `fio` in the bundle.
  */
 export interface ProxyIdentity {
   appVersion: string;
