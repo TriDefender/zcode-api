@@ -162,7 +162,7 @@ auth:
   apiKey: "abc"
 `);
     const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("3.1.1");
+    expect(cfg.identity.appVersion).toBe("3.1.5");
     expect(cfg.identity.sourceTitle).toBe("cli");
     expect(cfg.identity.refererOrigin).toBe("https://zcode.z.ai");
   });
@@ -202,9 +202,9 @@ auth:
   mode: apikey
   apiKey: "abc"
 identity:
-  appVersion: "v3.1.1-中文"
+  appVersion: "v3.1.5-中文"
 `);
     const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("3.1.1");
+    expect(cfg.identity.appVersion).toBe("3.1.5");
   });
 });
