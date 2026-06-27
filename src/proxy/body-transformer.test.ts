@@ -163,6 +163,66 @@ describe("transformRequestBody — combined behavior", () => {
   });
 });
 
+describe("transformRequestBody — start-plan system (Anthropic)", () => {
+  it("prepends current ZCode system messages as three cacheable blocks", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    const out = transformRequestBody(body, { format: "anthropic", startPlan: true });
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.system).toHaveLength(3);
+    expect(parsed.system[0]).toEqual({
+      type: "text",
+      text: "You are ZCode, an interactive coding agent",
+      cache_control: { type: "ephemeral" },
+    });
+    expect(parsed.system[1].text).toContain("# Task Behavior");
+    expect(parsed.system[1].text).toContain("# Risky Actions");
+    expect(parsed.system[1].cache_control).toEqual({ type: "ephemeral" });
+    expect(parsed.system[2].text).toContain("You have been invoked in the following environment:");
+    expect(parsed.system[2].cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("preserves client system text after ZCode's three official blocks", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      system: "User rule",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    const out = transformRequestBody(body, { format: "anthropic", startPlan: true });
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.system[3]).toEqual({ type: "text", text: "User rule" });
+  });
+});
+
+describe("transformRequestBody — start-plan system (OpenAI)", () => {
+  it("prepends current ZCode system messages before OpenAI chat messages", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    const out = transformRequestBody(body, { format: "openai", startPlan: true });
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.messages[0]).toEqual({
+      role: "system",
+      content: "You are ZCode, an interactive coding agent",
+    });
+    expect(parsed.messages[1].role).toBe("system");
+    expect(parsed.messages[1].content).toContain("# Task Behavior");
+    expect(parsed.messages[2].role).toBe("system");
+    expect(parsed.messages[2].content).toContain("You have been invoked in the following environment:");
+    expect(parsed.messages[3]).toEqual({ role: "user", content: "hi" });
+  });
+});
+
 describe("transformRequestBody — metadata.user_id (Anthropic)", () => {
   it("injects metadata.user_id when ctx.userId is set", () => {
     const body = JSON.stringify({

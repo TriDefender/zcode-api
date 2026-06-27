@@ -7,9 +7,8 @@
  * Transformations applied:
  *   1. OpenAI + `stream: true` → inject `stream_options.include_usage: true`
  *      (matches `@ai-sdk/openai-compatible` default in `_reverse/zcode.cjs`).
- *   2. Anthropic + `ctx.startPlan` → prepend ZCode gateway system blocks
- *      (`buildStartPlanSystem`). The zcode.z.ai gateway rejects without them
- *      (3012 "method not allowed"). See `system-prompt.ts` + `zcode_system.json`.
+ *   2. start-plan → prepend ZCode gateway system blocks. OpenAI upstream gets
+ *      system messages; Anthropic-shaped input gets the Anthropic `system` field.
  *   3. Anthropic format → add `cache_control: { type: "ephemeral" }` to the
  *      last non-system message (mirrors `HLr` ("finalizeLatestNonSystemCacheControl")
  *      at offset ~636888 in the bundle). Anthropic's API silently ignores
@@ -49,6 +48,9 @@ export function transformRequestBody(body: string | undefined, ctx: TransformCon
   let modified = false;
 
   if (ctx.format === "openai") {
+    if (ctx.startPlan) {
+      modified = applyStartPlanOpenAISystem(parsed as Record<string, unknown>) || modified;
+    }
     modified = applyStreamOptionsIncludeUsage(parsed as Record<string, unknown>) || modified;
   }
   if (ctx.format === "anthropic") {
@@ -134,5 +136,17 @@ function applyAnthropicUserId(body: Record<string, unknown>, userId: string): bo
  */
 function applyStartPlanSystem(body: Record<string, unknown>): boolean {
   body.system = buildStartPlanSystem(body.system);
+  return true;
+}
+
+function applyStartPlanOpenAISystem(body: Record<string, unknown>): boolean {
+  const messages = body.messages;
+  if (!Array.isArray(messages)) return false;
+
+  const official = buildStartPlanSystem(undefined).map((block) => ({
+    role: "system",
+    content: typeof block === "object" && block !== null && "text" in block ? String(block.text) : "",
+  }));
+  body.messages = [...official, ...messages];
   return true;
 }

@@ -150,25 +150,26 @@ Proxy API Key Auth (shared secret)
 Route Detection + Plan-aware Routing
   /v1/chat/completions (OpenAI client format)
     ├─ coding-plan → TRANSLATE to Anthropic → provider's anthropic endpoint
-    └─ start-plan  → TRANSLATE to Anthropic → zcode.z.ai gateway (JWT + captcha)
+    └─ start-plan  → zcode.z.ai OpenAI-compatible gateway (JWT + captcha)
   /v1/messages     (Anthropic client format)
     ├─ coding-plan → passthrough to provider's anthropic endpoint
-    └─ start-plan  → passthrough to zcode.z.ai gateway (JWT + captcha)
+    └─ start-plan  → TRANSLATE to OpenAI → zcode.z.ai gateway (JWT + captcha)
       │
       ▼
 Body Transformation (ZCode-equivalent mutations)
   OpenAI streaming    → inject stream_options.include_usage
+  start-plan          → prepend ZCode system messages
   Anthropic           → add cache_control to last user message
-  Anthropic + OAuth   → inject metadata.user_id
+  Anthropic + OAuth   → inject metadata.user_id (coding-plan only)
       │
       ▼
-[Translation mode only] OpenAI request → Anthropic request body
+[Translation mode] coding-plan OpenAI → Anthropic; start-plan Anthropic → OpenAI
       │
       ▼
 Auth + Identity Header Injection
   Translation/coding-plan:  x-api-key: {credential} + anthropic-version
-  Translation/start-plan:   Authorization: Bearer {jwt} + anthropic-version
-  Passthrough/start-plan:   Authorization: Bearer {jwt} + anthropic-version
+  Translation/start-plan:   Authorization: Bearer {jwt}
+  Passthrough/start-plan:   Authorization: Bearer {jwt}
   Passthrough/coding-plan:  x-api-key: {credential} + anthropic-version
   Both:                     User-Agent: ZCode/{version} + X-ZCode-* + trace headers
       │
