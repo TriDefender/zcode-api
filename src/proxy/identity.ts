@@ -3,31 +3,56 @@
  * on every upstream request so the proxy is indistinguishable from the official
  * client at the fingerprinting layer.
  *
- * Mirrors `eYn` in `_reverse/zcode.cjs` (offset ~9074294). Differences from the
- * bundle: we read resolved values from `ProxyIdentity` (env/YAML already merged
- * by the config loader) instead of `e[art]`/`t.appVersion`, and we always emit
- * `X-ZCode-App-Version` rather than gating on truthiness — the loader guarantees
- * a printable-ASCII value or the default (`3.1.1`, the current ZCode release).
+ * Mirrors `pio` in the current ZCode bundle (`_reverse/zcode.cjs`, the
+ * `buildProviderIdentityHeaders` helper). Field-for-field, order-for-order:
+ *
+ *   {
+ *     "HTTP-Referer":        EP(env)            // refererOrigin (prod default https://zcode.z.ai)
+ *     "User-Agent":          `ZCode/${n ?? "unknown"}`
+ *     "X-ZCode-App-Version": n                  // ONLY when a valid version resolves
+ *     "X-Title":             `Z Code@${sourceTitle}`
+ *     "X-ZCode-Agent":       "glm"
+ *   }
+ *
+ * where `n = fio(...)` is the resolved appVersion, validated against
+ * `/^[\x20-\x7e]+$/` (printable ASCII). When no version resolves, `pio` drops
+ * `X-ZCode-App-Version` entirely and falls back the User-Agent to
+ * `ZCode/unknown`. We replicate both behaviours exactly.
+ *
+ * We read resolved values from `ProxyIdentity` (env/YAML already merged by the
+ * config loader, which mirrors `fio`'s ASCII gate). `sourceTitle` maps to
+ * `t.sourceTitle ?? hio()` in the bundle (`hio()` yields "electron" under the
+ * Electron app-server argv, else "cli"); the loader default is "cli".
  *
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import type { ProxyIdentity } from "../config/types.js";
 
-interface IdentityHeaders {
-  "User-Agent": string;
-  "X-ZCode-App-Version": string;
-  "X-Title": string;
-  "X-ZCode-Agent": "glm";
-  "HTTP-Referer": string;
+/** Printable-ASCII gate copied from the ZCode bundle's `fio` helper. */
+const ASCII_PRINTABLE = /^[\x20-\x7e]+$/;
+
+/** Resolve the appVersion the way `fio` does: trimmed + printable ASCII, else undefined. */
+function resolveAppVersion(raw: string | undefined): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const v = raw.trim();
+  return v.length > 0 && ASCII_PRINTABLE.test(v) ? v : undefined;
 }
 
-/** Build the five identity headers injected upstream. Pure function. */
-export function buildIdentityHeaders(id: ProxyIdentity): IdentityHeaders {
-  return {
-    "User-Agent": `ZCode/${id.appVersion}`,
-    "X-ZCode-App-Version": id.appVersion,
+/**
+ * Build the five identity headers injected upstream, in the exact order and with
+ * the exact conditional semantics of the bundle's `pio`. Pure function.
+ *
+ * Returns `Record<string, string>` rather than a fixed interface because
+ * `X-ZCode-App-Version` is conditionally omitted (matching `pio`).
+ */
+export function buildIdentityHeaders(id: ProxyIdentity): Record<string, string> {
+  const n = resolveAppVersion(id.appVersion);
+  const headers: Record<string, string> = {
+    "HTTP-Referer": id.refererOrigin,
+    "User-Agent": `ZCode/${n ?? "unknown"}`,
+    ...(n ? { "X-ZCode-App-Version": n } : {}),
     "X-Title": `Z Code@${id.sourceTitle}`,
     "X-ZCode-Agent": "glm",
-    "HTTP-Referer": id.refererOrigin,
   };
+  return headers;
 }

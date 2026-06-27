@@ -109,6 +109,15 @@ describe("buildAuthHeaders", () => {
     expect(h1["x-zcode-trace-id"]).not.toBe(h2["x-zcode-trace-id"]);
     expect(h1["x-query-id"]).not.toBe(h2["x-query-id"]);
   });
+
+  it("does not synthesize start-plan query/session headers when no trace context exists", () => {
+    const h = buildAuthHeaders("anthropic", { ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan");
+
+    expect(h["x-request-id"]).toBeTruthy();
+    expect(h["x-zcode-trace-id"]).toBeTruthy();
+    expect(h["x-query-id"]).toBeUndefined();
+    expect(h["x-session-id"]).toBeUndefined();
+  });
 });
 
 describe("buildUpstreamRequest", () => {
@@ -558,7 +567,7 @@ describe("proxyRequest — regression: Anthropic passthrough unchanged", () => {
     expect(resp.headers.get("content-encoding")).toBe("gzip");
   });
 
-  it("start-plan OpenAI request translates through zcode.z.ai gateway", async () => {
+  it("start-plan OpenAI request uses ZCode OpenAI-compatible gateway", async () => {
     const startPlanConfig: ProxyConfig = {
       ...testConfig,
       plan: "start-plan",
@@ -576,20 +585,20 @@ describe("proxyRequest — regression: Anthropic passthrough unchanged", () => {
 
     try {
       const fetchMock = mock(async (req: Request): Promise<Response> => {
-        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages");
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
         expect(req.headers.get("authorization")).toBe("Bearer jwt-mock");
+        expect(req.headers.get("anthropic-version")).toBeNull();
         const reqBody = JSON.parse(await req.text());
-        expect(reqBody.messages).toBeDefined();
-        expect(reqBody.max_tokens).toBe(4096);
+        expect(reqBody.messages[0].role).toBe("system");
+        expect(reqBody.messages[0].content).toBe("You are ZCode, an interactive coding agent");
+        expect(reqBody.messages.at(-1)).toEqual({ role: "user", content: "hi" });
         return new Response(JSON.stringify({
-          id: "msg_sp",
-          type: "message",
-          role: "assistant",
-          content: [{ type: "text", text: "start-plan reply" }],
+          id: "chatcmpl_sp",
+          object: "chat.completion",
+          created: 1,
           model: "glm-4.6",
-          stop_reason: "end_turn",
-          stop_sequence: null,
-          usage: { input_tokens: 5, output_tokens: 3 },
+          choices: [{ index: 0, message: { role: "assistant", content: "start-plan reply" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
         }), { status: 200, headers: { "content-type": "application/json" } });
       });
 
@@ -608,6 +617,58 @@ describe("proxyRequest — regression: Anthropic passthrough unchanged", () => {
       const body = await resp.json();
       expect(body.object).toBe("chat.completion");
       expect(body.choices[0].message.content).toBe("start-plan reply");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("start-plan Anthropic request translates through ZCode OpenAI-compatible gateway", async () => {
+    const startPlanConfig: ProxyConfig = {
+      ...testConfig,
+      plan: "start-plan",
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = Object.assign(async (req: RequestInfo | URL): Promise<Response> => {
+      const url = typeof req === "string" ? req : req instanceof URL ? req.toString() : req.url;
+      if (url.includes("/client/configs")) {
+        return new Response(JSON.stringify({ data: { configs: { captcha: { enabled: false } } } }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected global fetch in test: ${url}`);
+    }, { preconnect: originalFetch.preconnect });
+
+    try {
+      const fetchMock: typeof fetch = Object.assign(async (req: RequestInfo | URL): Promise<Response> => {
+        if (!(req instanceof Request)) throw new Error("expected Request");
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
+        expect(req.headers.get("authorization")).toBe("Bearer jwt-mock");
+        const reqBody = JSON.parse(await req.text());
+        expect(reqBody.messages[0].role).toBe("system");
+        expect(reqBody.messages.at(-1)).toEqual({ role: "user", content: "hi" });
+        return new Response(JSON.stringify({
+          id: "chatcmpl_sp",
+          object: "chat.completion",
+          created: 1,
+          model: "glm-4.6",
+          choices: [{ index: 0, message: { role: "assistant", content: "start-plan reply" }, finish_reason: "stop" }],
+          usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }, { preconnect: originalFetch.preconnect });
+
+      const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+      auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
+      const clientReq = new Request("http://localhost:8080/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: '{"model":"glm-4.6","max_tokens":1024,"messages":[{"role":"user","content":"hi"}]}',
+      });
+
+      const resp = await proxyRequest(clientReq, "anthropic", { config: startPlanConfig, auth, fetchImpl: fetchMock });
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.type).toBe("message");
+      expect(body.content[0].text).toBe("start-plan reply");
     } finally {
       globalThis.fetch = originalFetch;
     }
