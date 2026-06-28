@@ -61,5 +61,14 @@ identity:
   # HTTP-Referer URL. Default "https://zcode.z.ai".
   refererOrigin: "https://zcode.z.ai"
 
+# Local client-session inference for cache-affinity experiments.
+# "observe" (default) logs inferred sessions in debug mode but does not change
+# upstream x-session-id. "enforce" reuses a stable x-session-id for inferred
+# coding-plan sessions. "off" disables inference entirely.
+clientIdentity:
+  mode: observe
+  ttlSeconds: 900
+  maxSessions: 1024
+
 logging:
   level: info

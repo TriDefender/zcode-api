@@ -16,6 +16,11 @@ import type { ProxyIdentity } from "../config/types.js";
 import { credentialString } from "../auth/types.js";
 import { buildIdentityHeaders } from "./identity.js";
 
+export interface UpstreamClientSession {
+  action: "off" | "observe" | "enforce";
+  upstreamSessionId?: string;
+}
+
 const ANTHROPIC_VERSION = "2023-06-01";
 
 const STARTPLAN_OPENAI_BASE = "https://zcode.z.ai/api/v1/zcode-plan";
@@ -71,7 +76,13 @@ export function buildUpstreamURL(format: Format, provider: ProviderDef, plan: "c
  *
  * See module header for translation semantics.
  */
-export function buildAuthHeaders(format: Format, cred: Credential, identity: ProxyIdentity, plan: "coding-plan" | "start-plan" = "coding-plan"): Record<string, string> {
+export function buildAuthHeaders(
+  format: Format,
+  cred: Credential,
+  identity: ProxyIdentity,
+  plan: "coding-plan" | "start-plan" = "coding-plan",
+  clientSession?: UpstreamClientSession,
+): Record<string, string> {
   const credStr = plan === "start-plan" && cred.jwt ? cred.jwt : credentialString(cred);
   const base: Record<string, string> = {
     ...buildIdentityHeaders(identity),
@@ -82,7 +93,9 @@ export function buildAuthHeaders(format: Format, cred: Credential, identity: Pro
   if (plan !== "start-plan") {
     // `wdt` strips the `query_` / `sess_` internal prefixes — wire values are bare UUIDs.
     base["x-query-id"] = crypto.randomUUID();
-    base["x-session-id"] = crypto.randomUUID();
+    base["x-session-id"] = clientSession?.action === "enforce" && clientSession.upstreamSessionId
+      ? clientSession.upstreamSessionId
+      : crypto.randomUUID();
   }
 
   if (format === "anthropic") {
@@ -120,9 +133,10 @@ export function buildUpstreamRequest(
   identity: ProxyIdentity,
   plan: "coding-plan" | "start-plan" = "coding-plan",
   extraHeaders?: Record<string, string>,
+  clientSession?: UpstreamClientSession,
 ): Request {
   const url = buildUpstreamURL(format, provider, plan);
-  const authHeaders = buildAuthHeaders(format, cred, identity, plan);
+  const authHeaders = buildAuthHeaders(format, cred, identity, plan, clientSession);
   const passthrough = collectPassthroughHeaders(clientReq);
 
   const headers: Record<string, string> = {

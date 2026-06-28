@@ -110,6 +110,28 @@ describe("buildAuthHeaders", () => {
     expect(h1["x-query-id"]).not.toBe(h2["x-query-id"]);
   });
 
+  it("uses a stable x-session-id when an enforced client session is provided", () => {
+    const session = { action: "enforce" as const, upstreamSessionId: "11111111-1111-4111-8111-111111111111" };
+    const h1 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY, "coding-plan", session);
+    const h2 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY, "coding-plan", session);
+
+    expect(h1["x-session-id"]).toBe("11111111-1111-4111-8111-111111111111");
+    expect(h2["x-session-id"]).toBe("11111111-1111-4111-8111-111111111111");
+    expect(h1["x-request-id"]).not.toBe(h2["x-request-id"]);
+    expect(h1["x-zcode-trace-id"]).not.toBe(h2["x-zcode-trace-id"]);
+    expect(h1["x-query-id"]).not.toBe(h2["x-query-id"]);
+  });
+
+  it("does not stabilize x-session-id for observe-only client sessions", () => {
+    const session = { action: "observe" as const, upstreamSessionId: "11111111-1111-4111-8111-111111111111" };
+    const h1 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY, "coding-plan", session);
+    const h2 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY, "coding-plan", session);
+
+    expect(h1["x-session-id"]).toBeTruthy();
+    expect(h2["x-session-id"]).toBeTruthy();
+    expect(h1["x-session-id"]).not.toBe(h2["x-session-id"]);
+  });
+
   it("does not synthesize start-plan query/session headers when no trace context exists", () => {
     const h = buildAuthHeaders("anthropic", { ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan");
 
@@ -181,6 +203,7 @@ describe("proxyRequest", () => {
     defaultModel: "glm-4.6",
     models: ["glm-4.6"],
     identity: IDENTITY,
+    clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     logging: { level: "info" },
   };
 
@@ -318,6 +341,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan)", () => {
     defaultModel: "glm-4.6",
     models: ["glm-4.6"],
     identity: IDENTITY,
+    clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     logging: { level: "info" },
   };
 
@@ -547,6 +571,7 @@ describe("proxyRequest — regression: Anthropic passthrough unchanged", () => {
     defaultModel: "glm-4.6",
     models: ["glm-4.6"],
     identity: IDENTITY,
+    clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     logging: { level: "info" },
   };
 
@@ -688,6 +713,7 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client through Anthropic 
     defaultModel: "glm-4.6",
     models: ["glm-4.6"],
     identity: IDENTITY,
+    clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     logging: { level: "info" },
   };
 
