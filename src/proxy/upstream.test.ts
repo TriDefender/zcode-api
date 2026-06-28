@@ -698,6 +698,46 @@ describe("proxyRequest — regression: Anthropic passthrough unchanged", () => {
       globalThis.fetch = originalFetch;
     }
   });
+
+  it("does not re-solve captcha for a start-plan 403 without captcha challenge header", async () => {
+    const startPlanConfig: ProxyConfig = {
+      ...testConfig,
+      plan: "start-plan",
+    };
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (req: Request | string): Promise<Response> => {
+      const url = typeof req === "string" ? req : req.url;
+      if (url.includes("/client/configs")) {
+        return new Response(JSON.stringify({ data: { configs: { captcha: { enabled: false } } } }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected global fetch in test: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      const fetchMock = mock(async (): Promise<Response> => {
+        return new Response(JSON.stringify({ error: { type: "forbidden", message: "not captcha" } }), {
+          status: 403,
+          headers: { "content-type": "application/json" },
+        });
+      });
+
+      const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+      auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
+      const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}',
+      });
+
+      const resp = await proxyRequest(clientReq, "openai", { config: startPlanConfig, auth, fetchImpl: fetchMock as any });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(resp.status).toBe(403);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
 });
 
 describe("proxyRequest — tool-call roundtrip (OpenAI client through Anthropic upstream)", () => {

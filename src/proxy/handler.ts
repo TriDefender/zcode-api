@@ -145,9 +145,10 @@ export async function proxyRequest(
     return errorResponse(401, "start_plan_jwt_invalid", "Start-plan JWT was rejected. Re-run: zcode-proxy auth login");
   }
 
-  // start-plan: on 403 captcha challenge, force re-solve and retry once
-  if (startPlan && (upstreamResp.status === 403 || detectCaptchaChallenge(upstreamResp))) {
-    if (debug) debugLine(reqId, "403/captcha challenge — re-solving and retrying once");
+  // start-plan: on explicit captcha challenge, force re-solve and retry once
+  const captchaChallenge = startPlan ? detectCaptchaChallenge(upstreamResp) : null;
+  if (captchaChallenge) {
+    if (debug) debugLine(reqId, "captcha challenge — re-solving and retrying once");
     try { upstreamResp.body?.cancel(); } catch {}
     console.log(`${reqId} captcha challenge, re-solving...`);
     invalidateCaptchaToken();
