@@ -17,7 +17,7 @@ import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-const VERSION = "2.0.5.alpha";
+const VERSION = "2.1.0";
 
 if (import.meta.main) main();
 
