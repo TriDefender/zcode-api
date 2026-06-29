@@ -22,6 +22,7 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
     defaultModel: "glm-4.6",
     models: ["glm-4.6"],
     identity: { appVersion: "test-1.0.0", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai" },
+    clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     logging: { level: "info" },
     ...overrides,
   };
