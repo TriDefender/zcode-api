@@ -17,7 +17,7 @@ import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-const VERSION = "2.0.5.alpha";
+const VERSION = "2.1.0";
 
 if (import.meta.main) main();
 
@@ -145,6 +145,7 @@ function printDebugBanner(config: ProxyConfig, path: string): void {
   console.log(`  provider: ${config.provider}`);
   console.log(`  plan: ${config.plan}`);
   console.log(`  identity: appVersion=${config.identity.appVersion} sourceTitle=${config.identity.sourceTitle} referer=${config.identity.refererOrigin}`);
+  console.log(`  client identity: mode=${config.clientIdentity.mode} ttl=${config.clientIdentity.ttlSeconds}s max=${config.clientIdentity.maxSessions}`);
   console.log(`  anthropic base: ${active.anthropicBase}`);
   console.log(`  openai base:    ${active.openaiBase}`);
   console.log(`  credential: ${credShape}`);

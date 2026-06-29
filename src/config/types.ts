@@ -44,6 +44,16 @@ export interface ProxyIdentity {
   refererOrigin: string;
 }
 
+/** Local client-session inference mode for upstream session affinity. */
+export interface ClientIdentityConfig {
+  /** "observe" logs/instruments only; "enforce" reuses upstream x-session-id; "off" disables inference. */
+  mode: "off" | "observe" | "enforce";
+  /** In-memory session TTL in seconds. */
+  ttlSeconds: number;
+  /** Maximum number of inferred sessions retained in memory. */
+  maxSessions: number;
+}
+
 /** Top-level proxy configuration. */
 export interface ProxyConfig {
   server: {
@@ -69,6 +79,8 @@ export interface ProxyConfig {
    * defaults mirror the production ZCode desktop client.
    */
   identity: ProxyIdentity;
+  /** Local client session inference for cache-affinity experiments. */
+  clientIdentity: ClientIdentityConfig;
   logging: {
     level: "debug" | "info" | "warn" | "error";
   };
