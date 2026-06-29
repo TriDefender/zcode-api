@@ -13,9 +13,11 @@ import type { Format } from "../translator/types.js";
 import type { ProxyConfig } from "../config/types.js";
 import type { AuthManager } from "../auth/manager.js";
 import { getProvider } from "../provider/providers.js";
-import { buildUpstreamRequest } from "./upstream.js";
+import { buildUpstreamHeaderPairs, buildUpstreamRequest, type UpstreamHeaderPair } from "./upstream.js";
+import { sendOrderedUpstreamRequest } from "./ordered-transport.js";
 import { transformRequestBody } from "./body-transformer.js";
-import { defaultClientSessionResolver, type ClientSessionResult } from "./client-session.js";
+import { type ClientSessionResult } from "./client-session.js";
+import { resolveSessionContext } from "./session-context.js";
 import { detectCaptchaChallenge, getCaptchaToken, invalidateCaptchaToken, RETRY_HEADERS } from "./captcha.js";
 import { translateRequestOpenAIToAnthropic, translateResponseAnthropicToOpenAI } from "../translator/openai-to-anthropic.js";
 import { translateRequestAnthropicToOpenAI, translateResponseOpenAIToAnthropic } from "../translator/anthropic-to-openai.js";
@@ -58,6 +60,7 @@ export async function proxyRequest(
 ): Promise<Response> {
   const { config, auth } = opts;
   const fetchImpl = opts.fetchImpl ?? fetch;
+  const hasCustomFetchImpl = opts.fetchImpl !== undefined;
   const debug = opts.debug === true;
   const started = Date.now();
   const reqId = nextReqId();
@@ -86,7 +89,11 @@ export async function proxyRequest(
   const translateAnthropicToOpenAI = startPlan && format === "anthropic";
   const translateOpenAIToAnthropic = !startPlan && format === "openai";
   const upstreamFormat: Format = startPlan ? "openai" : (translateOpenAIToAnthropic ? "anthropic" : format);
-  const clientSession = resolveClientSession(clientReq, body, upstreamFormat, meta.model, config, debug, reqId);
+  const clientSession = resolveSessionContext({ clientReq, body, upstreamFormat, model: meta.model, config });
+  if (debug && clientSession) {
+    const shortSession = clientSession.sessionId ? clientSession.sessionId.slice(0, 10) : "-";
+    debugLine(reqId, `clientIdentity source=${clientSession.source} action=${clientSession.action} confidence=${clientSession.confidence.toFixed(2)} session=${shortSession}`);
+  }
 
   let upstreamBody = body;
   if (translateOpenAIToAnthropic) {
@@ -116,6 +123,8 @@ export async function proxyRequest(
     }
   }
 
+  const useOrderedTransport = shouldUseOrderedTransport(config, clientSession, hasCustomFetchImpl);
+  let upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, captchaHeaders, clientSession);
   let upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
 
   if (debug) {
@@ -126,7 +135,7 @@ export async function proxyRequest(
 
   let upstreamResp: Response;
   try {
-    upstreamResp = await fetchImpl(upstreamReq, translateOpenAIToAnthropic || translateAnthropicToOpenAI ? {} : { decompress: false });
+    upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl);
   } catch (err) {
     if (debug) debugError(reqId, "upstream_unreachable", (err as Error).message);
     printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
@@ -155,11 +164,13 @@ export async function proxyRequest(
     try {
       const fresh = await getCaptchaToken(config.identity.appVersion);
       console.log(`${reqId} captcha re-solved (token ${fresh.verifyParam.length} chars), retrying...`);
-      upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, {
+      const retryHeaders = {
         [RETRY_HEADERS.PARAM]: fresh.verifyParam,
         [RETRY_HEADERS.REGION]: fresh.region,
-      }, clientSession);
-      upstreamResp = await fetchImpl(upstreamReq, translateOpenAIToAnthropic || translateAnthropicToOpenAI ? {} : { decompress: false }).catch((err: Error) => {
+      };
+      upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, retryHeaders, clientSession);
+      upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, retryHeaders, clientSession);
+      upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl).catch((err: Error) => {
         if (debug) debugError(reqId, "upstream_unreachable", err.message);
         printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
         return errorResponse(502, "upstream_unreachable", err.message);
@@ -214,22 +225,29 @@ export async function proxyRequest(
   return passthroughResponse(upstreamResp);
 }
 
-function resolveClientSession(
-  clientReq: Request,
+export function shouldUseOrderedTransport(config: ProxyConfig, clientSession: ClientSessionResult | undefined, hasCustomFetchImpl: boolean): boolean {
+  if (hasCustomFetchImpl) return false;
+  return clientSession?.action === "enforce" || clientSession?.source === "explicit";
+}
+
+async function sendUpstreamRequest(
+  upstreamReq: Request,
+  headerPairs: UpstreamHeaderPair[],
   body: string | undefined,
-  upstreamFormat: Format,
-  model: string,
-  config: ProxyConfig,
-  debug: boolean,
-  reqId: string,
-): ClientSessionResult | undefined {
-  if (config.plan === "start-plan" || config.clientIdentity.mode === "off") return undefined;
-  const session = defaultClientSessionResolver.resolve(clientReq, body, upstreamFormat, model, config.clientIdentity);
-  if (debug) {
-    const shortSession = session.sessionId ? session.sessionId.slice(0, 10) : "-";
-    debugLine(reqId, `clientIdentity source=${session.source} action=${session.action} confidence=${session.confidence.toFixed(2)} session=${shortSession}`);
+  translateMode: boolean,
+  useOrderedTransport: boolean,
+  fetchImpl: typeof fetch,
+): Promise<Response> {
+  if (useOrderedTransport) {
+    return sendOrderedUpstreamRequest({
+      url: upstreamReq.url,
+      method: upstreamReq.method,
+      headers: headerPairs,
+      body,
+      decompress: translateMode,
+    });
   }
-  return session;
+  return fetchImpl(upstreamReq, translateMode ? {} : { decompress: false });
 }
 
 /** Read the request body as a string, returning undefined for empty bodies. */

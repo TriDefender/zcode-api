@@ -16,6 +16,9 @@ export interface ClientSessionResult {
   confidence: number;
   sessionId?: string;
   upstreamSessionId?: string;
+  requestId?: string;
+  traceId?: string;
+  queryId?: string;
 }
 
 interface StoredNode {
@@ -29,6 +32,13 @@ interface CanonicalRequest {
   model: string;
   identity: unknown;
   messages: unknown[];
+}
+
+interface ExplicitTraceContext {
+  requestId?: string;
+  traceId?: string;
+  queryId?: string;
+  sessionId?: string;
 }
 
 export interface ClientSessionResolver {
@@ -80,28 +90,31 @@ export function createClientSessionResolver(now: () => number = () => Date.now()
       if (config.mode === "off") return { source: "none", action: "off", confidence: 0 };
 
       prune(config);
-      const explicit = resolveExplicit(req, body, config);
-      if (explicit) return { ...explicit, action: action(config) };
+      const explicitTrace = requestTraceContext(req, body);
+      if (explicitTrace.sessionId) return explicitResult(explicitTrace, config);
 
       const canonical = canonicalize(body, format, model);
-      if (!canonical) return { source: "none", action: action(config), confidence: 0 };
+      if (!canonical) {
+        if (hasTraceContext(explicitTrace)) return explicitResult(explicitTrace, config);
+        return { source: "none", action: action(config), confidence: 0 };
+      }
 
       const nodeHash = hashJson(canonical.identity);
       const existing = nodes.get(nodeHash);
       if (existing) {
         remember(nodeHash, existing, config);
-        return result("lineage", action(config), existing, 0.95);
+        return withTraceContext(result("lineage", action(config), existing, 0.95), explicitTrace);
       }
 
       const parent = findLinearParent(canonical, nodes);
       if (parent) {
         remember(nodeHash, parent, config);
-        return result("lineage", action(config), parent, 0.9);
+        return withTraceContext(result("lineage", action(config), parent, 0.9), explicitTrace);
       }
 
       const fresh = newSession();
       remember(nodeHash, fresh, config);
-      return result("lineage", action(config), fresh, 0.75);
+      return withTraceContext(result("lineage", action(config), fresh, 0.75), explicitTrace);
     },
   };
 }
@@ -118,19 +131,41 @@ function result(source: ClientSessionSource, action: ClientSessionAction, node: 
   };
 }
 
-function resolveExplicit(req: Request, body: string | undefined, config: ClientIdentityConfig): ClientSessionResult | null {
-  const headerValue = firstHeader(req.headers, ["x-opencode-session", "x-session-id", "x-parent-session-id", "helicone-session-id"]);
-  const bodyValue = bodyMetadataSession(body);
-  const raw = headerValue ?? bodyValue;
-  if (!raw) return null;
-  const sessionId = `ses_${hashString(raw).slice(0, 12)}`;
+function requestTraceContext(req: Request, body: string | undefined): ExplicitTraceContext {
+  const bodyTrace = bodyMetadataTrace(body);
+  return {
+    requestId: firstHeader(req.headers, ["x-request-id"]) ?? bodyTrace.requestId,
+    traceId: firstHeader(req.headers, ["x-zcode-trace-id"]) ?? bodyTrace.traceId,
+    queryId: firstHeader(req.headers, ["x-query-id"]) ?? bodyTrace.queryId,
+    sessionId: firstHeader(req.headers, ["x-opencode-session", "x-session-id", "x-parent-session-id", "helicone-session-id"])
+      ?? bodyTrace.sessionId,
+  };
+}
+
+function explicitResult(trace: ExplicitTraceContext, config: ClientIdentityConfig): ClientSessionResult {
   return {
     source: "explicit",
     action: config.mode,
     confidence: 1,
-    sessionId,
-    upstreamSessionId: uuidFromHash(raw),
+    ...(trace.requestId ? { requestId: trace.requestId } : {}),
+    ...(trace.traceId ? { traceId: trace.traceId } : {}),
+    ...(trace.queryId ? { queryId: trace.queryId } : {}),
+    ...(trace.sessionId ? { sessionId: trace.sessionId, upstreamSessionId: trace.sessionId } : {}),
   };
+}
+
+function withTraceContext(session: ClientSessionResult, trace: ExplicitTraceContext): ClientSessionResult {
+  if (!trace.requestId && !trace.traceId && !trace.queryId) return session;
+  return {
+    ...session,
+    ...(trace.requestId ? { requestId: trace.requestId } : {}),
+    ...(trace.traceId ? { traceId: trace.traceId } : {}),
+    ...(trace.queryId ? { queryId: trace.queryId } : {}),
+  };
+}
+
+function hasTraceContext(trace: ExplicitTraceContext): boolean {
+  return Boolean(trace.requestId || trace.traceId || trace.queryId || trace.sessionId);
 }
 
 function firstHeader(headers: Headers, names: string[]): string | null {
@@ -141,16 +176,29 @@ function firstHeader(headers: Headers, names: string[]): string | null {
   return null;
 }
 
-function bodyMetadataSession(body: string | undefined): string | null {
-  if (!body) return null;
+function bodyMetadataTrace(body: string | undefined): ExplicitTraceContext {
+  if (!body) return {};
   try {
     const parsed = JSON.parse(body) as any;
     const metadata = parsed?.metadata;
-    const raw = metadata?.session_id ?? metadata?.conversation_id;
-    return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+    if (!metadata || typeof metadata !== "object") return {};
+    return {
+      requestId: stringProperty(metadata, ["requestId", "request_id"]),
+      traceId: stringProperty(metadata, ["traceId", "trace_id"]),
+      queryId: stringProperty(metadata, ["queryId", "query_id"]),
+      sessionId: stringProperty(metadata, ["sessionId", "session_id", "conversationId", "conversation_id"]),
+    };
   } catch {
-    return null;
+    return {};
   }
+}
+
+function stringProperty(obj: Record<string, unknown>, names: string[]): string | undefined {
+  for (const name of names) {
+    const value = obj[name];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
 }
 
 function canonicalize(body: string | undefined, format: Format, fallbackModel: string): CanonicalRequest | null {
@@ -207,14 +255,6 @@ function hashString(value: string): string {
   const bytes = new TextEncoder().encode(value);
   const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
   return String(digest);
-}
-
-function uuidFromHash(value: string): string {
-  const hex = hashString(value).slice(0, 32).split("");
-  hex[12] = "4";
-  hex[16] = ((parseInt(hex[16] ?? "8", 16) & 0x3) | 0x8).toString(16);
-  const s = hex.join("");
-  return `${s.slice(0, 8)}-${s.slice(8, 12)}-${s.slice(12, 16)}-${s.slice(16, 20)}-${s.slice(20, 32)}`;
 }
 
 function stableStringify(value: unknown): string {

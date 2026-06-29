@@ -15,11 +15,20 @@ import type { Credential } from "../auth/types.js";
 import type { ProxyIdentity } from "../config/types.js";
 import { credentialString } from "../auth/types.js";
 import { buildIdentityHeaders } from "./identity.js";
+import { buildZcodeTraceHeaders } from "./trace-headers.js";
+import { sessionIdForHeader, shouldUseExactTraceHeaders } from "./session-context.js";
 
 export interface UpstreamClientSession {
+  source?: "none" | "explicit" | "lineage";
   action: "off" | "observe" | "enforce";
+  sessionId?: string;
   upstreamSessionId?: string;
+  requestId?: string;
+  traceId?: string;
+  queryId?: string;
 }
+
+export type UpstreamHeaderPair = [string, string];
 
 const ANTHROPIC_VERSION = "2023-06-01";
 
@@ -66,15 +75,10 @@ export function buildUpstreamURL(format: Format, provider: ProviderDef, plan: "c
  * - OpenAI upstream, coding-plan    → `Authorization: Bearer {cred}`
  * - OpenAI upstream, start-plan     → `Authorization: Bearer {jwt}`
  *
- * Trace/attribution headers mirror the bundle's `wdt`
- * ("createModelRequestAttributionHeaders"). That helper emits `x-request-id`
- * and `x-zcode-trace-id` unconditionally, and `x-query-id` / `x-session-id`
- * only when those IDs exist — with their internal prefixes stripped
- * (`query_`, `sess_`, `subagent_agent_`), so the wire values are bare UUIDs.
- * The proxy has no session lifecycle, so coding-plan synthesizes fresh bare
- * query/session UUIDs. Start-plan omits them when no trace context exists.
- *
- * See module header for translation semantics.
+ * Trace/attribution headers mirror the bundle's `Bdt`
+ * ("createModelRequestAttributionHeaders") when an explicit/enforced trace
+ * context exists. Default observe mode keeps the prior synthesized query/session
+ * behavior for compatibility.
  */
 export function buildAuthHeaders(
   format: Format,
@@ -86,17 +90,8 @@ export function buildAuthHeaders(
   const credStr = plan === "start-plan" && cred.jwt ? cred.jwt : credentialString(cred);
   const base: Record<string, string> = {
     ...buildIdentityHeaders(identity),
-    "x-request-id": crypto.randomUUID(),
-    "x-zcode-trace-id": crypto.randomUUID(),
+    ...buildTraceHeaders(plan, clientSession),
   };
-
-  if (plan !== "start-plan") {
-    // `wdt` strips the `query_` / `sess_` internal prefixes — wire values are bare UUIDs.
-    base["x-query-id"] = crypto.randomUUID();
-    base["x-session-id"] = clientSession?.action === "enforce" && clientSession.upstreamSessionId
-      ? clientSession.upstreamSessionId
-      : crypto.randomUUID();
-  }
 
   if (format === "anthropic") {
     if (plan === "start-plan" && cred.jwt) {
@@ -112,6 +107,27 @@ export function buildAuthHeaders(
   return base;
 }
 
+function buildTraceHeaders(plan: "coding-plan" | "start-plan", clientSession?: UpstreamClientSession): Record<string, string> {
+  if (shouldUseExactTraceHeaders(plan, clientSession)) {
+    return buildZcodeTraceHeaders({
+      requestId: clientSession?.requestId,
+      traceId: clientSession?.traceId,
+      queryId: clientSession?.queryId,
+      sessionId: sessionIdForHeader(clientSession),
+    });
+  }
+
+  const headers: Record<string, string> = {
+    "x-request-id": crypto.randomUUID(),
+    "x-zcode-trace-id": crypto.randomUUID(),
+  };
+  if (plan !== "start-plan") {
+    headers["x-query-id"] = crypto.randomUUID();
+    headers["x-session-id"] = crypto.randomUUID();
+  }
+  return headers;
+}
+
 function collectPassthroughHeaders(req: Request): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of req.headers.entries()) {
@@ -122,6 +138,24 @@ function collectPassthroughHeaders(req: Request): Record<string, string> {
     }
   }
   return result;
+}
+
+export function buildUpstreamHeaderPairs(
+  clientReq: Request,
+  format: Format,
+  cred: Credential,
+  identity: ProxyIdentity,
+  plan: "coding-plan" | "start-plan" = "coding-plan",
+  extraHeaders?: Record<string, string>,
+  clientSession?: UpstreamClientSession,
+): UpstreamHeaderPair[] {
+  return [
+    ["content-type", "application/json"],
+    ["accept-encoding", "gzip"],
+    ...Object.entries(collectPassthroughHeaders(clientReq)),
+    ...Object.entries(buildAuthHeaders(format, cred, identity, plan, clientSession)),
+    ...Object.entries(extraHeaders ?? {}),
+  ];
 }
 
 export function buildUpstreamRequest(
@@ -136,20 +170,11 @@ export function buildUpstreamRequest(
   clientSession?: UpstreamClientSession,
 ): Request {
   const url = buildUpstreamURL(format, provider, plan);
-  const authHeaders = buildAuthHeaders(format, cred, identity, plan, clientSession);
-  const passthrough = collectPassthroughHeaders(clientReq);
-
-  const headers: Record<string, string> = {
-    "content-type": "application/json",
-    "accept-encoding": "gzip",
-    ...passthrough,
-    ...authHeaders,
-    ...extraHeaders,
-  };
+  const headerPairs = buildUpstreamHeaderPairs(clientReq, format, cred, identity, plan, extraHeaders, clientSession);
 
   const init: RequestInit = {
     method: "POST",
-    headers,
+    headers: Object.fromEntries(headerPairs),
   };
 
   if (body !== undefined) {

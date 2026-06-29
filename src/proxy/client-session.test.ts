@@ -15,6 +15,102 @@ function makeReq(body: string, headers: Record<string, string> = {}): Request {
 const CFG = { mode: "enforce" as const, ttlSeconds: 900, maxSessions: 1024 };
 
 describe("client session resolver", () => {
+  it("preserves explicit ZCode-style metadata IDs without hashing them", () => {
+    const resolver = createClientSessionResolver();
+    const body = JSON.stringify({
+      model: "glm-4.6",
+      metadata: {
+        requestId: "req_client_1",
+        traceId: "trace_client_1",
+        queryId: "query_turn_1",
+        sessionId: "sess_thread_1",
+      },
+      messages: [{ role: "user", content: "Hi" }],
+    });
+
+    const result = resolver.resolve(makeReq(body), body, "anthropic", "glm-4.6", CFG);
+
+    expect(result.source).toBe("explicit");
+    expect(result.requestId).toBe("req_client_1");
+    expect(result.traceId).toBe("trace_client_1");
+    expect(result.queryId).toBe("query_turn_1");
+    expect(result.sessionId).toBe("sess_thread_1");
+    expect(result.upstreamSessionId).toBe("sess_thread_1");
+  });
+
+  it("preserves explicit subagent session headers for emission-time prefix stripping", () => {
+    const resolver = createClientSessionResolver();
+    const body = JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "Hi" }] });
+    const result = resolver.resolve(makeReq(body, {
+      "x-request-id": "req_header_1",
+      "x-zcode-trace-id": "trace_header_1",
+      "x-query-id": "query_header_1",
+      "x-session-id": "subagent_agent_worker_1",
+    }), body, "anthropic", "glm-4.6", CFG);
+
+    expect(result.source).toBe("explicit");
+    expect(result.requestId).toBe("req_header_1");
+    expect(result.traceId).toBe("trace_header_1");
+    expect(result.queryId).toBe("query_header_1");
+    expect(result.sessionId).toBe("subagent_agent_worker_1");
+    expect(result.upstreamSessionId).toBe("subagent_agent_worker_1");
+  });
+
+  it("keeps existing snake_case metadata session fallbacks", () => {
+    const resolver = createClientSessionResolver();
+    const body = JSON.stringify({
+      model: "glm-4.6",
+      metadata: {
+        request_id: "req_legacy_1",
+        trace_id: "trace_legacy_1",
+        query_id: "query_legacy_1",
+        session_id: "sess_legacy_1",
+      },
+      messages: [{ role: "user", content: "Hi" }],
+    });
+
+    const result = resolver.resolve(makeReq(body), body, "anthropic", "glm-4.6", CFG);
+
+    expect(result.requestId).toBe("req_legacy_1");
+    expect(result.traceId).toBe("trace_legacy_1");
+    expect(result.queryId).toBe("query_legacy_1");
+    expect(result.sessionId).toBe("sess_legacy_1");
+  });
+  it("keeps lineage session inference when metadata only provides trace IDs", () => {
+    const resolver = createClientSessionResolver();
+    const body1 = JSON.stringify({
+      model: "glm-4.6",
+      metadata: {
+        requestId: "req_turn_1",
+        traceId: "trace_turn_1",
+        queryId: "query_turn_1",
+      },
+      messages: [{ role: "user", content: "Hi" }],
+    });
+    const body2 = JSON.stringify({
+      model: "glm-4.6",
+      metadata: {
+        requestId: "req_turn_2",
+        traceId: "trace_turn_2",
+        queryId: "query_turn_2",
+      },
+      messages: [{ role: "user", content: "Hi" }],
+    });
+
+    const first = resolver.resolve(makeReq(body1), body1, "anthropic", "glm-4.6", CFG);
+    const second = resolver.resolve(makeReq(body2), body2, "anthropic", "glm-4.6", CFG);
+
+    expect(first.source).toBe("lineage");
+    expect(first.upstreamSessionId).toBeTruthy();
+    expect(first.requestId).toBe("req_turn_1");
+    expect(first.traceId).toBe("trace_turn_1");
+    expect(first.queryId).toBe("query_turn_1");
+    expect(second.source).toBe("lineage");
+    expect(second.upstreamSessionId).toBe(first.upstreamSessionId);
+    expect(second.requestId).toBe("req_turn_2");
+    expect(second.traceId).toBe("trace_turn_2");
+    expect(second.queryId).toBe("query_turn_2");
+  });
   it("reuses the same session for exact request bodies", () => {
     const resolver = createClientSessionResolver();
     const body = JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "Hi" }] });
