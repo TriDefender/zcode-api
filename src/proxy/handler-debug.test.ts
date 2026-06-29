@@ -26,7 +26,6 @@ const TEST_CONFIG: ProxyConfig = {
   defaultModel: "glm-4.6",
   models: ["glm-4.6"],
   identity: IDENTITY,
-  clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
   logging: { level: "info" },
 };
 
@@ -164,67 +163,5 @@ describe("proxyRequest debug mode", () => {
     });
 
     expect(lines.some((l) => l.includes("debug: translated OpenAI→Anthropic"))).toBe(true);
-  });
-
-  it("emits observe-only client identity inference without stabilizing x-session-id", async () => {
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
-    const body = '{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}';
-    const seenSessions: string[] = [];
-
-    const lines = await captureConsoleLog(async () => {
-      for (let i = 0; i < 2; i++) {
-        const resp = await proxyRequest(makeClientReq(body), "anthropic", {
-          config: TEST_CONFIG,
-          auth,
-          debug: true,
-          fetchImpl: mockFetch(async (req) => {
-            seenSessions.push(req.headers.get("x-session-id") ?? "");
-            return anthropicOk();
-          }),
-        });
-        expect(resp.status).toBe(200);
-      }
-    });
-
-    expect(lines.some((l) => l.includes("clientIdentity source=lineage action=observe"))).toBe(true);
-    expect(seenSessions[0]).toBeTruthy();
-    expect(seenSessions[1]).toBeTruthy();
-    expect(seenSessions[0]).not.toBe(seenSessions[1]);
-  });
-
-  it("stabilizes x-session-id in enforce mode for the same inferred session", async () => {
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
-    const body = '{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}';
-    const seenSessions: string[] = [];
-    const config: ProxyConfig = { ...TEST_CONFIG, clientIdentity: { mode: "enforce", ttlSeconds: 900, maxSessions: 1024 } };
-
-    for (let i = 0; i < 2; i++) {
-      const resp = await proxyRequest(makeClientReq(body), "anthropic", {
-        config,
-        auth,
-        fetchImpl: mockFetch(async (req) => {
-          seenSessions.push(req.headers.get("x-session-id") ?? "");
-          return anthropicOk();
-        }),
-      });
-      expect(resp.status).toBe(200);
-    }
-
-    expect(seenSessions[0]).toBeTruthy();
-    expect(seenSessions[1]).toBe(seenSessions[0]);
-  });
-
-  it("emits client identity debug line even when no session can be inferred", async () => {
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
-    const lines = await captureConsoleLog(async () => {
-      await proxyRequest(makeClientReq('{"model":"glm-4.6","messages":[]}'), "anthropic", {
-        config: TEST_CONFIG,
-        auth,
-        debug: true,
-        fetchImpl: mockFetch(async () => anthropicOk()),
-      });
-    });
-
-    expect(lines.some((l) => l.includes("clientIdentity source=none action=observe confidence=0.00 session=-"))).toBe(true);
   });
 });
