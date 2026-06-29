@@ -8,7 +8,9 @@
     "test": "bun test",
     "build": "bun build --compile --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy.exe",
     "build:linux-x64": "bun build --compile --target bun-linux-x64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-linux-x64",
-    "build:linux-arm64": "bun build --compile --target bun-linux-arm64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-linux-arm64"
+    "build:linux-arm64": "bun build --compile --target bun-linux-arm64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-linux-arm64",
+    "build:darwin-x64": "bun build --compile --target bun-darwin-x64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-darwin-x64",
+    "build:darwin-arm64": "bun build --compile --target bun-darwin-arm64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-darwin-arm64"
   },
   "dependencies": {
     "yaml": "^2.5.0",
