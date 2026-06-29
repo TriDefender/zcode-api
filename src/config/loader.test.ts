@@ -75,32 +75,6 @@ auth:
     expect(cfg.logging.level).toBe("info");
     expect(cfg.providers.zai.anthropicBase).toBe("https://api.z.ai/api/anthropic");
     expect(cfg.providers.bigmodel.openaiBase).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
-    expect(cfg.clientIdentity).toEqual({ mode: "observe", ttlSeconds: 900, maxSessions: 1024 });
-  });
-
-  it("clientIdentity: YAML values override defaults", () => {
-    const path = writeYaml(`
-auth:
-  mode: apikey
-  apiKey: "abc"
-clientIdentity:
-  mode: enforce
-  ttlSeconds: 60
-  maxSessions: 8
-`);
-    const cfg = loadConfig(path);
-    expect(cfg.clientIdentity).toEqual({ mode: "enforce", ttlSeconds: 60, maxSessions: 8 });
-  });
-
-  it("throws on invalid clientIdentity.mode", () => {
-    const path = writeYaml(`
-auth:
-  mode: apikey
-  apiKey: "abc"
-clientIdentity:
-  mode: always
-`);
-    expect(() => loadConfig(path)).toThrow(/Invalid clientIdentity\.mode/);
   });
 
   it("env vars override YAML values", () => {

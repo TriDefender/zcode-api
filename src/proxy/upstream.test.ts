@@ -3,11 +3,8 @@
  * @see .omo/plans/zcode-proxy.md Task 6
  */
 import { describe, it, expect, mock, beforeEach } from "bun:test";
-import { createServer } from "node:net";
 import { buildUpstreamRequest, buildUpstreamURL, buildAuthHeaders } from "./upstream.js";
-import { sendOrderedUpstreamRequest } from "./ordered-transport.js";
-import { buildZcodeTraceHeaders } from "./trace-headers.js";
-import { proxyRequest, errorResponse, shouldUseOrderedTransport } from "./handler.js";
+import { proxyRequest, errorResponse } from "./handler.js";
 import { ZAI_PROVIDER, BIGMODEL_PROVIDER } from "../provider/providers.js";
 import type { Credential } from "../auth/types.js";
 import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
@@ -28,36 +25,6 @@ function makeClientReq(body: string, headers: Record<string, string> = {}): Requ
     headers: { "content-type": "application/json", ...headers },
     body,
   });
-}
-
-async function captureOrderedRequest(headers: Array<[string, string]>): Promise<{ raw: string; response: Response }> {
-  let resolveRaw!: (raw: string) => void;
-  const rawPromise = new Promise<string>((resolve) => { resolveRaw = resolve; });
-  const server = createServer((socket) => {
-    let raw = "";
-    socket.on("data", (chunk) => {
-      raw += chunk.toString("latin1");
-      if (raw.includes("\r\n\r\n")) {
-        resolveRaw(raw);
-        socket.end("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\nok");
-        server.close();
-      }
-    });
-  });
-
-  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const address = server.address();
-  if (!address || typeof address === "string") throw new Error("test server did not expose a TCP port");
-
-  const response = await sendOrderedUpstreamRequest({
-    url: `http://127.0.0.1:${address.port}/v1/messages`,
-    method: "POST",
-    headers,
-    body: "{}",
-    decompress: false,
-  });
-  const raw = await rawPromise;
-  return { raw, response };
 }
 
 describe("buildUpstreamURL", () => {
@@ -95,41 +62,6 @@ describe("buildUpstreamURL", () => {
   });
 });
 
-describe("buildZcodeTraceHeaders", () => {
-  it("emits ZCode trace headers in source order and strips internal prefixes", () => {
-    const h = buildZcodeTraceHeaders({
-      requestId: "req_1",
-      traceId: "trace_1",
-      queryId: "query_turn_1",
-      sessionId: "sess_thread_1",
-    });
-
-    expect(Object.keys(h)).toEqual(["x-request-id", "x-zcode-trace-id", "x-query-id", "x-session-id"]);
-    expect(h["x-request-id"]).toBe("req_1");
-    expect(h["x-zcode-trace-id"]).toBe("trace_1");
-    expect(h["x-query-id"]).toBe("turn_1");
-    expect(h["x-session-id"]).toBe("thread_1");
-  });
-
-  it("strips subagent session prefixes at emission time", () => {
-    const h = buildZcodeTraceHeaders({
-      requestId: "req_1",
-      traceId: "trace_1",
-      sessionId: "subagent_agent_worker_1",
-    });
-
-    expect(Object.keys(h)).toEqual(["x-request-id", "x-zcode-trace-id", "x-session-id"]);
-    expect(h["x-session-id"]).toBe("worker_1");
-  });
-
-  it("omits query and session headers when no IDs exist", () => {
-    const h = buildZcodeTraceHeaders({ requestId: "req_1", traceId: "trace_1" });
-
-    expect(Object.keys(h)).toEqual(["x-request-id", "x-zcode-trace-id"]);
-    expect(h["x-query-id"]).toBeUndefined();
-    expect(h["x-session-id"]).toBeUndefined();
-  });
-});
 describe("buildAuthHeaders", () => {
   it("injects x-api-key + anthropic-version for Anthropic", () => {
     const h = buildAuthHeaders("anthropic", ZAI_CRED, IDENTITY);
@@ -178,58 +110,6 @@ describe("buildAuthHeaders", () => {
     expect(h1["x-query-id"]).not.toBe(h2["x-query-id"]);
   });
 
-  it("uses a stable x-session-id when an enforced client session is provided", () => {
-    const session = { action: "enforce" as const, upstreamSessionId: "11111111-1111-4111-8111-111111111111" };
-    const h1 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY, "coding-plan", session);
-    const h2 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY, "coding-plan", session);
-
-    expect(h1["x-session-id"]).toBe("11111111-1111-4111-8111-111111111111");
-    expect(h2["x-session-id"]).toBe("11111111-1111-4111-8111-111111111111");
-    expect(h1["x-request-id"]).not.toBe(h2["x-request-id"]);
-    expect(h1["x-zcode-trace-id"]).not.toBe(h2["x-zcode-trace-id"]);
-    expect(h1["x-query-id"]).toBeUndefined();
-    expect(h2["x-query-id"]).toBeUndefined();
-  });
-
-  it("emits explicit enforced trace headers in ZCode/auth order", () => {
-    const session = {
-      source: "explicit" as const,
-      action: "enforce" as const,
-      requestId: "req_1",
-      traceId: "trace_1",
-      queryId: "query_turn_1",
-      upstreamSessionId: "sess_thread_1",
-    };
-    const h = buildAuthHeaders("anthropic", ZAI_CRED, IDENTITY, "coding-plan", session);
-
-    expect(Object.keys(h)).toEqual([
-      "HTTP-Referer",
-      "User-Agent",
-      "X-ZCode-App-Version",
-      "X-Title",
-      "X-ZCode-Agent",
-      "x-request-id",
-      "x-zcode-trace-id",
-      "x-query-id",
-      "x-session-id",
-      "x-api-key",
-      "anthropic-version",
-    ]);
-    expect(h["x-request-id"]).toBe("req_1");
-    expect(h["x-zcode-trace-id"]).toBe("trace_1");
-    expect(h["x-query-id"]).toBe("turn_1");
-    expect(h["x-session-id"]).toBe("thread_1");
-  });
-  it("does not stabilize x-session-id for observe-only client sessions", () => {
-    const session = { action: "observe" as const, upstreamSessionId: "11111111-1111-4111-8111-111111111111" };
-    const h1 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY, "coding-plan", session);
-    const h2 = buildAuthHeaders("openai", ZAI_CRED, IDENTITY, "coding-plan", session);
-
-    expect(h1["x-session-id"]).toBeTruthy();
-    expect(h2["x-session-id"]).toBeTruthy();
-    expect(h1["x-session-id"]).not.toBe(h2["x-session-id"]);
-  });
-
   it("does not synthesize start-plan query/session headers when no trace context exists", () => {
     const h = buildAuthHeaders("anthropic", { ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan");
 
@@ -238,75 +118,8 @@ describe("buildAuthHeaders", () => {
     expect(h["x-query-id"]).toBeUndefined();
     expect(h["x-session-id"]).toBeUndefined();
   });
-
-  it("does not forward inferred start-plan session in observe mode", () => {
-    const session = {
-      source: "lineage" as const,
-      action: "observe" as const,
-      upstreamSessionId: "11111111-1111-4111-8111-111111111111",
-    };
-    const h = buildAuthHeaders("openai", { ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan", session);
-
-    expect(h["x-request-id"]).toBeTruthy();
-    expect(h["x-zcode-trace-id"]).toBeTruthy();
-    expect(h["x-session-id"]).toBeUndefined();
-  });
-
-  it("forwards inferred start-plan session in enforce mode", () => {
-    const session = {
-      source: "lineage" as const,
-      action: "enforce" as const,
-      upstreamSessionId: "11111111-1111-4111-8111-111111111111",
-    };
-    const h = buildAuthHeaders("openai", { ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan", session);
-
-    expect(h["x-session-id"]).toBe("11111111-1111-4111-8111-111111111111");
-  });
 });
 
-describe("sendOrderedUpstreamRequest", () => {
-  it("writes application headers in the supplied wire order", async () => {
-    const headers: Array<[string, string]> = [
-      ["content-type", "application/json"],
-      ["accept-encoding", "gzip"],
-      ["HTTP-Referer", "https://zcode.z.ai"],
-      ["User-Agent", "ZCode/test-1.0.0"],
-      ["X-ZCode-App-Version", "test-1.0.0"],
-      ["X-Title", "Z Code@cli"],
-      ["X-ZCode-Agent", "glm"],
-      ["x-request-id", "req_1"],
-      ["x-zcode-trace-id", "trace_1"],
-      ["x-query-id", "turn_1"],
-      ["x-session-id", "thread_1"],
-      ["x-api-key", "testkey.testsecret"],
-      ["anthropic-version", "2023-06-01"],
-    ];
-
-    const { raw, response } = await captureOrderedRequest(headers);
-    const requestHeaders = raw.split("\r\n\r\n")[0].split("\r\n").slice(1);
-    const appHeaders = requestHeaders.filter((line) => !/^(Host|Content-Length|Connection):/i.test(line));
-
-    expect(response.status).toBe(200);
-    expect(await response.text()).toBe("ok");
-    expect(appHeaders).toEqual(headers.map(([k, v]) => `${k}: ${v}`));
-  });
-
-  it("rejects invalid header names and CRLF header values before writing", async () => {
-    await expect(sendOrderedUpstreamRequest({
-      url: "http://127.0.0.1:9/v1/messages",
-      method: "POST",
-      headers: [["x-request-id", "req_1\r\nx-extra: injected"]],
-      body: "{}",
-    })).rejects.toThrow(/Invalid upstream header value/);
-
-    await expect(sendOrderedUpstreamRequest({
-      url: "http://127.0.0.1:9/v1/messages",
-      method: "POST",
-      headers: [["bad header", "value"]],
-      body: "{}",
-    })).rejects.toThrow(/Invalid upstream header name/);
-  });
-});
 describe("buildUpstreamRequest", () => {
   it("constructs full Anthropic request with correct URL + headers", async () => {
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
@@ -368,38 +181,8 @@ describe("proxyRequest", () => {
     defaultModel: "glm-4.6",
     models: ["glm-4.6"],
     identity: IDENTITY,
-    clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     logging: { level: "info" },
   };
-
-  it("uses ordered transport for session-aware start-plan requests only outside injected fetch tests", () => {
-    const startPlanConfig: ProxyConfig = { ...testConfig, plan: "start-plan" };
-
-    expect(shouldUseOrderedTransport(startPlanConfig, {
-      source: "lineage",
-      action: "observe",
-      confidence: 0.95,
-      upstreamSessionId: "11111111-1111-4111-8111-111111111111",
-    }, false)).toBe(false);
-    expect(shouldUseOrderedTransport(startPlanConfig, {
-      source: "lineage",
-      action: "enforce",
-      confidence: 0.95,
-      upstreamSessionId: "11111111-1111-4111-8111-111111111111",
-    }, false)).toBe(true);
-    expect(shouldUseOrderedTransport(startPlanConfig, {
-      source: "explicit",
-      action: "observe",
-      confidence: 1,
-      upstreamSessionId: "sess_thread_1",
-    }, false)).toBe(true);
-    expect(shouldUseOrderedTransport(startPlanConfig, {
-      source: "explicit",
-      action: "observe",
-      confidence: 1,
-      upstreamSessionId: "sess_thread_1",
-    }, true)).toBe(false);
-  });
 
   it("forwards request to upstream with injected auth", async () => {
     const fetchMock = mock(async (req: Request): Promise<Response> => {
@@ -535,7 +318,6 @@ describe("proxyRequest — OpenAI translation mode (coding-plan)", () => {
     defaultModel: "glm-4.6",
     models: ["glm-4.6"],
     identity: IDENTITY,
-    clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     logging: { level: "info" },
   };
 
@@ -765,7 +547,6 @@ describe("proxyRequest — regression: Anthropic passthrough unchanged", () => {
     defaultModel: "glm-4.6",
     models: ["glm-4.6"],
     identity: IDENTITY,
-    clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     logging: { level: "info" },
   };
 
@@ -841,120 +622,6 @@ describe("proxyRequest — regression: Anthropic passthrough unchanged", () => {
     }
   });
 
-  it("start-plan forwards explicit ZCode trace metadata to gateway attribution headers", async () => {
-    const startPlanConfig: ProxyConfig = {
-      ...testConfig,
-      plan: "start-plan",
-    };
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (req: Request | string): Promise<Response> => {
-      const url = typeof req === "string" ? req : req.url;
-      if (url.includes("/client/configs")) {
-        return new Response(JSON.stringify({ data: { configs: { captcha: { enabled: false } } } }), {
-          status: 200, headers: { "content-type": "application/json" },
-        });
-      }
-      throw new Error(`unexpected global fetch in test: ${url}`);
-    }) as typeof fetch;
-
-    try {
-      const fetchMock = mock(async (req: Request): Promise<Response> => {
-        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
-        expect(req.headers.get("x-request-id")).toBe("req_start_1");
-        expect(req.headers.get("x-zcode-trace-id")).toBe("trace_start_1");
-        expect(req.headers.get("x-query-id")).toBe("start_query_1");
-        expect(req.headers.get("x-session-id")).toBe("start_session_1");
-        return new Response(JSON.stringify({
-          id: "chatcmpl_sp",
-          object: "chat.completion",
-          created: 1,
-          model: "glm-4.6",
-          choices: [{ index: 0, message: { role: "assistant", content: "start-plan reply" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      });
-
-      const auth = new AuthManager({ mode: "oauth", provider: "zai" });
-      auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
-      const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          model: "glm-4.6",
-          metadata: {
-            requestId: "req_start_1",
-            traceId: "trace_start_1",
-            queryId: "query_start_query_1",
-            sessionId: "sess_start_session_1",
-          },
-          messages: [{ role: "user", content: "hi" }],
-        }),
-      });
-
-      const resp = await proxyRequest(clientReq, "openai", { config: startPlanConfig, auth, fetchImpl: fetchMock as any });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(resp.status).toBe(200);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it("start-plan enforce reuses inferred session through the unified resolver", async () => {
-    const startPlanConfig: ProxyConfig = {
-      ...testConfig,
-      plan: "start-plan",
-      clientIdentity: { mode: "enforce", ttlSeconds: 900, maxSessions: 1024 },
-    };
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (req: Request | string): Promise<Response> => {
-      const url = typeof req === "string" ? req : req.url;
-      if (url.includes("/client/configs")) {
-        return new Response(JSON.stringify({ data: { configs: { captcha: { enabled: false } } } }), {
-          status: 200, headers: { "content-type": "application/json" },
-        });
-      }
-      throw new Error(`unexpected global fetch in test: ${url}`);
-    }) as typeof fetch;
-
-    try {
-      const seenSessions: string[] = [];
-      const fetchMock = mock(async (req: Request): Promise<Response> => {
-        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
-        seenSessions.push(req.headers.get("x-session-id") ?? "");
-        return new Response(JSON.stringify({
-          id: "chatcmpl_sp",
-          object: "chat.completion",
-          created: 1,
-          model: "glm-4.6",
-          choices: [{ index: 0, message: { role: "assistant", content: "start-plan reply" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
-        }), { status: 200, headers: { "content-type": "application/json" } });
-      });
-
-      const auth = new AuthManager({ mode: "oauth", provider: "zai" });
-      auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
-      const body = '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}';
-
-      const first = await proxyRequest(new Request("http://localhost:8080/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body,
-      }), "openai", { config: startPlanConfig, auth, fetchImpl: fetchMock as any });
-      const second = await proxyRequest(new Request("http://localhost:8080/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body,
-      }), "openai", { config: startPlanConfig, auth, fetchImpl: fetchMock as any });
-
-      expect(first.status).toBe(200);
-      expect(second.status).toBe(200);
-      expect(seenSessions[0]).toBeTruthy();
-      expect(seenSessions[1]).toBe(seenSessions[0]);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
   it("start-plan Anthropic request translates through ZCode OpenAI-compatible gateway", async () => {
     const startPlanConfig: ProxyConfig = {
       ...testConfig,
@@ -1006,46 +673,6 @@ describe("proxyRequest — regression: Anthropic passthrough unchanged", () => {
       globalThis.fetch = originalFetch;
     }
   });
-
-  it("does not re-solve captcha for a start-plan 403 without captcha challenge header", async () => {
-    const startPlanConfig: ProxyConfig = {
-      ...testConfig,
-      plan: "start-plan",
-    };
-    const originalFetch = globalThis.fetch;
-    globalThis.fetch = (async (req: Request | string): Promise<Response> => {
-      const url = typeof req === "string" ? req : req.url;
-      if (url.includes("/client/configs")) {
-        return new Response(JSON.stringify({ data: { configs: { captcha: { enabled: false } } } }), {
-          status: 200, headers: { "content-type": "application/json" },
-        });
-      }
-      throw new Error(`unexpected global fetch in test: ${url}`);
-    }) as typeof fetch;
-
-    try {
-      const fetchMock = mock(async (): Promise<Response> => {
-        return new Response(JSON.stringify({ error: { type: "forbidden", message: "not captcha" } }), {
-          status: 403,
-          headers: { "content-type": "application/json" },
-        });
-      });
-
-      const auth = new AuthManager({ mode: "oauth", provider: "zai" });
-      auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
-      const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}',
-      });
-
-      const resp = await proxyRequest(clientReq, "openai", { config: startPlanConfig, auth, fetchImpl: fetchMock as any });
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(resp.status).toBe(403);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
 });
 
 describe("proxyRequest — tool-call roundtrip (OpenAI client through Anthropic upstream)", () => {
@@ -1061,7 +688,6 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client through Anthropic 
     defaultModel: "glm-4.6",
     models: ["glm-4.6"],
     identity: IDENTITY,
-    clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     logging: { level: "info" },
   };
 

@@ -4,7 +4,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
-import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity } from "./types.js";
+import type { ProxyConfig, ProviderEndpoints, ProxyIdentity } from "./types.js";
 
 /** Environment variable keys that override YAML values. */
 const ENV = {
@@ -31,9 +31,6 @@ const DEFAULTS = {
   APP_VERSION: "3.1.5",
   SOURCE_TITLE: "cli",
   REFERER_ORIGIN: "https://zcode.z.ai",
-  CLIENT_IDENTITY_MODE: "observe" as const,
-  CLIENT_IDENTITY_TTL_SECONDS: 900,
-  CLIENT_IDENTITY_MAX_SESSIONS: 1024,
 };
 
 /** Printable-ASCII gate copied from the ZCode bundle's `rYn` helper. */
@@ -94,8 +91,6 @@ export function loadConfig(path: string): ProxyConfig {
     refererYaml: parsed?.identity?.refererOrigin,
   });
 
-  const clientIdentity = resolveClientIdentity(parsed?.clientIdentity);
-
   const config: ProxyConfig = {
     server: { port, host },
     auth: { proxyApiKey, mode, apiKey, oauthCredentialsPath },
@@ -105,35 +100,11 @@ export function loadConfig(path: string): ProxyConfig {
     defaultModel,
     models,
     identity,
-    clientIdentity,
     logging: { level: logLevel },
   };
 
   validate(config);
   return config;
-}
-
-function resolveClientIdentity(raw: unknown): ClientIdentityConfig {
-  const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
-  const mode = resolveClientIdentityMode(obj.mode);
-  const ttlSeconds = resolvePositiveInt(obj.ttlSeconds, DEFAULTS.CLIENT_IDENTITY_TTL_SECONDS, "clientIdentity.ttlSeconds");
-  const maxSessions = resolvePositiveInt(obj.maxSessions, DEFAULTS.CLIENT_IDENTITY_MAX_SESSIONS, "clientIdentity.maxSessions");
-  return { mode, ttlSeconds, maxSessions };
-}
-
-function resolveClientIdentityMode(raw: unknown): ClientIdentityConfig["mode"] {
-  if (raw === undefined || raw === null) return DEFAULTS.CLIENT_IDENTITY_MODE;
-  if (raw === "off" || raw === "observe" || raw === "enforce") return raw;
-  throw new Error(`Invalid clientIdentity.mode "${String(raw)}": must be "off", "observe", or "enforce"`);
-}
-
-function resolvePositiveInt(raw: unknown, fallback: number, name: string): number {
-  if (raw === undefined || raw === null) return fallback;
-  const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
-  if (!Number.isInteger(n) || n < 1) {
-    throw new Error(`${name} must be a positive integer`);
-  }
-  return n;
 }
 
 /** Resolve port from raw value (YAML or env), defaulting to 8080. */
