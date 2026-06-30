@@ -1,0 +1,157 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "New release tag, e.g. v2.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      version: ${{ steps.check.outputs.version }}
+      is_prerelease: ${{ steps.check.outputs.is_prerelease }}
+    steps:
+      - name: Validate tag and determine prerelease
+        id: check
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -qE '^v'; then
+            echo "::error::Release tag must start with 'v' (got: '$TAG')"
+            exit 1
+          fi
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag '$TAG' already exists on the remote"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          if printf '%s' "$TAG" | grep -qiE 'alpha|beta|rc'; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  verify:
+    needs: detect
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1"
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Type check
+        run: bun x tsc --noEmit
+      - name: Run tests
+        run: bun test
+
+  build-binaries:
+    needs: [detect, verify]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: bun-windows-x64
+            outfile: zcode-proxy.exe
+          - target: bun-linux-x64
+            outfile: zcode-proxy-linux-x64
+          - target: bun-linux-arm64
+            outfile: zcode-proxy-linux-arm64
+          - target: bun-darwin-x64
+            outfile: zcode-proxy-darwin-x64
+          - target: bun-darwin-arm64
+            outfile: zcode-proxy-darwin-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1"
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Build binary
+        run: >-
+          bun build --compile --target=${{ matrix.target }}
+          --define "require.resolve=undefined"
+          src/index.ts --outfile ${{ matrix.outfile }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.outfile }}
+          path: ${{ matrix.outfile }}
+          if-no-files-found: error
+
+  release:
+    needs: [detect, build-binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Create and push tag
+        env:
+          TAG: ${{ needs.detect.outputs.tag }}
+        run: |
+          git tag "$TAG"
+          git push origin "$TAG"
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.detect.outputs.tag }}
+          name: ${{ needs.detect.outputs.tag }}
+          generate_release_notes: true
+          prerelease: ${{ needs.detect.outputs.is_prerelease }}
+          files: dist/*
+
+  docker:
+    needs: [detect, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute lowercase image name
+        id: img
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER@L}/zcode-proxy" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.name }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=${{ needs.detect.outputs.version }}
+            type=raw,value=latest,enable=${{ needs.detect.outputs.is_prerelease == 'false' }}
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

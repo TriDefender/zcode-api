@@ -201,6 +201,58 @@ bun run src/index.ts config.yaml
 bun run build
 ```
 
+## Docker
+
+Pull the multi-arch image from GitHub Packages (ghcr.io):
+
+```bash
+docker pull ghcr.io/tridefender/zcode-proxy:latest
+```
+
+Run with env-var configuration (no config file needed):
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e ZCODE_API_KEY="yourApiKey.yourSecretKey" \
+  -e ZCODE_PROVIDER=zai \
+  -e ZCODE_PROXY_API_KEY="your-proxy-secret" \
+  ghcr.io/tridefender/zcode-proxy:latest
+```
+
+Or mount a config file:
+
+```bash
+docker run --rm -p 8080:8080 \
+  -v "$(pwd)/config.yaml:/data/config.yaml:ro" \
+  ghcr.io/tridefender/zcode-proxy:latest
+```
+
+> Note: `/health` and all routes sit behind the proxy-API-key check, so health probes must send `x-api-key: <ZCODE_PROXY_API_KEY>`.
+
+Common environment variables (see the Configuration table above for the full list):
+
+| Env Var | Description |
+|---------|-------------|
+| `ZCODE_API_KEY` | Upstream API key (`{apiKey}.{secretKey}` for Z.AI, `{apiKey}` for Bigmodel) |
+| `ZCODE_PROVIDER` | `zai` or `bigmodel` |
+| `ZCODE_PROXY_API_KEY` | Client auth shared secret |
+| `ZCODE_PROXY_PORT` | Listen port (default `8080`) |
+
+docker-compose:
+
+```yaml
+services:
+  zcode-proxy:
+    image: ghcr.io/tridefender/zcode-proxy:latest
+    ports:
+      - "8080:8080"
+    environment:
+      ZCODE_API_KEY: "yourApiKey.yourSecretKey"
+      ZCODE_PROVIDER: zai
+      ZCODE_PROXY_API_KEY: "your-proxy-secret"
+    restart: unless-stopped
+```
+
 ## Available Models
 
 The proxy lists these models on `GET /v1/models` (pinned to the GLM coding-plan tier):

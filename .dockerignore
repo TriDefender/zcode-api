@@ -1,0 +1,13 @@
+node_modules
+dist
+.git
+.github
+*.log
+config.yaml
+.DS_Store
+zcode-proxy.exe
+zcode-proxy-linux-*
+zcode-proxy-darwin-*
+docs
+_reverse
+.omo
