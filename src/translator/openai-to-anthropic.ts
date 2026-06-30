@@ -12,7 +12,9 @@ import type {
   AnthropicMessage,
   AnthropicContentBlock,
   AnthropicToolDefinition,
+  AnthropicThinkingConfig,
 } from "./types.js";
+import { MODELS } from "../provider/models.js";
 
 /** Default max_tokens if the OpenAI request doesn't specify one. */
 const DEFAULT_MAX_TOKENS = 4096;
@@ -39,6 +41,8 @@ export function translateRequestOpenAIToAnthropic(req: OpenAIChatRequest): Anthr
   if (req.top_p !== undefined) result.top_p = req.top_p;
   if (req.stream !== undefined) result.stream = req.stream;
   if (req.stop) result.stop_sequences = Array.isArray(req.stop) ? req.stop : [req.stop];
+  const thinking = translateThinking(req);
+  if (thinking) result.thinking = thinking;
   if (req.tools?.length && req.tool_choice !== "none") {
     result.tools = req.tools.map(translateToolOpenAIToAnthropic);
   }
@@ -48,6 +52,32 @@ export function translateRequestOpenAIToAnthropic(req: OpenAIChatRequest): Anthr
   }
 
   return result;
+}
+
+function translateThinking(req: OpenAIChatRequest): AnthropicThinkingConfig | undefined {
+  const explicit = req.thinking;
+  if (explicit && typeof explicit === "object") {
+    if (explicit.type === "disabled") return { type: "disabled" };
+    if (explicit.type === "enabled" || explicit.type === "adaptive") {
+      const budget = explicit.budget_tokens ?? explicit.budgetTokens;
+      return {
+        type: explicit.type,
+        ...(typeof budget === "number" && Number.isFinite(budget) && budget > 0
+          ? { budget_tokens: Math.floor(budget) }
+          : {}),
+        ...(explicit.type === "adaptive" && typeof explicit.display === "boolean"
+          ? { display: explicit.display }
+          : {}),
+      };
+    }
+  }
+  if (req.reasoning_effort === "none") return { type: "disabled" };
+  if (isReasoningModel(req.model)) return { type: "enabled" };
+  return undefined;
+}
+
+function isReasoningModel(model: string): boolean {
+  return MODELS.some((m) => m.id === model && m.reasoning === true);
 }
 
 function translateToolChoice(
@@ -163,8 +193,10 @@ export function translateResponseAnthropicToOpenAI(
 ): OpenAIChatResponse {
   const textBlocks = resp.content.filter((b) => b.type === "text");
   const toolUseBlocks = resp.content.filter((b) => b.type === "tool_use");
+  const thinkingBlocks = resp.content.filter((b) => b.type === "thinking");
 
   const content = textBlocks.map((b) => (b as any).text).join("") || null;
+  const reasoningContent = thinkingBlocks.map((b) => (b as any).thinking ?? "").join("") || undefined;
   const toolCalls = toolUseBlocks.length > 0
     ? toolUseBlocks.map((b, i) => ({
         id: (b as any).id,
@@ -188,6 +220,7 @@ export function translateResponseAnthropicToOpenAI(
       message: {
         role: "assistant",
         content,
+        ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),
         ...(toolCalls ? { tool_calls: toolCalls } : {}),
       },
       finish_reason: finishReason,

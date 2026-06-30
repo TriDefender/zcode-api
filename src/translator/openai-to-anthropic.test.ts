@@ -368,6 +368,52 @@ describe("translateRequestOpenAIToAnthropic", () => {
     const result = translateRequestOpenAIToAnthropic(req);
     expect(result.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
   });
+
+  it("enables Anthropic thinking by default for GLM reasoning models", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-5.2",
+      messages: [{ role: "user", content: "Hi" }],
+    };
+
+    const result = translateRequestOpenAIToAnthropic(req);
+
+    expect(result.thinking).toEqual({ type: "enabled" });
+  });
+
+  it("does not enable Anthropic thinking by default for non-reasoning GLM models", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.5",
+      messages: [{ role: "user", content: "Hi" }],
+    };
+
+    const result = translateRequestOpenAIToAnthropic(req);
+
+    expect(result.thinking).toBeUndefined();
+  });
+
+  it("allows OpenAI clients to disable Anthropic thinking explicitly", () => {
+    const req = {
+      model: "glm-5.2",
+      messages: [{ role: "user", content: "Hi" }],
+      thinking: { type: "disabled" },
+    } as OpenAIChatRequest;
+
+    const result = translateRequestOpenAIToAnthropic(req);
+
+    expect(result.thinking).toEqual({ type: "disabled" });
+  });
+
+  it("preserves explicit Anthropic thinking budget from OpenAI-compatible extra body", () => {
+    const req = {
+      model: "glm-5.2",
+      messages: [{ role: "user", content: "Hi" }],
+      thinking: { type: "enabled", budget_tokens: 1024 },
+    } as OpenAIChatRequest;
+
+    const result = translateRequestOpenAIToAnthropic(req);
+
+    expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
+  });
 });
 
 describe("translateResponseAnthropicToOpenAI", () => {
@@ -437,6 +483,27 @@ describe("translateResponseAnthropicToOpenAI", () => {
     expect(result.usage!.prompt_tokens).toBe(100);
     expect(result.usage!.completion_tokens).toBe(50);
     expect(result.usage!.total_tokens).toBe(150);
+  });
+
+  it("preserves thinking blocks as OpenAI reasoning_content", () => {
+    const resp: AnthropicMessagesResponse = {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "I should answer directly." },
+        { type: "text", text: "Hi" },
+      ],
+      model: "glm-4.6",
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 5 },
+    };
+
+    const result = translateResponseAnthropicToOpenAI(resp, "glm-4.6");
+
+    expect(result.choices[0].message.reasoning_content).toBe("I should answer directly.");
+    expect(result.choices[0].message.content).toBe("Hi");
   });
 });
 
@@ -514,5 +581,29 @@ describe("translateResponseOpenAIToAnthropic", () => {
     };
     const result = translateResponseOpenAIToAnthropic(resp);
     expect(result.stop_reason).toBe("max_tokens");
+  });
+
+  it("preserves OpenAI reasoning_content as an Anthropic thinking block", () => {
+    const resp: OpenAIChatResponse = {
+      id: "chatcmpl-1",
+      object: "chat.completion",
+      created: 1234567890,
+      model: "glm-4.6",
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          reasoning_content: "I should answer directly.",
+          content: "Hi",
+        },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    };
+
+    const result = translateResponseOpenAIToAnthropic(resp);
+
+    expect(result.content[0]).toEqual({ type: "thinking", thinking: "I should answer directly." });
+    expect(result.content[1]).toEqual({ type: "text", text: "Hi" });
   });
 });

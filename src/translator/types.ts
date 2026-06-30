@@ -26,6 +26,8 @@ export interface OpenAIMessage {
   name?: string;
   tool_call_id?: string;
   tool_calls?: OpenAIToolCall[];
+  /** Reasoning / chain-of-thought content (GLM, DeepSeek-R1, o1-style models). */
+  reasoning_content?: string;
 }
 
 /** Multi-modal content part (OpenAI format). */
@@ -70,6 +72,8 @@ export interface OpenAIChatRequest {
   tool_choice?: "none" | "auto" | "required" | { type: "function"; function: { name: string } };
   response_format?: { type: "text" | "json_object" };
   seed?: number;
+  reasoning_effort?: "none" | "low" | "medium" | "high";
+  thinking?: AnthropicThinkingConfig & { budgetTokens?: number };
 }
 
 /** Non-streaming response. */
@@ -93,6 +97,8 @@ interface OpenAIChoice {
     role: "assistant";
     content: string | null;
     tool_calls?: OpenAIToolCall[];
+    /** Reasoning / chain-of-thought content (GLM, DeepSeek-R1, o1-style models). */
+    reasoning_content?: string;
   };
   finish_reason: "stop" | "length" | "tool_calls" | "content_filter" | null;
 }
@@ -112,6 +118,7 @@ interface OpenAIStreamChoice {
   delta: {
     role?: "assistant";
     content?: string;
+    reasoning_content?: string;
     tool_calls?: Partial<OpenAIToolCall>[];
   };
   finish_reason: "stop" | "length" | "tool_calls" | "content_filter" | null;
@@ -140,7 +147,8 @@ export type AnthropicContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
-  | { type: "tool_result"; tool_use_id: string; content: string | AnthropicContentBlock[] };
+  | { type: "tool_result"; tool_use_id: string; content: string | AnthropicContentBlock[] }
+  | { type: "thinking"; thinking: string; signature?: string };
 
 /** Anthropic message in a request. */
 export interface AnthropicMessage {
@@ -162,6 +170,14 @@ export interface AnthropicMessagesRequest {
   metadata?: { user_id?: string };
   tools?: AnthropicToolDefinition[];
   tool_choice?: { type: "auto" | "any" | "tool"; name?: string };
+  thinking?: AnthropicThinkingConfig;
+}
+
+/** Anthropic thinking/reasoning control. */
+export interface AnthropicThinkingConfig {
+  type: "enabled" | "disabled" | "adaptive";
+  budget_tokens?: number;
+  display?: boolean;
 }
 
 /** Tool definition in Anthropic format. */
@@ -200,6 +216,8 @@ export type AnthropicStreamEvent =
       delta:
         | { type: "text_delta"; text: string }
         | { type: "input_json_delta"; partial_json: string }
+        | { type: "thinking_delta"; thinking: string }
+        | { type: "signature_delta"; signature: string }
         | { type: "stop_reason"; stop_reason: string };
     }
   | { type: "content_block_stop"; index: number }

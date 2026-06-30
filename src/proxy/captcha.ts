@@ -15,8 +15,19 @@
  * undefined. Static import lets Bun's bundler fully inline jsdom (including
  * its internal `xhr-sync-worker.js` via `require.resolve`) into the binary,
  * so the compiled exe has zero runtime dependency on node_modules.
+ *
+ * FeiLin device-fingerprint blocking — the AliyunCaptcha SDK dynamically
+ * injects a `<script src="...FeiLin...">` tag at runtime. Left to load (via
+ * `resources: "usable"`), FeiLin runs inside jsdom, detects the headless
+ * environment, and emits a fingerprint that fails upstream verification with
+ * `verifyCode: F001`. A `FeiLinBlockingLoader` (ResourceLoader subclass)
+ * intercepts FeiLin URLs and returns a no-op stub, so the fingerprint SDK
+ * never runs. Polyfill values stay STABLE (not randomized) — Aliyun's risk
+ * engine correlates fingerprint stability across requests; randomizing
+ * per-auth is counterproductive.
  */
-import { JSDOM, VirtualConsole } from "jsdom";
+import { JSDOM, ResourceLoader, VirtualConsole } from "jsdom";
+import type { FetchOptions } from "jsdom";
 import ALIYUN_SDK_LOCAL from "./AliyunCaptcha.js.txt" with { type: "text" };
 
 const CAPTCHA_HEADER = "x-aliyun-captcha-verify-param";
@@ -81,7 +92,7 @@ async function solveInJsdom(cfg: FetchedCaptchaConfig): Promise<string> {
   const sdkSafe = ALIYUN_SDK_LOCAL.replace(/<\/script>/gi, "<\\/script>");
   const html = `<!DOCTYPE html><html><head></head><body><div id="captcha-element"></div><button id="captcha-button"></button><script>${sdkSafe}</script></body></html>`;
   const dom = new JSDOM(html, {
-    url: "https://zcode.z.ai/", runScripts: "dangerously", resources: "usable",
+    url: "https://zcode.z.ai/", runScripts: "dangerously", resources: new FeiLinBlockingLoader(),
     pretendToBeVisual: true, virtualConsole: vc,
     beforeParse(window: any) { applyPolyfills(window); window.AliyunCaptchaConfig = { region: cfg.region, prefix: cfg.prefix }; },
   });
@@ -127,12 +138,36 @@ function waitFor(cond: () => boolean, ms: number): Promise<void> {
   });
 }
 
+/**
+ * Resource loader that blocks the FeiLin device-fingerprint SDK.
+ *
+ * The AliyunCaptcha SDK injects a `<script>` for FeiLin at runtime. In jsdom
+ * that SDK executes, detects the non-browser environment, and produces a
+ * fingerprint rejected upstream as `verifyCode: F001`. Intercepting the URL
+ * and returning a no-op stub prevents FeiLin from running at all, so the
+ * captcha solve relies on the stable polyfill values instead.
+ */
+class FeiLinBlockingLoader extends ResourceLoader {
+  fetch(url: string, options: FetchOptions) {
+    if (/FeiLin/i.test(url)) {
+      return Object.assign(
+        Promise.resolve(Buffer.from("window.__feilin_blocked=true;")),
+        { abort() {} },
+      );
+    }
+    return super.fetch(url, options);
+  }
+}
+
 /* eslint-disable @typescript-eslint/no-explicit-any */
 function applyPolyfills(window: any): void {
   window.matchMedia = () => ({ matches: false, media: "", onchange: null, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent() { return false; } });
+  let rafCount = 0;
+  window.requestAnimationFrame = (cb: (t: number) => void) => { const id = ++rafCount; setTimeout(() => cb(Date.now()), 16); return id; };
+  window.cancelAnimationFrame = (id: number) => clearTimeout(id);
   const proto = window.HTMLCanvasElement.prototype;
   proto.getContext = function (type: string) {
-    if (/webgl/i.test(type)) return { canvas: this, getParameter: () => "Intel Inc.", getExtension: () => null, getSupportedExtensions: () => ["WEBGL_debug_renderer_info"], getContextAttributes: () => ({}), getShaderPrecisionFormat: () => ({ precision: 23, rangeMin: 127, rangeMax: 127 }) };
+    if (/webgl/i.test(type)) return { canvas: this, getParameter: (p: number) => { if (p === 37445) return "Intel Inc."; if (p === 37446) return "Intel Iris OpenGL Engine"; return "Intel"; }, getExtension: () => null, getSupportedExtensions: () => ["WEBGL_debug_renderer_info"], getContextAttributes: () => ({}), getShaderPrecisionFormat: () => ({ precision: 23, rangeMin: 127, rangeMax: 127 }) };
     return { canvas: this, fillRect() {}, clearRect() {}, getImageData: (x: number, y: number, w = 1, h = 1) => ({ data: new Uint8ClampedArray(w * h * 4) }), putImageData() {}, createImageData: (w = 1, h = 1) => ({ data: new Uint8ClampedArray(w * h * 4) }), setTransform() {}, transform() {}, drawImage() {}, save() {}, restore() {}, beginPath() {}, moveTo() {}, lineTo() {}, bezierCurveTo() {}, quadraticCurveTo() {}, closePath() {}, clip() {}, stroke() {}, fill() {}, arc() {}, rect() {}, ellipse() {}, translate() {}, scale() {}, rotate() {}, fillText() {}, strokeText() {}, measureText: (t: string) => ({ width: ("" + t).length * 8 }), createLinearGradient: () => ({ addColorStop() {} }), createRadialGradient: () => ({ addColorStop() {} }), createPattern: () => ({}), isPointInPath: () => false, font: "10px sans-serif", textBaseline: "alphabetic", textAlign: "start", fillStyle: "#000", strokeStyle: "#000", globalAlpha: 1, lineWidth: 1, shadowBlur: 0, shadowColor: "" };
   };
   proto.toDataURL = () => "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
@@ -144,6 +179,7 @@ function applyPolyfills(window: any): void {
   for (const [k, v] of Object.entries({ userAgent: FAKE_UA, platform: "Win32", language: "en-US", languages: ["en-US", "en"], vendor: "Google Inc.", webdriver: false, hardwareConcurrency: 8, deviceMemory: 8, maxTouchPoints: 0, cookieEnabled: true, plugins: { length: 3, item: (): null => null, namedItem: (): null => null, refresh() {} }, mimeTypes: { length: 0, item: (): null => null, namedItem: (): null => null } })) { try { Object.defineProperty(nav, k, { value: v, configurable: true }); } catch {} }
   window.screen = { width: 1920, height: 1080, availWidth: 1920, availHeight: 1040, colorDepth: 24, pixelDepth: 24 };
   window.chrome = { runtime: {} }; window.outerWidth = 1920; window.outerHeight = 1080; window.innerWidth = 1280; window.innerHeight = 720; window.devicePixelRatio = 1;
+  try { window.localStorage = window.localStorage || { _data: {} as Record<string, string>, getItem(k: string) { return this._data[k] || null; }, setItem(k: string, v: string) { this._data[k] = String(v); }, removeItem(k: string) { delete this._data[k]; }, clear() { this._data = {}; }, key(i: number) { return Object.keys(this._data)[i] || null; }, get length() { return Object.keys(this._data).length; } }; } catch {}
 }
 
 export const RETRY_HEADERS = { PARAM: CAPTCHA_HEADER, REGION: REGION_HEADER };

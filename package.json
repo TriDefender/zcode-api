@@ -18,6 +18,6 @@
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/jsdom": "^28.0.3"
+    "@types/jsdom": "21.1.7"
   }
 }

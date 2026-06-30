@@ -61,6 +61,10 @@ export function translateResponseOpenAIToAnthropic(
   const choice = resp.choices?.[0];
   const content: AnthropicContentBlock[] = [];
 
+  if (choice?.message?.reasoning_content) {
+    content.push({ type: "thinking", thinking: choice.message.reasoning_content });
+  }
+
   if (choice?.message?.content) {
     content.push({ type: "text", text: choice.message.content });
   }

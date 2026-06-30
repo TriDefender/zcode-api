@@ -193,6 +193,12 @@ function translateEvent(state: TranslationState, sse: ParsedSSE): string | null 
       if (delta.type === "text_delta") {
         return makeChunk(state, { content: delta.text });
       }
+      if (delta.type === "thinking_delta") {
+        return makeChunk(state, { reasoning_content: delta.thinking });
+      }
+      if (delta.type === "signature_delta") {
+        return null;
+      }
       if (delta.type === "input_json_delta") {
         const myIndex = state.blockIndexToToolCallIndex.get(blockIdx);
         if (myIndex === undefined) return null;
@@ -328,6 +334,24 @@ export function openaiSseToAnthropicSse(
                   type: "content_block_delta",
                   index: blockIndex,
                   delta: { type: "text_delta", text: choice.delta.content },
+                })));
+                controller.enqueue(encoder.encode(formatAnthropicSSE("content_block_stop", {
+                  type: "content_block_stop",
+                  index: blockIndex,
+                })));
+                blockIndex++;
+              }
+
+              if (choice?.delta?.reasoning_content) {
+                controller.enqueue(encoder.encode(formatAnthropicSSE("content_block_start", {
+                  type: "content_block_start",
+                  index: blockIndex,
+                  content_block: { type: "thinking", thinking: "" },
+                })));
+                controller.enqueue(encoder.encode(formatAnthropicSSE("content_block_delta", {
+                  type: "content_block_delta",
+                  index: blockIndex,
+                  delta: { type: "thinking_delta", thinking: choice.delta.reasoning_content },
                 })));
                 controller.enqueue(encoder.encode(formatAnthropicSSE("content_block_stop", {
                   type: "content_block_stop",

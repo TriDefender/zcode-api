@@ -32,6 +32,7 @@ interface ParsedChunk {
     delta: {
       role?: string;
       content?: string;
+      reasoning_content?: string;
       tool_calls?: Array<{
         index: number;
         id?: string;
@@ -86,6 +87,35 @@ describe("anthropicSseToOpenaiSse", () => {
     const output = await collectStream(anthropicSseToOpenaiSse(input, "glm-4.6"));
     expect(output).toContain('"content":"Hello"');
     expect(output).toContain('"content":" world"');
+  });
+
+  it("translates thinking_delta to delta.reasoning_content", async () => {
+    const sse = [
+      'event: message_start',
+      'data: {"type":"message_start","message":{"id":"msg_1","model":"glm-4.6"}}',
+      '',
+      'event: content_block_start',
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"I should answer directly."}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_ignored"}}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(anthropicSseToOpenaiSse(makeStream(sse), "glm-4.6"));
+    const chunks = parseChunks(output);
+    const reasoning = chunks
+      .map((c) => c.choices[0]?.delta.reasoning_content)
+      .filter((text): text is string => typeof text === "string");
+
+    expect(reasoning).toEqual(["I should answer directly."]);
+    expect(output).not.toContain("sig_ignored");
   });
 
   it("translates message_delta stop_reason to finish_reason", async () => {
@@ -336,6 +366,20 @@ describe("openaiSseToAnthropicSse", () => {
     const output = await collectStream(openaiSseToAnthropicSse(input, "glm-4.6"));
     expect(output).toContain("text_delta");
     expect(output).toContain('"text":"Hi"');
+  });
+
+  it("translates delta.reasoning_content to thinking_delta", async () => {
+    const sse = [
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"reasoning_content":"I should answer directly."},"finish_reason":null}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
+
+    expect(output).toContain("thinking_delta");
+    expect(output).toContain('"thinking":"I should answer directly."');
   });
 
   it("emits message_stop on [DONE]", async () => {
