@@ -22,13 +22,3 @@ export const MODELS: ModelDef[] = [
   { id: "glm-5.1", name: "GLM 5.1", contextWindow: 200_000, maxOutputTokens: 128_000, reasoning: true },
   { id: "glm-5.2", name: "GLM 5.2", contextWindow: 1_000_000, maxOutputTokens: 128_000, reasoning: true },
 ];
-
-/** Look up a model by id. Returns `undefined` for unknown models. */
-export function getModel(id: string): ModelDef | undefined {
-  return MODELS.find((m) => m.id === id);
-}
-
-/** All model ids. */
-export function listModelIds(): string[] {
-  return MODELS.map((m) => m.id);
-}

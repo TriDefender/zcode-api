@@ -34,8 +34,3 @@ export function getProvider(id: ProviderId): ProviderDef {
   }
   return def;
 }
-
-/** All known provider ids. */
-export function listProviders(): ProviderId[] {
-  return Object.keys(PROVIDERS) as ProviderId[];
-}
