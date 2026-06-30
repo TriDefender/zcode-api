@@ -26,8 +26,23 @@ jobs:
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
           fi
 
-  build-binaries:
+  verify:
     needs: detect
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1"
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Type check
+        run: bun x tsc --noEmit
+      - name: Run tests
+        run: bun test
+
+  build-binaries:
+    needs: [detect, verify]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -82,7 +97,7 @@ jobs:
           files: dist/*
 
   docker:
-    needs: detect
+    needs: [detect, release]
     runs-on: ubuntu-latest
     permissions:
       contents: read
