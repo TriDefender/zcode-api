@@ -1,9 +1,12 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "New release tag, e.g. v2.1.0"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -12,15 +15,27 @@ jobs:
   detect:
     runs-on: ubuntu-latest
     outputs:
-      is_prerelease: ${{ steps.check.outputs.is_prerelease }}
+      tag: ${{ steps.check.outputs.tag }}
       version: ${{ steps.check.outputs.version }}
+      is_prerelease: ${{ steps.check.outputs.is_prerelease }}
     steps:
-      - name: Determine version and prerelease
+      - name: Validate tag and determine prerelease
         id: check
+        env:
+          TAG: ${{ inputs.tag }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          if ! printf '%s' "$TAG" | grep -qE '^v'; then
+            echo "::error::Release tag must start with 'v' (got: '$TAG')"
+            exit 1
+          fi
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::Tag '$TAG' already exists on the remote"
+            exit 1
+          fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-          if echo "$TAG" | grep -qiE 'alpha|beta|rc'; then
+          if printf '%s' "$TAG" | grep -qiE 'alpha|beta|rc'; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
@@ -83,6 +98,13 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - name: Create and push tag
+        env:
+          TAG: ${{ needs.detect.outputs.tag }}
+        run: |
+          git tag "$TAG"
+          git push origin "$TAG"
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -91,7 +113,8 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
+          tag_name: ${{ needs.detect.outputs.tag }}
+          name: ${{ needs.detect.outputs.tag }}
           generate_release_notes: true
           prerelease: ${{ needs.detect.outputs.is_prerelease }}
           files: dist/*
