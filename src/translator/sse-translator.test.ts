@@ -51,6 +51,19 @@ function parseChunks(output: string): ParsedChunk[] {
     .map((l) => JSON.parse(l.slice(6)) as ParsedChunk);
 }
 
+function parseAnthropicEvents(output: string): Array<{ event: string; data: any }> {
+  return output
+    .split("\n\n")
+    .map((block) => {
+      const lines = block.trim().split("\n").filter(Boolean);
+      const event = lines.find((line) => line.startsWith("event: "))?.slice(7) ?? "";
+      const dataLine = lines.find((line) => line.startsWith("data: "));
+      if (!dataLine) return null;
+      return { event, data: JSON.parse(dataLine.slice(6)) };
+    })
+    .filter((event): event is { event: string; data: any } => event !== null);
+}
+
 const ANTHROPIC_SSE = [
   'event: message_start',
   'data: {"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[],"model":"glm-4.6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}',
@@ -115,6 +128,41 @@ describe("anthropicSseToOpenaiSse", () => {
       .filter((text): text is string => typeof text === "string");
 
     expect(reasoning).toEqual(["I should answer directly."]);
+    expect(output).not.toContain("sig_ignored");
+  });
+
+  it("translates multiple thinking_delta events into stable reasoning_content deltas", async () => {
+    const sse = [
+      'event: message_start',
+      'data: {"type":"message_start","message":{"id":"msg_1","model":"glm-4.6"}}',
+      '',
+      'event: content_block_start',
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"First step. "}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Second step."}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_ignored"}}',
+      '',
+      'event: content_block_stop',
+      'data: {"type":"content_block_stop","index":0}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(anthropicSseToOpenaiSse(makeStream(sse), "glm-4.6"));
+    const chunks = parseChunks(output);
+    const reasoning = chunks
+      .map((c) => c.choices[0]?.delta.reasoning_content)
+      .filter((text): text is string => typeof text === "string");
+
+    expect(reasoning).toEqual(["First step. ", "Second step."]);
     expect(output).not.toContain("sig_ignored");
   });
 
@@ -380,6 +428,47 @@ describe("openaiSseToAnthropicSse", () => {
 
     expect(output).toContain("thinking_delta");
     expect(output).toContain('"thinking":"I should answer directly."');
+  });
+
+  it("keeps consecutive reasoning_content deltas in one official Anthropic thinking block", async () => {
+    const sse = [
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"reasoning_content":"First step. "},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"reasoning_content":"Second step."},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Final."},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
+    const events = parseAnthropicEvents(output);
+    const thinkingStarts = events.filter((e) =>
+      e.event === "content_block_start" && e.data.content_block?.type === "thinking"
+    );
+    const thinkingDeltas = events.filter((e) => e.data.delta?.type === "thinking_delta");
+    const thinkingStops = events.filter((e) =>
+      e.event === "content_block_stop" && e.data.index === thinkingStarts[0]?.data.index
+    );
+    const textStarts = events.filter((e) =>
+      e.event === "content_block_start" && e.data.content_block?.type === "text"
+    );
+
+    expect(thinkingStarts).toHaveLength(1);
+    expect(thinkingStarts[0].data).toEqual({
+      type: "content_block_start",
+      index: 0,
+      content_block: { type: "thinking", thinking: "", signature: "" },
+    });
+    expect(thinkingDeltas.map((e) => e.data.index)).toEqual([0, 0]);
+    expect(thinkingDeltas.map((e) => e.data.delta.thinking)).toEqual(["First step. ", "Second step."]);
+    expect(thinkingStops).toHaveLength(1);
+    expect(textStarts[0].data.index).toBe(1);
   });
 
   it("emits message_stop on [DONE]", async () => {

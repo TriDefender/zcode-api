@@ -1213,6 +1213,381 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client through Anthropic 
   });
 });
 
+describe("proxyRequest — thinking endpoint matrix", () => {
+  const testConfig: ProxyConfig = {
+    server: { port: 8080, host: "0.0.0.0" },
+    auth: { mode: "apikey", apiKey: "testkey.testsecret" },
+    provider: "zai",
+    plan: "coding-plan",
+    providers: {
+      zai: { anthropicBase: "https://api.z.ai/api/anthropic", openaiBase: "https://api.z.ai/api/coding/paas/v4" },
+      bigmodel: { anthropicBase: "https://open.bigmodel.cn/api/anthropic", openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4" },
+    },
+    defaultModel: "glm-4.6",
+    models: ["glm-4.6"],
+    identity: IDENTITY,
+    clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
+    logging: { level: "info" },
+  };
+
+  function makeOpenAIReq(stream: boolean): Request {
+    return new Request("http://localhost:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "glm-4.6",
+        messages: [{ role: "user", content: "think then answer" }],
+        stream,
+      }),
+    });
+  }
+
+  function makeAnthropicReq(stream: boolean): Request {
+    return new Request("http://localhost:8080/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "glm-4.6",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "think then answer" }],
+        stream,
+      }),
+    });
+  }
+
+  function codingPlanAuth(): AuthManager {
+    return new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+  }
+
+  function startPlanAuth(): AuthManager {
+    const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+    auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
+    return auth;
+  }
+
+  async function withDisabledCaptcha<T>(run: () => Promise<T>): Promise<T> {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (req: Request | string): Promise<Response> => {
+      const url = typeof req === "string" ? req : req.url;
+      if (url.includes("/client/configs")) {
+        return new Response(JSON.stringify({ data: { configs: { captcha: { enabled: false } } } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected global fetch in test: ${url}`);
+    }) as typeof fetch;
+    try {
+      return await run();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  }
+
+  function anthropicThinkingResponse(): string {
+    return JSON.stringify({
+      id: "msg_thinking",
+      type: "message",
+      role: "assistant",
+      content: [
+        { type: "thinking", thinking: "First step. Second step.", signature: "sig_real" },
+        { type: "text", text: "Final answer." },
+      ],
+      model: "glm-4.6",
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 7 },
+    });
+  }
+
+  function openAIThinkingResponse(): string {
+    return JSON.stringify({
+      id: "chatcmpl_thinking",
+      object: "chat.completion",
+      created: 1,
+      model: "glm-4.6",
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          reasoning_content: "First step. Second step.",
+          content: "Final answer.",
+        },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 7, total_tokens: 17 },
+    });
+  }
+
+  function anthropicThinkingSse(): string {
+    return [
+      'event: message_start',
+      'data: {"type":"message_start","message":{"id":"msg_thinking","type":"message","role":"assistant","content":[],"model":"glm-4.6","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":0}}}',
+      '',
+      'event: content_block_start',
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"First step. "}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Second step."}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig_real"}}',
+      '',
+      'event: content_block_stop',
+      'data: {"type":"content_block_stop","index":0}',
+      '',
+      'event: content_block_start',
+      'data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}',
+      '',
+      'event: content_block_delta',
+      'data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Final answer."}}',
+      '',
+      'event: content_block_stop',
+      'data: {"type":"content_block_stop","index":1}',
+      '',
+      'event: message_delta',
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":7}}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join("\n");
+  }
+
+  function openAIThinkingSse(): string {
+    return [
+      'data: {"id":"chatcmpl_thinking","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
+      '',
+      'data: {"id":"chatcmpl_thinking","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"reasoning_content":"First step. "},"finish_reason":null}]}',
+      '',
+      'data: {"id":"chatcmpl_thinking","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"reasoning_content":"Second step."},"finish_reason":null}]}',
+      '',
+      'data: {"id":"chatcmpl_thinking","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Final answer."},"finish_reason":null}]}',
+      '',
+      'data: {"id":"chatcmpl_thinking","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join("\n");
+  }
+
+  function openAIReasoningDeltas(sse: string): string[] {
+    return sse
+      .split("\n")
+      .filter((line) => line.startsWith("data: ") && line !== "data: [DONE]")
+      .map((line) => JSON.parse(line.slice(6)))
+      .map((chunk) => chunk.choices?.[0]?.delta?.reasoning_content)
+      .filter((text): text is string => typeof text === "string");
+  }
+
+  function anthropicEvents(sse: string): Array<{ event: string; data: any }> {
+    return sse
+      .split("\n\n")
+      .map((block) => {
+        const lines = block.trim().split("\n").filter(Boolean);
+        const event = lines.find((line) => line.startsWith("event: "))?.slice(7) ?? "";
+        const dataLine = lines.find((line) => line.startsWith("data: "));
+        if (!dataLine) return null;
+        return { event, data: JSON.parse(dataLine.slice(6)) };
+      })
+      .filter((event): event is { event: string; data: any } => event !== null);
+  }
+
+  it("OpenAI endpoint non-streaming preserves Anthropic upstream thinking as reasoning_content", async () => {
+    let upstreamUrl = "";
+    const fetchMock = mock(async (req: Request): Promise<Response> => {
+      upstreamUrl = req.url;
+      return new Response(anthropicThinkingResponse(), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const resp = await proxyRequest(makeOpenAIReq(false), "openai", {
+      config: testConfig,
+      auth: codingPlanAuth(),
+      fetchImpl: fetchMock as any,
+    });
+
+    expect(upstreamUrl).toBe("https://api.z.ai/api/anthropic/v1/messages");
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body.choices[0].message.reasoning_content).toBe("First step. Second step.");
+    expect(body.choices[0].message.content).toBe("Final answer.");
+  });
+
+  it("OpenAI endpoint streaming preserves Anthropic upstream thinking as reasoning_content deltas", async () => {
+    let upstreamUrl = "";
+    const fetchMock = mock(async (req: Request): Promise<Response> => {
+      upstreamUrl = req.url;
+      return new Response(anthropicThinkingSse(), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+
+    const resp = await proxyRequest(makeOpenAIReq(true), "openai", {
+      config: testConfig,
+      auth: codingPlanAuth(),
+      fetchImpl: fetchMock as any,
+    });
+
+    expect(upstreamUrl).toBe("https://api.z.ai/api/anthropic/v1/messages");
+    expect(resp.status).toBe(200);
+    const text = await resp.text();
+    expect(openAIReasoningDeltas(text)).toEqual(["First step. ", "Second step."]);
+    expect(text).toContain('"content":"Final answer."');
+  });
+
+  it("Anthropic endpoint non-streaming passes through Anthropic upstream thinking blocks", async () => {
+    const fetchMock = mock(async (): Promise<Response> => {
+      return new Response(anthropicThinkingResponse(), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+
+    const resp = await proxyRequest(makeAnthropicReq(false), "anthropic", {
+      config: testConfig,
+      auth: codingPlanAuth(),
+      fetchImpl: fetchMock as any,
+    });
+
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body.content[0]).toEqual({ type: "thinking", thinking: "First step. Second step.", signature: "sig_real" });
+    expect(body.content[1]).toEqual({ type: "text", text: "Final answer." });
+  });
+
+  it("Anthropic endpoint streaming passes through official Anthropic upstream thinking events", async () => {
+    const fetchMock = mock(async (): Promise<Response> => {
+      return new Response(anthropicThinkingSse(), {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+
+    const resp = await proxyRequest(makeAnthropicReq(true), "anthropic", {
+      config: testConfig,
+      auth: codingPlanAuth(),
+      fetchImpl: fetchMock as any,
+    });
+
+    expect(resp.status).toBe(200);
+    const events = anthropicEvents(await resp.text());
+    const thinkingStarts = events.filter((e) =>
+      e.event === "content_block_start" && e.data.content_block?.type === "thinking"
+    );
+    const thinkingDeltas = events.filter((e) => e.data.delta?.type === "thinking_delta");
+    expect(thinkingStarts).toHaveLength(1);
+    expect(thinkingDeltas.map((e) => e.data.delta.thinking)).toEqual(["First step. ", "Second step."]);
+  });
+
+  it("start-plan OpenAI endpoint non-streaming passes through OpenAI upstream reasoning_content", async () => {
+    await withDisabledCaptcha(async () => {
+      const fetchMock = mock(async (req: Request): Promise<Response> => {
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
+        return new Response(openAIThinkingResponse(), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      });
+
+      const resp = await proxyRequest(makeOpenAIReq(false), "openai", {
+        config: { ...testConfig, plan: "start-plan" },
+        auth: startPlanAuth(),
+        fetchImpl: fetchMock as any,
+      });
+
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.choices[0].message.reasoning_content).toBe("First step. Second step.");
+      expect(body.choices[0].message.content).toBe("Final answer.");
+    });
+  });
+
+  it("start-plan OpenAI endpoint streaming passes through OpenAI upstream reasoning_content deltas", async () => {
+    await withDisabledCaptcha(async () => {
+      const fetchMock = mock(async (req: Request): Promise<Response> => {
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
+        return new Response(openAIThinkingSse(), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      });
+
+      const resp = await proxyRequest(makeOpenAIReq(true), "openai", {
+        config: { ...testConfig, plan: "start-plan" },
+        auth: startPlanAuth(),
+        fetchImpl: fetchMock as any,
+      });
+
+      expect(resp.status).toBe(200);
+      expect(openAIReasoningDeltas(await resp.text())).toEqual(["First step. ", "Second step."]);
+    });
+  });
+
+  it("start-plan Anthropic endpoint non-streaming translates OpenAI upstream reasoning_content into thinking blocks", async () => {
+    await withDisabledCaptcha(async () => {
+      const fetchMock = mock(async (req: Request): Promise<Response> => {
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
+        return new Response(openAIThinkingResponse(), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      });
+
+      const resp = await proxyRequest(makeAnthropicReq(false), "anthropic", {
+        config: { ...testConfig, plan: "start-plan" },
+        auth: startPlanAuth(),
+        fetchImpl: fetchMock as any,
+      });
+
+      expect(resp.status).toBe(200);
+      const body = await resp.json();
+      expect(body.content[0]).toEqual({ type: "thinking", thinking: "First step. Second step." });
+      expect(body.content[1]).toEqual({ type: "text", text: "Final answer." });
+    });
+  });
+
+  it("start-plan Anthropic endpoint streaming translates OpenAI upstream reasoning_content into one thinking block", async () => {
+    await withDisabledCaptcha(async () => {
+      const fetchMock = mock(async (req: Request): Promise<Response> => {
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
+        return new Response(openAIThinkingSse(), {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      });
+
+      const resp = await proxyRequest(makeAnthropicReq(true), "anthropic", {
+        config: { ...testConfig, plan: "start-plan" },
+        auth: startPlanAuth(),
+        fetchImpl: fetchMock as any,
+      });
+
+      expect(resp.status).toBe(200);
+      const events = anthropicEvents(await resp.text());
+      const thinkingStarts = events.filter((e) =>
+        e.event === "content_block_start" && e.data.content_block?.type === "thinking"
+      );
+      const thinkingDeltas = events.filter((e) => e.data.delta?.type === "thinking_delta");
+
+      expect(thinkingStarts).toHaveLength(1);
+      expect(thinkingStarts[0].data).toEqual({
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "thinking", thinking: "", signature: "" },
+      });
+      expect(thinkingDeltas.map((e) => e.data.index)).toEqual([0, 0]);
+      expect(thinkingDeltas.map((e) => e.data.delta.thinking)).toEqual(["First step. ", "Second step."]);
+    });
+  });
+});
+
 describe("errorResponse", () => {
   it("builds JSON error with correct status", () => {
     const resp = errorResponse(401, "auth_error", "Invalid API key");

@@ -276,12 +276,41 @@ export function openaiSseToAnthropicSse(
   let buffer = "";
   let messageStarted = false;
   let blockIndex = 0;
+  let activeBlock: { type: "text" | "thinking"; index: number } | null = null;
   const messageId = `msg_${Date.now()}`;
 
   return new ReadableStream({
     async start(controller) {
       const reader = upstream.getReader();
       let errored = false;
+
+      const enqueueAnthropicEvent = (eventType: string, data: unknown) => {
+        controller.enqueue(encoder.encode(formatAnthropicSSE(eventType, data)));
+      };
+
+      const closeActiveBlock = () => {
+        if (!activeBlock) return;
+        enqueueAnthropicEvent("content_block_stop", {
+          type: "content_block_stop",
+          index: activeBlock.index,
+        });
+        activeBlock = null;
+      };
+
+      const ensureActiveBlock = (type: "text" | "thinking"): number => {
+        if (activeBlock?.type === type) return activeBlock.index;
+        closeActiveBlock();
+        const index = blockIndex++;
+        activeBlock = { type, index };
+        enqueueAnthropicEvent("content_block_start", {
+          type: "content_block_start",
+          index,
+          content_block: type === "text"
+            ? { type: "text", text: "" }
+            : { type: "thinking", thinking: "", signature: "" },
+        });
+        return index;
+      };
 
       try {
         while (true) {
@@ -297,9 +326,8 @@ export function openaiSseToAnthropicSse(
             const dataStr = line.slice(6).trim();
 
             if (dataStr === "[DONE]") {
-              controller.enqueue(encoder.encode(
-                formatAnthropicSSE("message_stop", { type: "message_stop" }),
-              ));
+              closeActiveBlock();
+              enqueueAnthropicEvent("message_stop", { type: "message_stop" });
               continue;
             }
 
@@ -309,7 +337,7 @@ export function openaiSseToAnthropicSse(
 
               if (!messageStarted) {
                 messageStarted = true;
-                controller.enqueue(encoder.encode(formatAnthropicSSE("message_start", {
+                enqueueAnthropicEvent("message_start", {
                   type: "message_start",
                   message: {
                     id: messageId,
@@ -321,58 +349,43 @@ export function openaiSseToAnthropicSse(
                     stop_sequence: null,
                     usage: { input_tokens: 0, output_tokens: 0 },
                   },
-                })));
+                });
               }
 
               if (choice?.delta?.content) {
-                controller.enqueue(encoder.encode(formatAnthropicSSE("content_block_start", {
-                  type: "content_block_start",
-                  index: blockIndex,
-                  content_block: { type: "text", text: "" },
-                })));
-                controller.enqueue(encoder.encode(formatAnthropicSSE("content_block_delta", {
+                const index = ensureActiveBlock("text");
+                enqueueAnthropicEvent("content_block_delta", {
                   type: "content_block_delta",
-                  index: blockIndex,
+                  index,
                   delta: { type: "text_delta", text: choice.delta.content },
-                })));
-                controller.enqueue(encoder.encode(formatAnthropicSSE("content_block_stop", {
-                  type: "content_block_stop",
-                  index: blockIndex,
-                })));
-                blockIndex++;
+                });
               }
 
               if (choice?.delta?.reasoning_content) {
-                controller.enqueue(encoder.encode(formatAnthropicSSE("content_block_start", {
-                  type: "content_block_start",
-                  index: blockIndex,
-                  content_block: { type: "thinking", thinking: "" },
-                })));
-                controller.enqueue(encoder.encode(formatAnthropicSSE("content_block_delta", {
+                const index = ensureActiveBlock("thinking");
+                enqueueAnthropicEvent("content_block_delta", {
                   type: "content_block_delta",
-                  index: blockIndex,
+                  index,
                   delta: { type: "thinking_delta", thinking: choice.delta.reasoning_content },
-                })));
-                controller.enqueue(encoder.encode(formatAnthropicSSE("content_block_stop", {
-                  type: "content_block_stop",
-                  index: blockIndex,
-                })));
-                blockIndex++;
+                });
               }
 
               if (choice?.finish_reason) {
                 const stopReason = mapFinishReason(choice.finish_reason);
-                controller.enqueue(encoder.encode(formatAnthropicSSE("message_delta", {
+                closeActiveBlock();
+                enqueueAnthropicEvent("message_delta", {
                   type: "message_delta",
                   delta: { stop_reason: stopReason },
                   usage: { output_tokens: 0 },
-                })));
+                });
               }
             } catch {
               // Skip malformed
             }
           }
         }
+
+        closeActiveBlock();
       } catch (err) {
         errored = true;
         // error()/close() 互斥:errored 流上再 close() 会抛 TypeError,进而触发 Bun 引擎空指针崩溃。
