@@ -96,6 +96,70 @@ beforeAll(() => {
       }
 
       if (url.pathname.includes("/chat/completions")) {
+        capturedUpstreamBodies.push(rawBody);
+        let hasToolResult = false;
+        let hasToolsDefined = false;
+        try {
+          const parsedAny = JSON.parse(rawBody) as {
+            messages?: Array<{ role?: string }>;
+            tools?: unknown[];
+          };
+          hasToolResult = (parsedAny.messages ?? []).some((m) => m.role === "tool");
+          hasToolsDefined = (parsedAny.tools?.length ?? 0) > 0;
+        } catch {}
+
+        if (hasToolResult) {
+          return new Response(JSON.stringify({
+            id: "chatcmpl-after-tool",
+            object: "chat.completion",
+            created: Date.now(),
+            model: "glm-4.6",
+            choices: [{
+              index: 0,
+              message: { role: "assistant", content: "Tool result acknowledged" },
+              finish_reason: "stop",
+            }],
+            usage: { prompt_tokens: 25, completion_tokens: 4, total_tokens: 29 },
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+
+        if (hasToolsDefined && !parsed.stream) {
+          return new Response(JSON.stringify({
+            id: "chatcmpl-tool-call",
+            object: "chat.completion",
+            created: Date.now(),
+            model: "glm-4.6",
+            choices: [{
+              index: 0,
+              message: {
+                role: "assistant",
+                content: "Calling tool.",
+                tool_calls: [{
+                  id: "call_http_1",
+                  type: "function",
+                  function: { name: "get_weather", arguments: "{\"city\":\"SF\"}" },
+                }],
+              },
+              finish_reason: "tool_calls",
+            }],
+            usage: { prompt_tokens: 15, completion_tokens: 12, total_tokens: 27 },
+          }), { status: 200, headers: { "content-type": "application/json" } });
+        }
+
+        if (parsed.stream) {
+          const sse = [
+            'data: {"id":"chatcmpl-int-stream","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
+            '',
+            'data: {"id":"chatcmpl-int-stream","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Integration stream"},"finish_reason":null}]}',
+            '',
+            'data: {"id":"chatcmpl-int-stream","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+            '',
+            'data: [DONE]',
+            '',
+          ].join("\n");
+          return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+        }
+
         return new Response(JSON.stringify({
           id: "chatcmpl-int-test",
           object: "chat.completion",
@@ -143,8 +207,8 @@ function authHeader(): Record<string, string> {
   return { "Authorization": "Bearer integration-test-key", "Content-Type": "application/json" };
 }
 
-describe("integration: OpenAI translation", () => {
-  it("POST /v1/chat/completions returns 200 with translated response", async () => {
+describe("integration: OpenAI passthrough", () => {
+  it("POST /v1/chat/completions returns 200 with OpenAI-compatible response", async () => {
     const resp = await fetch(proxyUrl("/v1/chat/completions"), {
       method: "POST",
       headers: authHeader(),
@@ -156,26 +220,26 @@ describe("integration: OpenAI translation", () => {
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.object).toBe("chat.completion");
-    expect(body.choices[0].message.content).toBe("Integration test response");
+    expect(body.choices[0].message.content).toBe("OpenAI integration response");
     expect(body.model).toBe("glm-4.6");
   });
 
-  it("returns gzip-encoded body when client sends accept-encoding: gzip", async () => {
+  it("does not synthesize gzip for OpenAI passthrough when upstream is plain JSON", async () => {
     const resp = await fetch(proxyUrl("/v1/chat/completions"), {
       method: "POST",
       headers: { ...authHeader(), "accept-encoding": "gzip" },
       body: JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "Hi" }] }),
     });
     expect(resp.status).toBe(200);
-    expect(resp.headers.get("content-encoding")).toBe("gzip");
+    expect(resp.headers.get("content-encoding")).toBeNull();
     const body = await resp.json();
     expect(body.object).toBe("chat.completion");
-    expect(body.choices[0].message.content).toBe("Integration test response");
+    expect(body.choices[0].message.content).toBe("OpenAI integration response");
   });
 });
 
-describe("integration: OpenAI streaming translation", () => {
-  it("translates Anthropic SSE to OpenAI SSE chunks", async () => {
+describe("integration: OpenAI streaming passthrough", () => {
+  it("passes OpenAI-compatible SSE chunks through", async () => {
     const resp = await fetch(proxyUrl("/v1/chat/completions"), {
       method: "POST",
       headers: authHeader(),
@@ -189,12 +253,13 @@ describe("integration: OpenAI streaming translation", () => {
     expect(resp.headers.get("content-type")).toBe("text/event-stream");
     const text = await resp.text();
     expect(text).toContain("chat.completion.chunk");
+    expect(text).toContain("Integration stream");
     expect(text).toContain("data: [DONE]");
   });
 });
 
 describe("integration: OpenAI tool-call roundtrip (HTTP layer)", () => {
-  it("returns OpenAI tool_calls on turn 1, accepts tool_result on turn 2, upstream receives valid Anthropic shape", async () => {
+  it("returns OpenAI tool_calls on turn 1, accepts tool_result on turn 2, upstream receives OpenAI shape", async () => {
     const tools = [{ type: "function", function: { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }];
 
     const resp1 = await fetch(proxyUrl("/v1/chat/completions"), {
@@ -212,7 +277,7 @@ describe("integration: OpenAI tool-call roundtrip (HTTP layer)", () => {
     expect(body1.choices[0].finish_reason).toBe("tool_calls");
     const toolCall = body1.choices[0].message.tool_calls?.[0];
     expect(toolCall).toBeDefined();
-    expect(toolCall.id).toBe("toolu_http_1");
+    expect(toolCall.id).toBe("call_http_1");
     expect(toolCall.function.name).toBe("get_weather");
     expect(JSON.parse(toolCall.function.arguments)).toEqual({ city: "SF" });
 
@@ -236,29 +301,21 @@ describe("integration: OpenAI tool-call roundtrip (HTTP layer)", () => {
 
     const toolResultBody = capturedUpstreamBodies
       .map((b) => JSON.parse(b))
-      .filter((b) => (b.messages ?? []).some((m: any) => Array.isArray(m.content) && m.content.some((c: any) => c?.type === "tool_result")));
-    expect(toolResultBody).toHaveLength(1);
-    const upstreamReq = toolResultBody[0];
+      .filter((b) => (b.messages ?? []).some((m: any) => m.role === "tool" && m.tool_call_id === "call_http_1"));
+    expect(toolResultBody.length).toBeGreaterThanOrEqual(1);
+    const upstreamReq = toolResultBody.at(-1);
     expect(upstreamReq.messages).toHaveLength(3);
     expect(upstreamReq.messages[0].role).toBe("user");
     expect(upstreamReq.messages[1].role).toBe("assistant");
-    const assistantBlocks = upstreamReq.messages[1].content;
-    expect(Array.isArray(assistantBlocks)).toBe(true);
-    const toolUseBlock = assistantBlocks.find((b: any) => b.type === "tool_use");
-    expect(toolUseBlock).toMatchObject({ id: "toolu_http_1", name: "get_weather", input: { city: "SF" } });
-    expect(upstreamReq.messages[2].role).toBe("user");
-    const userBlocks = upstreamReq.messages[2].content;
-    expect(Array.isArray(userBlocks)).toBe(true);
-    const toolResultBlock = userBlocks.find((b: any) => b.type === "tool_result");
-    expect(toolResultBlock).toMatchObject({ tool_use_id: "toolu_http_1", content: "62°F" });
+    expect(upstreamReq.messages[1].tool_calls[0].id).toBe("call_http_1");
+    expect(upstreamReq.messages[2]).toMatchObject({ role: "tool", tool_call_id: "call_http_1", content: "62°F" });
     expect(upstreamReq.tools).toHaveLength(1);
-    expect(upstreamReq.tools[0]).toMatchObject({ name: "get_weather" });
-    expect(upstreamReq.tool_choice).toBeUndefined();
+    expect(upstreamReq.tools[0].function.name).toBe("get_weather");
   });
 });
 
-describe("integration: Anthropic passthrough", () => {
-  it("POST /v1/messages returns 200 with response", async () => {
+describe("integration: Anthropic compatibility", () => {
+  it("POST /v1/messages returns 200 with translated OpenAI-compatible response", async () => {
     const resp = await fetch(proxyUrl("/v1/messages"), {
       method: "POST",
       headers: authHeader(),
@@ -270,7 +327,7 @@ describe("integration: Anthropic passthrough", () => {
     });
     expect(resp.status).toBe(200);
     const body = await resp.json();
-    expect(body.content[0].text).toBe("Integration test response");
+    expect(body.content[0].text).toBe("OpenAI integration response");
     expect(body.stop_reason).toBe("end_turn");
   });
 });

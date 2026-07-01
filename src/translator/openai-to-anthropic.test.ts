@@ -543,6 +543,41 @@ describe("translateRequestAnthropicToOpenAI", () => {
     expect(result.tools).toHaveLength(1);
     expect(result.tools![0].function.name).toBe("search");
   });
+
+  it("preserves request thinking control for OpenAI-compatible upstreams", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-5.2",
+      messages: [{ role: "user", content: "Think" }],
+      max_tokens: 100,
+      thinking: { type: "enabled", budget_tokens: 2048 },
+    };
+
+    const result = translateRequestAnthropicToOpenAI(req);
+
+    expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+  });
+
+  it("preserves assistant thinking blocks as OpenAI reasoning_content", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-5.2",
+      messages: [{
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "I should reason first." },
+          { type: "text", text: "Answer" },
+        ],
+      }],
+      max_tokens: 100,
+    };
+
+    const result = translateRequestAnthropicToOpenAI(req);
+
+    expect(result.messages[0]).toEqual({
+      role: "assistant",
+      content: "Answer",
+      reasoning_content: "I should reason first.",
+    });
+  });
 });
 
 describe("translateResponseOpenAIToAnthropic", () => {

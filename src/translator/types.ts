@@ -72,7 +72,7 @@ export interface OpenAIChatRequest {
   tool_choice?: "none" | "auto" | "required" | { type: "function"; function: { name: string } };
   response_format?: { type: "text" | "json_object" };
   seed?: number;
-  reasoning_effort?: "none" | "low" | "medium" | "high";
+  reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
   thinking?: AnthropicThinkingConfig & { budgetTokens?: number };
 }
 

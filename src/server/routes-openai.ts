@@ -6,7 +6,7 @@ import { proxyRequest, type ProxyHandlerOptions } from "../proxy/handler.js";
 import { MODELS } from "../provider/models.js";
 import type { OpenAIModelList } from "../translator/types.js";
 
-/** Handle POST /v1/chat/completions — translate to Anthropic upstream and translate response back. */
+/** Handle POST /v1/chat/completions — forward OpenAI-compatible chat requests upstream. */
 export async function handleChatCompletions(
   req: Request,
   opts: ProxyHandlerOptions,

@@ -2,10 +2,10 @@
  * Main proxy handler — routes requests, injects auth, forwards, and streams responses.
  *
  * **Translation mode**:
- * - coding-plan OpenAI clients: OpenAI → Anthropic upstream → OpenAI response.
- * - start-plan Anthropic clients: Anthropic → OpenAI-compatible ZCode gateway
- *   → Anthropic response. OpenAI clients are already in the gateway's native
- *   format and pass through.
+ * - coding-plan and start-plan both use an OpenAI-compatible upstream.
+ * - Anthropic clients are translated Anthropic → OpenAI upstream → Anthropic
+ *   response. OpenAI clients are already in the upstream's native format and
+ *   pass through.
  *
  * @see .omo/plans/zcode-proxy.md Task 6
  */
@@ -42,11 +42,11 @@ export interface ProxyHandlerOptions {
  * Forward a client request to the upstream provider with injected auth.
  *
  * Upstream fetch options differ by mode:
- * - **Passthrough** (Anthropic client): `{ decompress: false }` — compressed
+ * - **Passthrough** (OpenAI client): `{ decompress: false }` — compressed
  *   response bodies (gzip/deflate/br) pass through untouched; raw bytes and the
  *   Content-Encoding header are forwarded as-is, letting the client decompress.
- * - **Translation** (OpenAI client): no options — Bun decompresses so the proxy
- *   can read the body and translate Anthropic→OpenAI (then re-gzip if the client
+ * - **Translation** (Anthropic client): no options — Bun decompresses so the proxy
+ *   can read the body and translate OpenAI→Anthropic (then re-gzip if the client
  *   accepts).
  *
  * No upstream timeout is applied — matches ZCode desktop client behaviour
@@ -86,9 +86,9 @@ export async function proxyRequest(
   }
 
   const startPlan = config.plan === "start-plan";
-  const translateAnthropicToOpenAI = startPlan && format === "anthropic";
-  const translateOpenAIToAnthropic = !startPlan && format === "openai";
-  const upstreamFormat: Format = startPlan ? "openai" : (translateOpenAIToAnthropic ? "anthropic" : format);
+  const translateAnthropicToOpenAI = format === "anthropic";
+  const translateOpenAIToAnthropic = false;
+  const upstreamFormat: Format = "openai";
   const clientSession = resolveSessionContext({ clientReq, body, upstreamFormat, model: meta.model, config });
   if (debug && clientSession) {
     const shortSession = clientSession.sessionId ? clientSession.sessionId.slice(0, 10) : "-";

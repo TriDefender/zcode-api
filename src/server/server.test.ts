@@ -96,7 +96,7 @@ describe("server routing", () => {
     expect(body.choices[0].message.content).toBe("Hello from upstream");
   });
 
-  it("POST /v1/messages forwards to Anthropic upstream", async () => {
+  it("POST /v1/messages returns Anthropic-compatible response", async () => {
     const config = makeConfig();
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
     const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });

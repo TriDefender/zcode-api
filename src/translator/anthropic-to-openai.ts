@@ -40,6 +40,10 @@ export function translateRequestAnthropicToOpenAI(req: AnthropicMessagesRequest)
     result.stop = req.stop_sequences.length === 1 ? req.stop_sequences[0] : req.stop_sequences;
   }
 
+  if (req.thinking) {
+    result.thinking = req.thinking;
+  }
+
   if (req.tools?.length) {
     result.tools = req.tools.map((t) => ({
       type: "function" as const,
@@ -112,8 +116,16 @@ function translateMessageAnthropicToOpenAI(m: AnthropicMessage): OpenAIMessage {
     .filter((b) => b.type === "text")
     .map((b) => (b as any).text)
     .join("");
+  const thinkingParts = m.content
+    .filter((b) => b.type === "thinking")
+    .map((b) => (b as any).thinking ?? "")
+    .join("");
 
-  return { role: m.role, content: textParts || null };
+  return {
+    role: m.role,
+    content: textParts || null,
+    ...(m.role === "assistant" && thinkingParts ? { reasoning_content: thinkingParts } : {}),
+  };
 }
 
 function mapFinishReasonToStopReason(
