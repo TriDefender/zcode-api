@@ -4,6 +4,7 @@
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import { describe, it, expect } from "bun:test";
+import os from "node:os";
 import { buildIdentityHeaders } from "./identity.js";
 import type { ProxyIdentity } from "../config/types.js";
 
@@ -35,6 +36,14 @@ describe("buildIdentityHeaders", () => {
     expect(h["X-ZCode-Agent"]).toBe("glm");
   });
 
+  it("emits runtime platform headers matching the current ZCode bundle", () => {
+    const h = buildIdentityHeaders(BASE);
+    const expectedCategory = process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux";
+    expect(h["X-Platform"]).toBe(`${process.platform}-${os.arch()}`);
+    expect(h["X-Os-Category"]).toBe(expectedCategory);
+    expect(h["X-Os-Version"]).toBe(os.release());
+  });
+
   it("passes refererOrigin through as HTTP-Referer", () => {
     const h = buildIdentityHeaders({ ...BASE, refererOrigin: "https://example.com" });
     expect(h["HTTP-Referer"]).toBe("https://example.com");
@@ -50,13 +59,16 @@ describe("buildIdentityHeaders", () => {
 
   it("emits headers in the exact `pio` order", () => {
     const h = buildIdentityHeaders(BASE);
-    // Mirrors the bundle: HTTP-Referer → User-Agent → X-ZCode-App-Version → X-Title → X-ZCode-Agent
+    // Mirrors the bundle: identity headers, then runtime platform headers from `SOr()`.
     expect(Object.keys(h)).toEqual([
       "HTTP-Referer",
       "User-Agent",
       "X-ZCode-App-Version",
       "X-Title",
       "X-ZCode-Agent",
+      "X-Platform",
+      "X-Os-Category",
+      "X-Os-Version",
     ]);
   });
 

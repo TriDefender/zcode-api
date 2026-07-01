@@ -12,6 +12,9 @@
  *     "X-ZCode-App-Version": n                  // ONLY when a valid version resolves
  *     "X-Title":             `Z Code@${sourceTitle}`
  *     "X-ZCode-Agent":       "glm"
+ *     "X-Platform":          `${process.platform}-${os.arch()}` // when printable
+ *     "X-Os-Category":       "windows" | "macos" | "linux"
+ *     "X-Os-Version":        os.release()        // when printable
  *   }
  *
  * where `n = fio(...)` is the resolved appVersion, validated against
@@ -26,6 +29,7 @@
  *
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
+import os from "node:os";
 import type { ProxyIdentity } from "../config/types.js";
 
 /** Printable-ASCII gate copied from the ZCode bundle's `fio` helper. */
@@ -38,9 +42,38 @@ function resolveAppVersion(raw: string | undefined): string | undefined {
   return v.length > 0 && ASCII_PRINTABLE.test(v) ? v : undefined;
 }
 
+function normalizePrintableHeaderValue(raw: string | undefined): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const v = raw.trim();
+  return v.length > 0 && ASCII_PRINTABLE.test(v) ? v : undefined;
+}
+
+function normalizeOsCategory(platform: NodeJS.Platform): string {
+  switch (platform) {
+    case "darwin":
+      return "macos";
+    case "win32":
+      return "windows";
+    default:
+      return "linux";
+  }
+}
+
+function buildRuntimePlatformHeaders(): Record<string, string> {
+  const platform = normalizePrintableHeaderValue(process.platform);
+  const arch = normalizePrintableHeaderValue(os.arch());
+  const release = normalizePrintableHeaderValue(os.release());
+  return {
+    ...(platform && arch ? { "X-Platform": `${platform}-${arch}` } : {}),
+    "X-Os-Category": normalizeOsCategory(process.platform),
+    ...(release ? { "X-Os-Version": release } : {}),
+  };
+}
+
 /**
- * Build the five identity headers injected upstream, in the exact order and with
- * the exact conditional semantics of the bundle's `pio`. Pure function.
+ * Build the identity and runtime platform headers injected upstream, in the
+ * exact order and with the exact conditional semantics of the bundle's `pio`.
+ * Pure function.
  *
  * Returns `Record<string, string>` rather than a fixed interface because
  * `X-ZCode-App-Version` is conditionally omitted (matching `pio`).
@@ -53,6 +86,7 @@ export function buildIdentityHeaders(id: ProxyIdentity): Record<string, string> 
     ...(n ? { "X-ZCode-App-Version": n } : {}),
     "X-Title": `Z Code@${id.sourceTitle}`,
     "X-ZCode-Agent": "glm",
+    ...buildRuntimePlatformHeaders(),
   };
   return headers;
 }
