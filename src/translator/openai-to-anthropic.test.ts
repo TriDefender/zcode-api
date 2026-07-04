@@ -578,6 +578,235 @@ describe("translateRequestAnthropicToOpenAI", () => {
       reasoning_content: "I should reason first.",
     });
   });
+
+  it("preserves reasoning_content for a thinking-only assistant message (no text/tool_use)", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-5.2",
+      messages: [{
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "Just thinking, no answer yet." }],
+      }],
+      max_tokens: 100,
+    };
+
+    const result = translateRequestAnthropicToOpenAI(req);
+
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]).toEqual({
+      role: "assistant",
+      content: null,
+      reasoning_content: "Just thinking, no answer yet.",
+    });
+  });
+
+  it("translates assistant tool_use blocks into OpenAI tool_calls", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: "weather in SF?" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Let me check." },
+            { type: "tool_use", id: "toolu_1", name: "get_weather", input: { city: "SF" } },
+          ],
+        },
+      ],
+    };
+
+    const result = translateRequestAnthropicToOpenAI(req);
+    const assistant = result.messages[1];
+    expect(assistant.role).toBe("assistant");
+    expect(assistant.content).toBe("Let me check.");
+    expect(assistant.tool_calls).toEqual([{
+      id: "toolu_1",
+      type: "function",
+      function: { name: "get_weather", arguments: '{"city":"SF"}' },
+    }]);
+  });
+
+  it("translates user tool_result blocks into standalone role:'tool' messages", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: "weather?" },
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "toolu_1", name: "get_weather", input: { city: "SF" } }],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "62°F and sunny" }],
+        },
+      ],
+    };
+
+    const result = translateRequestAnthropicToOpenAI(req);
+    expect(result.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool"]);
+    const toolMsg = result.messages[2];
+    expect(toolMsg).toEqual({
+      role: "tool",
+      tool_call_id: "toolu_1",
+      content: "62°F and sunny",
+    });
+  });
+
+  it("coalesces parallel tool_result blocks into multiple role:'tool' messages", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: "weather in SF and NYC" },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "toolu_a", name: "get_weather", input: { city: "SF" } },
+            { type: "tool_use", id: "toolu_b", name: "get_weather", input: { city: "NYC" } },
+          ],
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "toolu_a", content: "62°F" },
+            { type: "tool_result", tool_use_id: "toolu_b", content: "58°F" },
+          ],
+        },
+      ],
+    };
+
+    const result = translateRequestAnthropicToOpenAI(req);
+    expect(result.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool", "tool"]);
+    expect(result.messages[2]).toMatchObject({ role: "tool", tool_call_id: "toolu_a", content: "62°F" });
+    expect(result.messages[3]).toMatchObject({ role: "tool", tool_call_id: "toolu_b", content: "58°F" });
+  });
+
+  it("translates tool_choice {type:'any'} to OpenAI 'required'", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      max_tokens: 100,
+      messages: [{ role: "user", content: "Hi" }],
+      tools: [{ name: "fn", input_schema: { type: "object" } }],
+      tool_choice: { type: "any" },
+    };
+
+    const result = translateRequestAnthropicToOpenAI(req);
+
+    expect(result.tool_choice).toBe("required");
+  });
+
+  it("translates tool_choice {type:'tool', name} to OpenAI function selector", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      max_tokens: 100,
+      messages: [{ role: "user", content: "Hi" }],
+      tools: [{ name: "specific_tool", input_schema: { type: "object" } }],
+      tool_choice: { type: "tool", name: "specific_tool" },
+    };
+
+    const result = translateRequestAnthropicToOpenAI(req);
+
+    expect(result.tool_choice).toEqual({ type: "function", function: { name: "specific_tool" } });
+  });
+
+  it("translates tool_choice {type:'auto'} to OpenAI 'auto'", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      max_tokens: 100,
+      messages: [{ role: "user", content: "Hi" }],
+      tools: [{ name: "fn", input_schema: { type: "object" } }],
+      tool_choice: { type: "auto" },
+    };
+
+    const result = translateRequestAnthropicToOpenAI(req);
+
+    expect(result.tool_choice).toBe("auto");
+  });
+
+  it("serializes non-text tool_result content (e.g. image) as JSON to avoid data loss", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: "x" },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "fn", input: {} }] },
+        {
+          role: "user",
+          content: [{
+            type: "tool_result",
+            tool_use_id: "t1",
+            content: [{ type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } }],
+          }],
+        },
+      ],
+    };
+
+    const result = translateRequestAnthropicToOpenAI(req);
+    const toolMsg = result.messages[2];
+    expect(toolMsg.role).toBe("tool");
+    expect(typeof toolMsg.content).toBe("string");
+    expect(toolMsg.content).toContain("image/png");
+  });
+
+  it("encodes tool_result.is_error=true as a [tool_error] prefix on the OpenAI tool message", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: "x" },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "fn", input: {} }] },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t1", content: "command not found", is_error: true }],
+        },
+      ],
+    };
+
+    const result = translateRequestAnthropicToOpenAI(req);
+    const toolMsg = result.messages[2];
+    expect(toolMsg.role).toBe("tool");
+    expect(toolMsg.content).toBe("[tool_error] command not found");
+  });
+
+  it("does not add [tool_error] prefix when is_error is absent or false", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      max_tokens: 100,
+      messages: [
+        { role: "user", content: "x" },
+        { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "fn", input: {} }] },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "t1", content: "ok" },
+            { type: "tool_result", tool_use_id: "t2", content: "still ok", is_error: false },
+          ],
+        },
+      ],
+    };
+
+    const result = translateRequestAnthropicToOpenAI(req);
+    expect(result.messages[2].content).toBe("ok");
+    expect(result.messages[3].content).toBe("still ok");
+  });
+
+  it("preserves tool_choice {type:'tool'} without name by forwarding undefined (no synthetic empty name)", () => {
+    // Client contract violation (Anthropic requires name for type:"tool"), but
+    // the proxy must not mask it as an empty function name — forward as-is so
+    // the upstream surfaces the original error.
+    const req = {
+      model: "glm-4.6",
+      max_tokens: 100,
+      messages: [{ role: "user", content: "Hi" }],
+      tools: [{ name: "fn", input_schema: { type: "object" } }],
+      tool_choice: { type: "tool" },
+    } as unknown as AnthropicMessagesRequest;
+
+    const result = translateRequestAnthropicToOpenAI(req);
+
+    expect(result.tool_choice).toEqual({ type: "function", function: { name: undefined } });
+  });
 });
 
 describe("translateResponseOpenAIToAnthropic", () => {
@@ -640,5 +869,72 @@ describe("translateResponseOpenAIToAnthropic", () => {
 
     expect(result.content[0]).toEqual({ type: "thinking", thinking: "I should answer directly." });
     expect(result.content[1]).toEqual({ type: "text", text: "Hi" });
+  });
+
+  it("maps usage tokens correctly", () => {
+    const resp: OpenAIChatResponse = {
+      id: "chatcmpl-1",
+      object: "chat.completion",
+      created: 1234567890,
+      model: "glm-4.6",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: "Hi" },
+        finish_reason: "stop",
+      }],
+      usage: { prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 },
+    };
+    const result = translateResponseOpenAIToAnthropic(resp);
+    expect(result.usage.input_tokens).toBe(100);
+    expect(result.usage.output_tokens).toBe(50);
+  });
+
+  it("subtracts cached tokens from input_tokens and reports cache buckets (prompt_tokens_details)", () => {
+    const resp: OpenAIChatResponse = {
+      id: "chatcmpl-1",
+      object: "chat.completion",
+      created: 1234567890,
+      model: "glm-4.6",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: "Hi" },
+        finish_reason: "stop",
+      }],
+      usage: {
+        prompt_tokens: 1000,
+        completion_tokens: 10,
+        total_tokens: 1010,
+        prompt_tokens_details: { cached_tokens: 700 },
+      },
+    };
+    const result = translateResponseOpenAIToAnthropic(resp);
+    expect(result.usage.input_tokens).toBe(300); // 1000 - 700
+    expect(result.usage.output_tokens).toBe(10);
+    expect(result.usage.cache_read_input_tokens).toBe(700);
+  });
+
+  it("subtracts both cache_read and cache_creation from input_tokens", () => {
+    const resp: OpenAIChatResponse = {
+      id: "chatcmpl-1",
+      object: "chat.completion",
+      created: 1234567890,
+      model: "glm-4.6",
+      choices: [{
+        index: 0,
+        message: { role: "assistant", content: "Hi" },
+        finish_reason: "stop",
+      }],
+      usage: {
+        prompt_tokens: 500,
+        completion_tokens: 5,
+        total_tokens: 505,
+        cache_read_input_tokens: 200,
+        cache_creation_input_tokens: 100,
+      },
+    };
+    const result = translateResponseOpenAIToAnthropic(resp);
+    expect(result.usage.input_tokens).toBe(200); // 500 - 200 - 100
+    expect(result.usage.cache_read_input_tokens).toBe(200);
+    expect(result.usage.cache_creation_input_tokens).toBe(100);
   });
 });

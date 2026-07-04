@@ -154,6 +154,8 @@ beforeAll(() => {
             '',
             'data: {"id":"chatcmpl-int-stream","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
             '',
+            'data: {"id":"chatcmpl-int-stream","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[],"usage":{"prompt_tokens":33,"completion_tokens":4,"total_tokens":37}}',
+            '',
             'data: [DONE]',
             '',
           ].join("\n");
@@ -258,6 +260,33 @@ describe("integration: OpenAI streaming passthrough", () => {
   });
 });
 
+describe("integration: Anthropic streaming usage", () => {
+  it("delivers real input_tokens via message_delta (not stuck at 0)", async () => {
+    const resp = await fetch(proxyUrl("/v1/messages"), {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        model: "glm-4.6",
+        max_tokens: 100,
+        stream: true,
+        messages: [{ role: "user", content: "Stream test" }],
+      }),
+    });
+    expect(resp.status).toBe(200);
+    const text = await resp.text();
+
+    // Parse the message_delta event and assert usage carries the upstream's
+    // prompt_tokens (33) as input_tokens — the regression was that this was 0
+    // because message_start fired before the usage chunk arrived.
+    const deltaLine = text.split("\n").find((l) => l.startsWith("data: ") && l.includes('"message_delta"'));
+    expect(deltaLine).toBeDefined();
+    const delta = JSON.parse(deltaLine!.slice(6));
+    expect(delta.usage.input_tokens).toBe(33);
+    expect(delta.usage.output_tokens).toBe(4);
+    expect(text).toContain("event: message_stop");
+  });
+});
+
 describe("integration: OpenAI tool-call roundtrip (HTTP layer)", () => {
   it("returns OpenAI tool_calls on turn 1, accepts tool_result on turn 2, upstream receives OpenAI shape", async () => {
     const tools = [{ type: "function", function: { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }];
@@ -329,6 +358,60 @@ describe("integration: Anthropic compatibility", () => {
     const body = await resp.json();
     expect(body.content[0].text).toBe("OpenAI integration response");
     expect(body.stop_reason).toBe("end_turn");
+  });
+
+  it("round-trips Anthropic tool_use → tool_result through the OpenAI upstream", async () => {
+    const tools = [{ name: "get_weather", description: "Get weather", input_schema: { type: "object", properties: { city: { type: "string" } } } }];
+
+    // Turn 1: Anthropic client asks for a tool call.
+    const resp1 = await fetch(proxyUrl("/v1/messages"), {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        model: "glm-4.6",
+        max_tokens: 100,
+        messages: [{ role: "user", content: "weather in SF?" }],
+        tools,
+        tool_choice: { type: "auto" },
+      }),
+    });
+    expect(resp1.status).toBe(200);
+    const body1 = await resp1.json();
+    expect(body1.stop_reason).toBe("tool_use");
+    const toolUse = body1.content.find((b: any) => b.type === "tool_use");
+    expect(toolUse).toBeDefined();
+    expect(toolUse.name).toBe("get_weather");
+    expect(toolUse.input).toEqual({ city: "SF" });
+
+    // Turn 2: Anthropic client replays tool_result history; upstream must see
+    // the OpenAI shape (assistant tool_calls + role:"tool" messages).
+    const resp2 = await fetch(proxyUrl("/v1/messages"), {
+      method: "POST",
+      headers: authHeader(),
+      body: JSON.stringify({
+        model: "glm-4.6",
+        max_tokens: 100,
+        messages: [
+          { role: "user", content: "weather in SF?" },
+          { role: "assistant", content: [toolUse] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: toolUse.id, content: "62°F" }] },
+        ],
+        tools,
+      }),
+    });
+    expect(resp2.status).toBe(200);
+    const body2 = await resp2.json();
+    expect(body2.stop_reason).toBe("end_turn");
+    expect(body2.content[0].text).toBe("Tool result acknowledged");
+
+    const upstreamReq = capturedUpstreamBodies
+      .map((b) => JSON.parse(b))
+      .filter((b) => (b.messages ?? []).some((m: any) => m.role === "tool" && m.tool_call_id === toolUse.id))
+      .at(-1);
+    expect(upstreamReq).toBeDefined();
+    expect(upstreamReq.messages.map((m: any) => m.role)).toEqual(["user", "assistant", "tool"]);
+    expect(upstreamReq.messages[1].tool_calls[0].function.name).toBe("get_weather");
+    expect(upstreamReq.messages[2]).toMatchObject({ role: "tool", tool_call_id: toolUse.id, content: "62°F" });
   });
 });
 

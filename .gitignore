@@ -10,3 +10,4 @@ dist/
 /zcode-proxy.exe
 /zcode-proxy-linux-*
 /zcode-proxy-darwin-*
+.idea/

@@ -482,4 +482,210 @@ describe("openaiSseToAnthropicSse", () => {
     const output = await collectStream(openaiSseToAnthropicSse(input, "glm-4.6"));
     expect(output).toContain("message_stop");
   });
+
+  it("translates OpenAI tool_calls delta into Anthropic tool_use content_block_start + input_json_delta", async () => {
+    const sse = [
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"get_weather","arguments":""}}]},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"city\\":"}}]},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"SF\\"}"}}]},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
+    const events = parseAnthropicEvents(output);
+
+    const blockStarts = events.filter((e) => e.event === "content_block_start");
+    const toolStart = blockStarts.find((e) => e.data.content_block?.type === "tool_use");
+    expect(toolStart).toBeDefined();
+    expect(toolStart!.data.content_block).toEqual({
+      type: "tool_use",
+      id: "call_1",
+      name: "get_weather",
+      input: {},
+    });
+
+    const jsonDeltas = events.filter((e) => e.data.delta?.type === "input_json_delta");
+    expect(jsonDeltas.map((e) => e.data.delta.partial_json).join("")).toBe('{"city":"SF"}');
+
+    const blockStops = events.filter((e) => e.event === "content_block_stop" && e.data.index === toolStart!.data.index);
+    expect(blockStops).toHaveLength(1);
+
+    const messageDelta = events.find((e) => e.event === "message_delta");
+    expect(messageDelta!.data.delta.stop_reason).toBe("tool_use");
+  });
+
+  it("routes parallel OpenAI tool_calls by index into separate Anthropic tool_use blocks", async () => {
+    const sse = [
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"w","arguments":"{}"}}]},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"id":"call_b","type":"function","function":{"name":"w","arguments":"{}"}}]},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
+    const events = parseAnthropicEvents(output);
+    const toolStarts = events.filter((e) => e.event === "content_block_start" && e.data.content_block?.type === "tool_use");
+
+    expect(toolStarts).toHaveLength(2);
+    expect(toolStarts[0].data.content_block.id).toBe("call_a");
+    expect(toolStarts[1].data.content_block.id).toBe("call_b");
+    expect(toolStarts[0].data.index).not.toBe(toolStarts[1].data.index);
+  });
+
+  it("buffers tool_call arguments that arrive before id/name and flushes them on block start", async () => {
+    // Non-standard ordering: arguments delta first, id+name later.
+    const sse = [
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\\"city\\":"}}]},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_late","type":"function","function":{"name":"get_weather","arguments":"\\"SF\\"}"}}]},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
+    const events = parseAnthropicEvents(output);
+    const toolStart = events.find((e) => e.event === "content_block_start" && e.data.content_block?.type === "tool_use");
+    expect(toolStart).toBeDefined();
+    expect(toolStart!.data.content_block.id).toBe("call_late");
+    expect(toolStart!.data.content_block.name).toBe("get_weather");
+
+    const jsonDeltas = events.filter((e) => e.data.delta?.type === "input_json_delta");
+    expect(jsonDeltas.map((e) => e.data.delta.partial_json).join("")).toBe('{"city":"SF"}');
+  });
+
+  it("force-opens a tool block with fallback id/name when arguments arrive but id/name never do", async () => {
+    const sse = [
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{}"}}]},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
+    const events = parseAnthropicEvents(output);
+    const toolStart = events.find((e) => e.event === "content_block_start" && e.data.content_block?.type === "tool_use");
+    expect(toolStart).toBeDefined();
+    expect(toolStart!.data.content_block.id).toBe("tool_call_0");
+    expect(toolStart!.data.content_block.name).toBe("unknown_tool");
+    const jsonDeltas = events.filter((e) => e.data.delta?.type === "input_json_delta");
+    expect(jsonDeltas.map((e) => e.data.delta.partial_json).join("")).toBe("{}");
+  });
+
+  it("closes the text block before opening a tool_use block (no interleaved blocks)", async () => {
+    const sse = [
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Thinking about it"},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"fn","arguments":"{}"}}]},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
+    const events = parseAnthropicEvents(output);
+    const textStart = events.find((e) => e.event === "content_block_start" && e.data.content_block?.type === "text");
+    const toolStart = events.find((e) => e.event === "content_block_start" && e.data.content_block?.type === "tool_use");
+    const textStop = events.find((e) => e.event === "content_block_stop" && e.data.index === textStart!.data.index);
+
+    expect(textStart).toBeDefined();
+    expect(toolStart).toBeDefined();
+    // text block must stop before tool block starts
+    const textStopOrder = events.indexOf(textStop!);
+    const toolStartOrder = events.indexOf(toolStart!);
+    expect(textStopOrder).toBeLessThan(toolStartOrder);
+  });
+
+  it("emits a well-formed message_stop when stream ends without [DONE]", async () => {
+    const sse = [
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
+    const events = parseAnthropicEvents(output);
+    expect(events.some((e) => e.event === "message_delta")).toBe(true);
+    expect(events.some((e) => e.event === "message_stop")).toBe(true);
+  });
+
+  it("reports real input_tokens via message_delta when usage only arrives in the final chunk", async () => {
+    // OpenAI include_usage stream: usage lands on a trailing choices-less chunk
+    // AFTER the finish_reason chunk. The deferred message_delta must carry it.
+    const sse = [
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7,"total_tokens":49}}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
+    const events = parseAnthropicEvents(output);
+    const messageDelta = events.find((e) => e.event === "message_delta");
+    expect(messageDelta).toBeDefined();
+    expect(messageDelta!.data.usage.input_tokens).toBe(42);
+    expect(messageDelta!.data.usage.output_tokens).toBe(7);
+  });
+
+  it("subtracts cached tokens from input_tokens in the deferred message_delta", async () => {
+    const sse = [
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":80}}}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
+    const events = parseAnthropicEvents(output);
+    const messageDelta = events.find((e) => e.event === "message_delta");
+    expect(messageDelta!.data.usage.input_tokens).toBe(20); // 100 - 80
+    expect(messageDelta!.data.usage.cache_read_input_tokens).toBe(80);
+    expect(messageDelta!.data.usage.output_tokens).toBe(5);
+  });
+
+  it("emits exactly one message_delta even when both finish_reason and [DONE] are present", async () => {
+    const sse = [
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      '',
+      'data: {"id":"c1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12}}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n');
+
+    const output = await collectStream(openaiSseToAnthropicSse(makeStream(sse), "glm-4.6"));
+    const events = parseAnthropicEvents(output);
+    const deltas = events.filter((e) => e.event === "message_delta");
+    const stops = events.filter((e) => e.event === "message_stop");
+    expect(deltas).toHaveLength(1);
+    expect(stops).toHaveLength(1);
+    expect(deltas[0].data.delta.stop_reason).toBe("end_turn");
+  });
 });
