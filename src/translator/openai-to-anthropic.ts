@@ -81,7 +81,7 @@ function isReasoningModel(model: string): boolean {
 }
 
 function translateToolChoice(
-  choice: "none" | "auto" | "required" | { type: "function"; function: { name: string } },
+  choice: "none" | "auto" | "required" | { type: "function"; function: { name: string | undefined } },
 ): { type: "auto" | "any" | "tool"; name?: string } | undefined {
   if (choice === "auto") return { type: "auto" };
   if (choice === "required") return { type: "any" };

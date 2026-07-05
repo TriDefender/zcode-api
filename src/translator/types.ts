@@ -31,17 +31,41 @@ export interface OpenAIMessage {
 }
 
 /** Multi-modal content part (OpenAI format). */
-interface OpenAIContentPart {
+export interface OpenAIContentPart {
   type: "text" | "image_url";
   text?: string;
   image_url?: { url: string; detail?: string };
 }
 
 /** Tool call in an assistant message. */
-interface OpenAIToolCall {
+export interface OpenAIToolCall {
   id: string;
   type: "function";
   function: { name: string; arguments: string };
+}
+
+/** Tool call delta in a streaming chunk (carries `index` to align parallel calls). */
+export interface OpenAIStreamToolCall {
+  index: number;
+  id?: string;
+  type?: "function";
+  function?: { name?: string; arguments?: string };
+}
+
+/**
+ * OpenAI usage block. `prompt_tokens` is *inclusive* of cache hits on most
+ * compatible upstreams, so the Anthropic `input_tokens` (exclusive of cache)
+ * is derived by subtracting the cache buckets — see `openaiUsageToAnthropic`.
+ */
+export interface OpenAIUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  /** Standard OpenAI cache breakdown. */
+  prompt_tokens_details?: { cached_tokens?: number };
+  /** Anthropic-style direct cache fields (some compatible upstreams emit these). */
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
 }
 
 /** Tool definition in OpenAI format. */
@@ -69,7 +93,7 @@ export interface OpenAIChatRequest {
   logit_bias?: Record<string, number>;
   user?: string;
   tools?: OpenAIToolDefinition[];
-  tool_choice?: "none" | "auto" | "required" | { type: "function"; function: { name: string } };
+  tool_choice?: "none" | "auto" | "required" | { type: "function"; function: { name: string | undefined } };
   response_format?: { type: "text" | "json_object" };
   seed?: number;
   reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -83,11 +107,7 @@ export interface OpenAIChatResponse {
   created: number;
   model: string;
   choices: OpenAIChoice[];
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
+  usage?: OpenAIUsage;
 }
 
 /** Choice in a non-streaming response. */
@@ -110,6 +130,8 @@ export interface OpenAIStreamChunk {
   created: number;
   model: string;
   choices: OpenAIStreamChoice[];
+  /** Present on the final chunk when `stream_options.include_usage` is set. */
+  usage?: OpenAIUsage;
 }
 
 /** Choice in a streaming chunk. */
@@ -119,7 +141,7 @@ interface OpenAIStreamChoice {
     role?: "assistant";
     content?: string;
     reasoning_content?: string;
-    tool_calls?: Partial<OpenAIToolCall>[];
+    tool_calls?: OpenAIStreamToolCall[];
   };
   finish_reason: "stop" | "length" | "tool_calls" | "content_filter" | null;
 }
@@ -147,7 +169,7 @@ export type AnthropicContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
-  | { type: "tool_result"; tool_use_id: string; content: string | AnthropicContentBlock[] }
+  | { type: "tool_result"; tool_use_id: string; content: string | AnthropicContentBlock[]; is_error?: boolean }
   | { type: "thinking"; thinking: string; signature?: string };
 
 /** Anthropic message in a request. */
@@ -196,10 +218,15 @@ export interface AnthropicMessagesResponse {
   model: string;
   stop_reason: "end_turn" | "max_tokens" | "stop_sequence" | "tool_use" | null;
   stop_sequence: string | null;
-  usage: {
-    input_tokens: number;
-    output_tokens: number;
-  };
+  usage: AnthropicUsage;
+}
+
+/** Anthropic usage block (cache buckets are optional — only present when non-zero). */
+export interface AnthropicUsage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
 }
 
 // ─────────────────────────────────────────────

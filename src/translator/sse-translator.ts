@@ -3,7 +3,8 @@
  * @see .omo/plans/zcode-proxy.md Task 12
  * @see https://docs.anthropic.com/en/api/messages-streaming
  */
-import type { AnthropicStreamEvent, OpenAIStreamChunk } from "./types.js";
+import type { AnthropicStreamEvent, OpenAIStreamChunk, OpenAIStreamToolCall, OpenAIUsage } from "./types.js";
+import { openaiUsageToAnthropic } from "./anthropic-to-openai.js";
 
 /** Parse a raw SSE chunk string into event type + JSON data. */
 interface ParsedSSE {
@@ -277,6 +278,20 @@ export function openaiSseToAnthropicSse(
   let messageStarted = false;
   let blockIndex = 0;
   let activeBlock: { type: "text" | "thinking"; index: number } | null = null;
+  /** OpenAI tool_call index → Anthropic block state. */
+  const toolBlocks = new Map<number, { index: number; id: string; name: string; started: boolean; pendingArgs: string }>();
+  /** Anthropic block indices of started tool_use blocks, in open order. */
+  const openToolBlockIndices: number[] = [];
+  let outputTokens = 0;
+  /** Latest upstream usage — OpenAI only emits it in the final chunk, so we
+   *  accumulate and emit it once, deferred to end-of-stream. */
+  let latestUsage: OpenAIUsage | undefined;
+  /** Stop reason captured from the finish_reason chunk; held until we can pair
+   *  it with the complete usage before emitting message_delta. */
+  let pendingStopReason: string | null = null;
+  let contentClosed = false;
+  let messageDeltaSent = false;
+  let messageStopped = false;
   const messageId = `msg_${Date.now()}`;
 
   return new ReadableStream({
@@ -297,6 +312,16 @@ export function openaiSseToAnthropicSse(
         activeBlock = null;
       };
 
+      const closeToolBlocks = () => {
+        for (const idx of openToolBlockIndices) {
+          enqueueAnthropicEvent("content_block_stop", {
+            type: "content_block_stop",
+            index: idx,
+          });
+        }
+        openToolBlockIndices.length = 0;
+      };
+
       const ensureActiveBlock = (type: "text" | "thinking"): number => {
         if (activeBlock?.type === type) return activeBlock.index;
         closeActiveBlock();
@@ -310,6 +335,143 @@ export function openaiSseToAnthropicSse(
             : { type: "thinking", thinking: "", signature: "" },
         });
         return index;
+      };
+
+      /**
+       * Route OpenAI streaming tool_call deltas into Anthropic tool_use blocks.
+       * OpenAI identifies each parallel call by `index`; we lazily allocate an
+       * Anthropic block per index, emit `content_block_start` once id+name
+       * arrive, then stream `input_json_delta` for each arguments fragment.
+       * Arguments that arrive before id/name (non-standard ordering from some
+       * compatible upstreams) are buffered into `pendingArgs` and flushed on
+       * start, so the tool input is never silently truncated.
+       */
+      const handleToolCalls = (toolCalls: OpenAIStreamToolCall[]) => {
+        // Tool calls never share a block with text/thinking — close any open prose block first.
+        closeActiveBlock();
+        for (const tc of toolCalls) {
+          const idx = tc.index ?? 0;
+          let state = toolBlocks.get(idx);
+          if (!state) {
+            state = { index: blockIndex++, id: "", name: "", started: false, pendingArgs: "" };
+            toolBlocks.set(idx, state);
+          }
+          if (tc.id) state.id = tc.id;
+          if (tc.function?.name) state.name = tc.function.name;
+
+          if (!state.started && state.id && state.name) {
+            state.started = true;
+            enqueueAnthropicEvent("content_block_start", {
+              type: "content_block_start",
+              index: state.index,
+              content_block: { type: "tool_use", id: state.id, name: state.name, input: {} },
+            });
+            openToolBlockIndices.push(state.index);
+            if (state.pendingArgs.length > 0) {
+              enqueueAnthropicEvent("content_block_delta", {
+                type: "content_block_delta",
+                index: state.index,
+                delta: { type: "input_json_delta", partial_json: state.pendingArgs },
+              });
+              state.pendingArgs = "";
+            }
+          }
+
+          const argsDelta = tc.function?.arguments;
+          if (argsDelta) {
+            if (state.started) {
+              enqueueAnthropicEvent("content_block_delta", {
+                type: "content_block_delta",
+                index: state.index,
+                delta: { type: "input_json_delta", partial_json: argsDelta },
+              });
+            } else {
+              // id/name not yet seen — buffer until the block can open.
+              state.pendingArgs += argsDelta;
+            }
+          }
+        }
+      };
+
+      /**
+       * Force-open any tool blocks that accumulated arguments (or a partial
+       * id/name) but never crossed the id+name threshold before the stream
+       * ended. Uses fallback id/name so the data is surfaced rather than
+       * silently dropped. Mirrors cc-switch's "late tool starts" flush.
+       */
+      const startPendingToolBlocks = () => {
+        const lateStarts: Array<{ index: number; id: string; name: string; args: string }> = [];
+        for (const [openaiIdx, state] of toolBlocks) {
+          if (state.started) continue;
+          if (!state.pendingArgs && !state.id && !state.name) continue;
+          state.started = true;
+          lateStarts.push({
+            index: state.index,
+            id: state.id || `tool_call_${openaiIdx}`,
+            name: state.name || "unknown_tool",
+            args: state.pendingArgs,
+          });
+          state.pendingArgs = "";
+          openToolBlockIndices.push(state.index);
+        }
+        lateStarts.sort((a, b) => a.index - b.index);
+        for (const ls of lateStarts) {
+          enqueueAnthropicEvent("content_block_start", {
+            type: "content_block_start",
+            index: ls.index,
+            content_block: { type: "tool_use", id: ls.id, name: ls.name, input: {} },
+          });
+          if (ls.args.length > 0) {
+            enqueueAnthropicEvent("content_block_delta", {
+              type: "content_block_delta",
+              index: ls.index,
+              delta: { type: "input_json_delta", partial_json: ls.args },
+            });
+          }
+        }
+      };
+
+      /**
+       * Close every open content block (text/thinking/tool_use). Idempotent via
+       * the `contentClosed` flag so it is safe to call at both finish_reason
+       * and end-of-stream. Split from `finalizeStream` so the finish_reason
+       * chunk can close blocks *without* emitting message_delta — the usage
+       * chunk arrives afterwards and must be folded in first.
+       */
+      const closeContent = () => {
+        if (contentClosed) return;
+        contentClosed = true;
+        closeActiveBlock();
+        startPendingToolBlocks();
+        closeToolBlocks();
+      };
+
+      /**
+       * Emit the terminal message_delta + message_stop. The message_delta
+       * carries the full Anthropic usage (input + output + cache) derived from
+       * the latest upstream usage snapshot. This is what lets Anthropic clients
+       * see a non-zero input_tokens despite OpenAI only reporting usage in the
+       * stream's final chunk — the delta is deferred until that chunk lands.
+       */
+      const finalizeStream = () => {
+        closeContent();
+        if (!messageDeltaSent) {
+          messageDeltaSent = true;
+          const usage = openaiUsageToAnthropic(latestUsage);
+          if (!latestUsage) usage.output_tokens = outputTokens;
+          enqueueAnthropicEvent("message_delta", {
+            type: "message_delta",
+            delta: {
+              stop_reason: pendingStopReason ?? "end_turn",
+              stop_sequence: null,
+            },
+            usage,
+          });
+        }
+        if (!messageStopped) {
+          messageStopped = true;
+          enqueueAnthropicEvent("message_stop", { type: "message_stop" });
+        }
       };
 
       try {
@@ -326,8 +488,7 @@ export function openaiSseToAnthropicSse(
             const dataStr = line.slice(6).trim();
 
             if (dataStr === "[DONE]") {
-              closeActiveBlock();
-              enqueueAnthropicEvent("message_stop", { type: "message_stop" });
+              finalizeStream();
               continue;
             }
 
@@ -335,19 +496,35 @@ export function openaiSseToAnthropicSse(
               const chunk = JSON.parse(dataStr) as OpenAIStreamChunk;
               const choice = chunk.choices?.[0];
 
+              // Accumulate usage from every chunk that carries one. OpenAI's
+              // include_usage stream emits it only on the final (often
+              // choices-less) chunk, but compatible upstreams may spread it
+              // across chunks — keep the freshest snapshot.
+              if (chunk.usage) {
+                latestUsage = chunk.usage;
+                outputTokens = chunk.usage.completion_tokens ?? outputTokens;
+              }
+
               if (!messageStarted) {
                 messageStarted = true;
+                // message_start must lead the stream, but the upstream usage
+                // has not arrived yet at this point, so input_tokens starts at
+                // 0 here and is delivered for real via the deferred
+                // message_delta once usage lands. (Anthropic's own streaming
+                // also reports input_tokens up-front; we cannot, given the
+                // upstream timing.)
+                const startUsage = openaiUsageToAnthropic(chunk.usage);
                 enqueueAnthropicEvent("message_start", {
                   type: "message_start",
                   message: {
-                    id: messageId,
+                    id: chunk.id ?? messageId,
                     type: "message",
                     role: "assistant",
                     content: [],
-                    model,
+                    model: chunk.model || model,
                     stop_reason: null,
                     stop_sequence: null,
-                    usage: { input_tokens: 0, output_tokens: 0 },
+                    usage: startUsage,
                   },
                 });
               }
@@ -370,14 +547,16 @@ export function openaiSseToAnthropicSse(
                 });
               }
 
+              if (choice?.delta?.tool_calls?.length) {
+                handleToolCalls(choice.delta.tool_calls);
+              }
+
               if (choice?.finish_reason) {
-                const stopReason = mapFinishReason(choice.finish_reason);
-                closeActiveBlock();
-                enqueueAnthropicEvent("message_delta", {
-                  type: "message_delta",
-                  delta: { stop_reason: stopReason },
-                  usage: { output_tokens: 0 },
-                });
+                // Close blocks now, but hold message_delta until the stream
+                // actually ends so the usage chunk (which follows finish_reason
+                // in include_usage streams) is folded into the final usage.
+                pendingStopReason = mapFinishReason(choice.finish_reason);
+                closeContent();
               }
             } catch {
               // Skip malformed
@@ -385,7 +564,10 @@ export function openaiSseToAnthropicSse(
           }
         }
 
-        closeActiveBlock();
+        // Stream ended — emit the deferred message_delta (with full usage) and
+        // message_stop. Covers both explicit [DONE] already handled above and
+        // streams that terminate without one.
+        finalizeStream();
       } catch (err) {
         errored = true;
         // error()/close() 互斥:errored 流上再 close() 会抛 TypeError,进而触发 Bun 引擎空指针崩溃。
