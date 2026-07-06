@@ -203,6 +203,32 @@ describe("CORS", () => {
   });
 });
 
+describe("web UI", () => {
+  it("GET /webui serves HTML without the proxy API key", async () => {
+    // proxyApiKey is configured, yet /webui must load freely — it sits before
+    // the auth gate by design so the page can present the key input.
+    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test", proxyApiKey: "proxy-secret" } });
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
+
+    const resp = await handler(new Request("http://localhost/webui", { method: "GET" }));
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get("content-type")).toContain("text/html");
+    const body = await resp.text();
+    expect(body).toContain("<!doctype html>");
+  });
+
+  it("non-GET /webui is not served as the SPA", async () => {
+    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test", proxyApiKey: "proxy-secret" } });
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
+
+    const resp = await handler(new Request("http://localhost/webui", { method: "POST" }));
+    // POST falls through to the auth gate (proxyApiKey set, no creds) -> 401.
+    expect(resp.status).toBe(401);
+  });
+});
+
 describe("route handler exports", () => {
   it("handleListModels returns model list", () => {
     const resp = handleListModels();

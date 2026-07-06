@@ -1,0 +1,1099 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>zcode-proxy</title>
+    <!-- Markdown + sanitize + code highlight. All optional: the UI degrades to
+         escaped plaintext if the CDN is unreachable. -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />
+    <style>
+      :root {
+        --accent: #6366f1;
+        --accent-strong: #4f46e5;
+        --radius: 12px;
+        --sidebar-w: 264px;
+      }
+      :root[data-theme="dark"] {
+        --bg: #212121;
+        --sidebar: #171717;
+        --elevated: #2f2f2f;
+        --elevated-hover: #383838;
+        --text: #ececec;
+        --muted: #9a9a9a;
+        --border: #3a3a3a;
+        --user-bubble: #2f2f2f;
+        --danger: #ef4444;
+      }
+      :root[data-theme="light"] {
+        --bg: #ffffff;
+        --sidebar: #f7f7f8;
+        --elevated: #f0f0f0;
+        --elevated-hover: #e6e6e6;
+        --text: #1a1a1a;
+        --muted: #6e6e6e;
+        --border: #e5e5e5;
+        --user-bubble: #f0f0f0;
+        --danger: #dc2626;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        font-size: 15px;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+        overflow: hidden;
+      }
+      button { font-family: inherit; cursor: pointer; }
+      input, textarea, select { font-family: inherit; font-size: inherit; color: inherit; }
+      ::-webkit-scrollbar { width: 10px; height: 10px; }
+      ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }
+      ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+      .app { display: flex; height: 100vh; width: 100vw; }
+
+      /* ---------- Sidebar ---------- */
+      .sidebar {
+        width: var(--sidebar-w);
+        flex: 0 0 var(--sidebar-w);
+        background: var(--sidebar);
+        border-right: 1px solid var(--border);
+        display: flex;
+        flex-direction: column;
+        transition: margin-left .2s ease;
+      }
+      .sidebar.collapsed { margin-left: calc(-1 * var(--sidebar-w)); }
+      .sidebar-head { padding: 12px; display: flex; gap: 8px; }
+      .btn-new {
+        flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;
+        padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+        background: transparent; color: var(--text); font-weight: 500;
+      }
+      .btn-new:hover { background: var(--elevated); }
+      .conv-list { flex: 1; overflow-y: auto; padding: 4px 8px; }
+      .conv {
+        display: flex; align-items: center; gap: 8px; padding: 9px 10px; margin: 2px 0;
+        border-radius: 8px; cursor: pointer; color: var(--text); position: relative;
+        white-space: nowrap; overflow: hidden;
+      }
+      .conv .conv-title { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+      .conv:hover { background: var(--elevated); }
+      .conv.active { background: var(--elevated); }
+      .conv .conv-del {
+        opacity: 0; border: none; background: transparent; color: var(--muted);
+        padding: 2px 6px; border-radius: 6px; flex: 0 0 auto;
+      }
+      .conv:hover .conv-del, .conv.active .conv-del { opacity: 1; }
+      .conv .conv-del:hover { color: var(--danger); background: var(--elevated-hover); }
+      .sidebar-foot { padding: 10px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
+      .icon-btn {
+        border: 1px solid var(--border); background: transparent; color: var(--text);
+        border-radius: var(--radius); padding: 8px 10px; display: inline-flex; align-items: center; gap: 6px;
+      }
+      .icon-btn:hover { background: var(--elevated); }
+      .sidebar-foot .icon-btn { flex: 1; justify-content: center; }
+
+      /* ---------- Main ---------- */
+      .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+      .topbar {
+        height: 52px; flex: 0 0 52px; display: flex; align-items: center; gap: 10px;
+        padding: 0 14px; border-bottom: 1px solid var(--border);
+      }
+      .topbar .model-wrap { display: flex; align-items: center; gap: 6px; }
+      .topbar select#model {
+        background: var(--elevated); border: 1px solid var(--border); border-radius: 8px;
+        padding: 7px 10px; color: var(--text); max-width: 220px;
+      }
+      .think-wrap { display: flex; align-items: center; gap: 6px; }
+      .think-wrap select#reasoning-effort {
+        background: var(--elevated); border: 1px solid var(--border); border-radius: 8px;
+        padding: 7px 8px; color: var(--text); font-size: 13px;
+      }
+      .think-wrap select#reasoning-effort:disabled { opacity: .5; }
+      .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: 0 0 9px; }
+      .status-dot.ok { background: #22c55e; }
+      .status-dot.err { background: var(--danger); }
+      .topbar .spacer { flex: 1; }
+      .messages { flex: 1; overflow-y: auto; padding: 20px 0 12px; scroll-behavior: smooth; }
+      .msg-list { max-width: 768px; margin: 0 auto; padding: 0 18px; display: flex; flex-direction: column; gap: 22px; }
+      .msg { display: flex; flex-direction: column; gap: 8px; }
+      .msg .role { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+      .msg.user .bubble {
+        background: var(--user-bubble); align-self: flex-end; max-width: 85%;
+        padding: 10px 14px; border-radius: var(--radius); border-top-right-radius: 4px;
+        white-space: pre-wrap; word-break: break-word;
+      }
+      .msg.assistant .content { color: var(--text); }
+      .msg-images { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+      .msg-images img { max-width: 200px; max-height: 200px; border-radius: 8px; border: 1px solid var(--border); }
+      .think {
+        border: 1px solid var(--border); border-radius: 10px; background: var(--elevated);
+        margin-bottom: 8px; overflow: hidden;
+      }
+      .think summary {
+        cursor: pointer; padding: 8px 12px; font-size: 13px; color: var(--muted);
+        list-style: none; display: flex; align-items: center; gap: 6px; user-select: none;
+      }
+      .think summary::-webkit-details-marker { display: none; }
+      .think summary::before { content: "\25B6"; font-size: 9px; transition: transform .15s; }
+      .think[open] summary::before { transform: rotate(90deg); }
+      .think .think-body { padding: 0 12px 10px; font-size: 13px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }
+      .msg-meta { font-size: 12px; color: var(--muted); display: flex; gap: 10px; align-items: center; }
+      .msg-meta .regen { border: none; background: transparent; color: var(--muted); padding: 2px 6px; border-radius: 6px; }
+      .msg-meta .regen:hover { color: var(--text); background: var(--elevated); }
+
+      .empty { text-align: center; color: var(--muted); padding: 60px 20px; }
+      .empty h1 { font-size: 22px; margin: 0 0 6px; color: var(--text); font-weight: 600; }
+
+      /* markdown rendering */
+      .md p { margin: 0 0 12px; }
+      .md p:last-child { margin-bottom: 0; }
+      .md h1,.md h2,.md h3,.md h4 { margin: 18px 0 8px; line-height: 1.3; font-weight: 600; }
+      .md h1 { font-size: 1.5em; } .md h2 { font-size: 1.3em; } .md h3 { font-size: 1.15em; }
+      .md ul,.md ol { margin: 0 0 12px; padding-left: 24px; }
+      .md li { margin: 3px 0; }
+      .md a { color: var(--accent); }
+      .md blockquote { border-left: 3px solid var(--border); margin: 0 0 12px; padding: 2px 14px; color: var(--muted); }
+      .md code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: .9em; }
+      .md :not(pre) > code { background: var(--elevated); padding: 1px 5px; border-radius: 5px; }
+      .md pre { position: relative; margin: 0 0 12px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }
+      .md pre .code-head {
+        display: flex; justify-content: space-between; align-items: center;
+        padding: 6px 12px; font-size: 12px; color: #adbac7;
+        background: #2d333b; border-bottom: 1px solid var(--border);
+      }
+      .md pre code { display: block; padding: 12px 14px; overflow-x: auto; background: #0d1117; }
+      .md pre .copy-btn {
+        border: none; background: transparent; color: #adbac7; font-size: 12px; padding: 2px 6px; border-radius: 5px;
+      }
+      .md pre .copy-btn:hover { background: rgba(255,255,255,.1); color: #fff; }
+      .md pre .code-actions { display: flex; align-items: center; gap: 6px; }
+      .md pre .html-preview {
+        display: block; width: 100%; min-height: 200px; max-height: 80vh;
+        border: 0; background: #fff; resize: vertical;
+      }
+      .md table { border-collapse: collapse; margin: 0 0 12px; display: block; overflow-x: auto; }
+      .md th,.md td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; }
+      .md hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+      .md img { max-width: 100%; border-radius: 8px; }
+
+      /* ---------- Composer ---------- */
+      .composer-wrap { flex: 0 0 auto; padding: 10px 18px 18px; }
+      .composer {
+        max-width: 768px; margin: 0 auto; background: var(--elevated);
+        border: 1px solid var(--border); border-radius: 22px; padding: 8px 8px 8px 14px;
+        display: flex; align-items: flex-end; gap: 6px;
+      }
+      .composer textarea {
+        flex: 1; background: transparent; border: none; outline: none; resize: none;
+        max-height: 200px; padding: 8px 2px; line-height: 1.5; color: var(--text);
+      }
+      .composer .c-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+      .composer .think-bar { display: flex; align-items: center; gap: 4px; padding-right: 2px; }
+      .composer .pill {
+        border: 1px solid var(--border); background: var(--elevated-hover); color: var(--text);
+        border-radius: 14px; padding: 0 10px; font-size: 12px; height: 32px; white-space: nowrap;
+      }
+      .composer .pill.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+      .composer select#reasoning-effort {
+        background: var(--elevated-hover); border: 1px solid var(--border); color: var(--text);
+        border-radius: 14px; padding: 0 6px; font-size: 12px; height: 32px; max-width: 84px;
+      }
+      .composer select#reasoning-effort:disabled { opacity: .45; }
+      .composer .c-btn {
+        width: 36px; height: 36px; border-radius: 50%; border: none;
+        background: var(--accent); color: #fff; display: inline-flex; align-items: center; justify-content: center;
+      }
+      .composer .c-btn:disabled { opacity: .5; }
+      .composer .c-btn.send:hover:not(:disabled) { background: var(--accent-strong); }
+      .composer .c-btn.stop { background: var(--danger); }
+      .composer .c-btn.attach { background: var(--elevated-hover); color: var(--text); }
+      .composer .c-btn.attach[hidden] { display: none; }
+      .composer .c-btn.attach.active { background: var(--accent); color: #fff; }
+      .attach-input { display: none; }
+      .attach-preview { max-width: 768px; margin: 0 auto 8px; display: flex; flex-wrap: wrap; gap: 8px; }
+      .attach-preview:empty { display: none; }
+      .attach-preview .ap { position: relative; }
+      .attach-preview img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }
+      .attach-preview .ap-rm {
+        position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border-radius: 50%;
+        background: var(--danger); color: #fff; border: none; font-size: 11px; line-height: 18px; padding: 0;
+      }
+      .composer-hint { max-width: 768px; margin: 6px auto 0; text-align: center; font-size: 12px; color: var(--muted); }
+
+      /* ---------- Settings modal ---------- */
+      .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; z-index: 50; }
+      .overlay.open { display: flex; align-items: center; justify-content: center; padding: 20px; }
+      .modal {
+        background: var(--bg); border: 1px solid var(--border); border-radius: 16px;
+        width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto; padding: 22px;
+      }
+      .modal h2 { margin: 0 0 4px; font-size: 18px; }
+      .modal .sub { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
+      .field { margin-bottom: 16px; }
+      .field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; }
+      .field .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+      .field input[type=text], .field input[type=password], .field input[type=number],
+      .field textarea, .field select {
+        width: 100%; background: var(--elevated); border: 1px solid var(--border);
+        border-radius: 8px; padding: 9px 11px; color: var(--text); outline: none;
+      }
+      .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--accent); }
+      .field textarea { resize: vertical; min-height: 70px; }
+      .row { display: flex; gap: 12px; } .row .field { flex: 1; }
+      .range-row { display: flex; align-items: center; gap: 12px; }
+      .range-row input[type=range] { flex: 1; accent-color: var(--accent); }
+      .range-row .val { width: 52px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 13px; }
+      .switch { display: inline-flex; align-items: center; gap: 8px; }
+      .switch input { accent-color: var(--accent); width: 16px; height: 16px; }
+      .modal-foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; }
+      .btn { border: 1px solid var(--border); background: var(--elevated); color: var(--text); border-radius: 8px; padding: 9px 16px; }
+      .btn:hover { background: var(--elevated-hover); }
+      .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+      .btn.primary:hover { background: var(--accent-strong); }
+      .banner {
+        background: rgba(239,68,68,.12); border: 1px solid var(--danger); color: var(--text);
+        padding: 8px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; display: none;
+      }
+      .toast {
+        position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+        background: var(--elevated); border: 1px solid var(--border); color: var(--text);
+        padding: 10px 16px; border-radius: 10px; font-size: 13px; opacity: 0;
+        transition: opacity .2s; z-index: 100; pointer-events: none;
+      }
+      .toast.show { opacity: 1; }
+
+      @media (max-width: 720px) {
+        .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 40; box-shadow: 2px 0 12px rgba(0,0,0,.3); }
+        .sidebar.collapsed { margin-left: calc(-1 * var(--sidebar-w)); }
+        .topbar select#model { max-width: 140px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <!-- Sidebar -->
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-head">
+          <button class="btn-new" id="btn-new" title="New chat">+ New chat</button>
+        </div>
+        <div class="conv-list" id="conv-list"></div>
+        <div class="sidebar-foot">
+          <button class="icon-btn" id="btn-settings" title="Settings">Settings</button>
+          <button class="icon-btn" id="btn-theme" title="Switch theme">Dark mode</button>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <main class="main">
+        <div class="topbar">
+          <button class="icon-btn" id="btn-menu" title="Toggle sidebar" style="flex:0 0 auto;width:38px;justify-content:center;">&#9776;</button>
+          <span class="status-dot" id="status-dot" title="Connection status"></span>
+          <div class="model-wrap">
+            <select id="model" title="Model"></select>
+          </div>
+          <div class="spacer"></div>
+        </div>
+
+        <div class="messages" id="messages">
+          <div class="msg-list" id="msg-list"></div>
+        </div>
+
+        <div class="composer-wrap">
+          <div class="attach-preview" id="attach-preview"></div>
+          <div class="composer">
+            <textarea id="input" rows="1" placeholder="Message the model&#8230;  (Enter to send, Shift+Enter for newline)"></textarea>
+            <div class="c-actions">
+              <div class="think-bar">
+                <button class="pill" id="btn-think" type="button" title="Toggle deep thinking">Think: on</button>
+                <select id="reasoning-effort" title="Reasoning effort (GLM-5.2+)"></select>
+              </div>
+              <button class="c-btn attach" id="btn-attach" title="Attach image (vision models)" hidden>&#128206;</button>
+              <button class="c-btn send" id="btn-send" title="Send">&#8593;</button>
+            </div>
+          </div>
+          <div class="composer-hint" id="hint"></div>
+          <input type="file" class="attach-input" id="attach-input" accept="image/*" multiple />
+        </div>
+      </main>
+    </div>
+
+    <!-- Settings modal -->
+    <div class="overlay" id="overlay">
+      <div class="modal" role="dialog" aria-modal="true">
+        <h2>Settings</h2>
+        <p class="sub">Auto-saved to this browser. The proxy API key is sent on every request.</p>
+        <div class="banner" id="banner"></div>
+
+        <div class="field">
+          <label for="s-apikey">Proxy API key</label>
+          <input type="password" id="s-apikey" autocomplete="off" placeholder="(leave blank if proxy has no key)" />
+          <div class="hint">Sent as <code>Authorization: Bearer &lt;key&gt;</code>.</div>
+        </div>
+
+        <div class="field">
+          <label for="s-system">System prompt</label>
+          <textarea id="s-system" placeholder="e.g. You are a concise senior engineer."></textarea>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label>Temperature</label>
+            <div class="range-row">
+              <input type="range" id="s-temp" min="0" max="1" step="0.01" />
+              <span class="val" id="s-temp-val">1.00</span>
+            </div>
+          </div>
+          <div class="field">
+            <label>Top-p</label>
+            <div class="range-row">
+              <input type="range" id="s-topp" min="0.01" max="1" step="0.01" />
+              <span class="val" id="s-topp-val">0.95</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="field">
+            <label for="s-maxtok">Max output tokens</label>
+            <input type="number" id="s-maxtok" min="1" max="131072" step="1" />
+          </div>
+          <div class="field">
+            <label>Sampling</label>
+            <div class="switch" style="margin-top:10px;">
+              <input type="checkbox" id="s-dosample" />
+              <span>do_sample (disable for deterministic output)</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="s-mcp">MCP servers (HTTP transport, one per line)</label>
+          <textarea id="s-mcp" placeholder="my-server https://mcp.example.com/mcp&#10;another https://other.example.com/sse sse"></textarea>
+          <div class="hint">Format: <code>label URL [streamable-http|sse]</code>. The platform connects to each server and runs tools server-side.</div>
+        </div>
+
+        <div class="field">
+          <label>Input</label>
+          <div class="switch">
+            <input type="checkbox" id="s-enter" />
+            <span>Enter to send (Shift+Enter = newline)</span>
+          </div>
+        </div>
+
+        <div class="modal-foot">
+          <button class="btn" id="btn-clear-all" title="Delete all conversations and reset settings">Reset all</button>
+          <button class="btn primary" id="btn-close-settings">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+    (function () {
+      "use strict";
+      var STORE = "zcode_webui_state_v1";
+      // Known model catalog (used as a fallback when /v1/models is unreachable,
+      // e.g. before the proxy key has been entered).
+      var KNOWN_MODELS = [
+        "glm-4.5-air", "glm-4.6", "glm-4.6v", "glm-4.7", "glm-5",
+        "glm-5-turbo", "glm-5v-turbo", "glm-5.1", "glm-5.2"
+      ];
+
+      var DEFAULT_SETTINGS = {
+        apiKey: "",
+        model: "glm-4.6",
+        systemPrompt: "",
+        temperature: 1.0,
+        topP: 0.95,
+        maxTokens: 4096,
+        doSample: true,
+        thinkingEnabled: true,
+        reasoningEffort: "max",
+        mcpServers: [],            // [{label, url, transport}]
+        theme: "system",
+        enterToSend: true
+      };
+
+      // ---- state ----
+      var state = loadState();
+      var pendingImages = [];      // {name, dataUrl} attached to next user msg
+      var abortCtrl = null;        // current stream controller
+      var busy = false;            // generating?
+      var systemThemeDark = matchMedia("(prefers-color-scheme: dark)").matches;
+
+      // ---- dom ----
+      var $ = function (id) { return document.getElementById(id); };
+      var msgList = $("msg-list"), messages = $("messages");
+      var inputEl = $("input"), sendBtn = $("btn-send"), attachBtn = $("btn-attach");
+      var modelSel = $("model"), effortSel = $("reasoning-effort"), btnThink = $("btn-think");
+      var convListEl = $("conv-list"), statusDot = $("status-dot");
+      var sidebar = $("sidebar"), overlay = $("overlay"), toastEl = $("toast");
+      var hintEl = $("hint");
+
+      // =========================================================
+      // persistence
+      // =========================================================
+      function loadState() {
+        try {
+          var raw = localStorage.getItem(STORE);
+          if (raw) {
+            var s = JSON.parse(raw);
+            s.settings = Object.assign({}, DEFAULT_SETTINGS, s.settings || {});
+            s.conversations = Array.isArray(s.conversations) ? s.conversations : [];
+            s.activeId = s.activeId || (s.conversations[0] && s.conversations[0].id) || null;
+            return s;
+          }
+        } catch (e) { console.warn("load state failed", e); }
+        return { settings: Object.assign({}, DEFAULT_SETTINGS), conversations: [], activeId: null };
+      }
+      function saveState() {
+        try { localStorage.setItem(STORE, JSON.stringify(state)); }
+        catch (e) { toast("Storage full \u2014 older sessions not saved."); }
+      }
+      function activeConv() {
+        return state.conversations.find(function (c) { return c.id === state.activeId; }) || null;
+      }
+      function newConv() {
+        var c = { id: rid(), title: "New chat", messages: [], model: state.settings.model, createdAt: Date.now() };
+        state.conversations.unshift(c);
+        state.activeId = c.id;
+        saveState();
+        renderSidebar(); renderMessages(); inputEl.focus();
+      }
+      function rid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+
+      // =========================================================
+      // rendering
+      // =========================================================
+      function renderSidebar() {
+        convListEl.innerHTML = "";
+        state.conversations.forEach(function (c) {
+          var row = document.createElement("div");
+          row.className = "conv" + (c.id === state.activeId ? " active" : "");
+          var title = document.createElement("span");
+          title.className = "conv-title"; title.textContent = c.title || "New chat";
+          var del = document.createElement("button");
+          del.className = "conv-del"; del.innerHTML = "\u2715"; del.title = "Delete";
+          del.onclick = function (e) { e.stopPropagation(); deleteConv(c.id); };
+          row.onclick = function () { state.activeId = c.id; saveState(); renderSidebar(); renderMessages(); };
+          row.appendChild(title); row.appendChild(del);
+          convListEl.appendChild(row);
+        });
+      }
+      function deleteConv(id) {
+        var i = state.conversations.findIndex(function (c) { return c.id === id; });
+        if (i < 0) return;
+        state.conversations.splice(i, 1);
+        if (state.activeId === id) state.activeId = state.conversations[0] ? state.conversations[0].id : null;
+        saveState(); renderSidebar(); renderMessages();
+      }
+
+      function renderMessages() {
+        msgList.innerHTML = "";
+        var c = activeConv();
+        if (!c || c.messages.length === 0) { emptyState(); return; }
+        c.messages.forEach(function (m, idx) {
+          msgList.appendChild(buildMsg(m, idx === c.messages.length - 1));
+        });
+        scrollBottom(true);
+      }
+      function emptyState() {
+        var d = document.createElement("div");
+        d.className = "empty";
+        d.innerHTML = "<h1>zcode-proxy</h1><p>Chat with GLM models through your proxy. Pick a model above and start typing.</p>";
+        msgList.appendChild(d);
+      }
+
+      function buildMsg(m, isLast) {
+        var wrap = document.createElement("div");
+        wrap.className = "msg " + m.role;
+        var role = document.createElement("div"); role.className = "role";
+        role.textContent = m.role === "user" ? "You" : "Assistant";
+        wrap.appendChild(role);
+
+        if (m.images && m.images.length) {
+          var imgWrap = document.createElement("div"); imgWrap.className = "msg-images";
+          m.images.forEach(function (src) {
+            var im = document.createElement("img"); im.src = src; imgWrap.appendChild(im);
+          });
+          wrap.appendChild(imgWrap);
+        }
+
+        if (m.role === "user") {
+          var bubble = document.createElement("div"); bubble.className = "bubble";
+          bubble.textContent = m.content || ""; wrap.appendChild(bubble);
+        } else {
+          var body = document.createElement("div"); body.className = "content md";
+          if (m.reasoning) {
+            var t = document.createElement("details"); t.className = "think"; t.open = true;
+            var sum = document.createElement("summary"); sum.textContent = "Thinking\u2026";
+            var tb = document.createElement("div"); tb.className = "think-body"; tb.textContent = m.reasoning;
+            t.appendChild(sum); t.appendChild(tb);
+            body.appendChild(t);
+          }
+          body.innerHTML = renderMarkdown(m.content || "");
+          enhanceCode(body);
+          wrap.appendChild(body);
+          wrap.appendChild(meta(m, isLast));
+        }
+        return wrap;
+      }
+      function meta(m, isLast) {
+        var d = document.createElement("div"); d.className = "msg-meta";
+        if (m.model) { var s = document.createElement("span"); s.textContent = m.model; d.appendChild(s); }
+        if (m.truncated) { var t = document.createElement("span"); t.textContent = "\u00b7 truncated (max tokens)"; d.appendChild(t); }
+        if (m.role === "assistant" && isLast && !busy) {
+          var b = document.createElement("button"); b.className = "regen"; b.textContent = "\u21bb Regenerate";
+          b.onclick = regenerate; d.appendChild(b);
+        }
+        return d;
+      }
+
+      // =========================================================
+      // markdown
+      // =========================================================
+      function renderMarkdown(text) {
+        if (typeof marked === "undefined") return escapeHtml(text);
+        try {
+          marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false });
+          var html = marked.parse(text);
+          if (typeof DOMPurify !== "undefined") html = DOMPurify.sanitize(html);
+          return html;
+        } catch (e) { return escapeHtml(text); }
+      }
+      function escapeHtml(s) {
+        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      }
+      // Tiny script appended to rendered HTML so the sandboxed iframe can tell
+      // its parent how tall the content is (auto-height). Split "<script" so the
+      // host parser never sees a real end-tag inside this string.
+      var RESIZE_SCRIPT = '<' + 'script>(function(){function r(){try{parent.postMessage({__zcpPreview:true,h:document.documentElement.scrollHeight},"*")}catch(e){}}window.addEventListener("load",r);setTimeout(r,60);setTimeout(r,400);setTimeout(r,1200);})();<' + '/script>';
+      var previewListenerAdded = false;
+      function ensurePreviewListener() {
+        if (previewListenerAdded) return;
+        previewListenerAdded = true;
+        window.addEventListener("message", function (ev) {
+          var d = ev.data;
+          if (!d || d.__zcpPreview !== true || typeof d.h !== "number") return;
+          var frames = document.querySelectorAll("iframe.html-preview");
+          for (var i = 0; i < frames.length; i++) {
+            if (frames[i].contentWindow === ev.source) {
+              var h = Math.max(120, Math.min(2000, d.h | 0));
+              frames[i].style.height = h + "px";
+              break;
+            }
+          }
+        });
+      }
+      function toggleHtmlPreview(pre, code, btn, label, raw) {
+        var frame = pre.querySelector("iframe.html-preview");
+        if (!frame) {
+          ensurePreviewListener();
+          frame = document.createElement("iframe");
+          frame.className = "html-preview";
+          // allow-scripts (no allow-same-origin): JS runs but the iframe is a
+          // null origin that cannot touch the parent page's DOM/storage.
+          frame.setAttribute("sandbox", "allow-scripts");
+          frame.setAttribute("srcdoc", raw + RESIZE_SCRIPT);
+          pre.appendChild(frame);
+        }
+        var showPreview = btn.textContent === "preview";
+        code.style.display = showPreview ? "none" : "";
+        frame.style.display = showPreview ? "" : "none";
+        btn.textContent = showPreview ? "code" : "preview";
+        label.textContent = showPreview ? "preview" : "html";
+      }
+      function enhanceCode(root) {
+        var pres = root.querySelectorAll("pre > code:not([data-hl])");
+        pres.forEach(function (code) {
+          var pre = code.parentElement;
+          var raw = code.textContent;
+          var lang = (code.className.match(/language-([\w+-]+)/) || [])[1] || "";
+          var head = document.createElement("div"); head.className = "code-head";
+          var label = document.createElement("span"); label.textContent = lang || "code";
+          var actions = document.createElement("span"); actions.className = "code-actions";
+          var cp = document.createElement("button"); cp.className = "copy-btn"; cp.textContent = "copy";
+          cp.onclick = function () {
+            navigator.clipboard.writeText(raw).then(function () {
+              cp.textContent = "copied"; setTimeout(function () { cp.textContent = "copy"; }, 1200);
+            });
+          };
+          // In-page render toggle for HTML blocks (sandboxed iframe preview).
+          if (/^html$/i.test(lang)) {
+            var pv = document.createElement("button"); pv.className = "copy-btn"; pv.textContent = "preview";
+            pv.title = "Render this HTML live (sandboxed)";
+            pv.onclick = function () { toggleHtmlPreview(pre, code, pv, label, raw); };
+            actions.appendChild(pv);
+          }
+          actions.appendChild(cp);
+          head.appendChild(label); head.appendChild(actions);
+          pre.insertBefore(head, code);
+          code.setAttribute("data-hl", "1");
+          if (typeof hljs !== "undefined") { try { hljs.highlightElement(code); } catch (e) {} }
+        });
+        root.querySelectorAll("a[href]").forEach(function (a) {
+          a.target = "_blank"; a.rel = "noopener noreferrer";
+        });
+      }
+
+      // =========================================================
+      // theme
+      // =========================================================
+      function applyTheme() {
+        var t = state.settings.theme;
+        var dark = t === "dark" || (t === "system" && systemThemeDark);
+        document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+        var b = $("btn-theme");
+        if (b) {
+          // Label shows the mode you'll switch TO.
+          b.textContent = dark ? "Light mode" : "Dark mode";
+          b.title = "Switch to " + (dark ? "light" : "dark") + " theme";
+        }
+      }
+      matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function (e) {
+        systemThemeDark = e.matches; if (state.settings.theme === "system") applyTheme();
+      });
+
+      // =========================================================
+      // models
+      // =========================================================
+      function populateModels(list) {
+        modelSel.innerHTML = "";
+        (list.length ? list : KNOWN_MODELS).forEach(function (id) {
+          var o = document.createElement("option"); o.value = id; o.textContent = id;
+          modelSel.appendChild(o);
+        });
+        if (state.settings.model && Array.from(modelSel.options).some(function (o) { return o.value === state.settings.model; })) {
+          modelSel.value = state.settings.model;
+        }
+        syncAttachVisibility();
+        if (typeof populateEffort === "function") { populateEffort(); syncThinkButton(); }
+      }
+      function fetchModels() {
+        var headers = {};
+        if (state.settings.apiKey) headers["authorization"] = "Bearer " + state.settings.apiKey;
+        fetch("/v1/models", { method: "GET", headers: headers })
+          .then(function (r) {
+            if (!r.ok) throw new Error("HTTP " + r.status);
+            return r.json();
+          })
+          .then(function (j) {
+            var ids = (j.data || []).map(function (m) { return m.id; });
+            populateModels(ids); setStatus("ok");
+          })
+          .catch(function () {
+            populateModels(KNOWN_MODELS);
+            setStatus(state.settings.apiKey ? "err" : "idle");
+          });
+      }
+      function setStatus(s) {
+        statusDot.className = "status-dot" + (s === "ok" ? " ok" : s === "err" ? " err" : "");
+        statusDot.title = s === "ok" ? "Connected" : s === "err" ? "Request failed (check key / proxy)" : "Set proxy API key in settings";
+      }
+      function isVisionModel(id) { return /v/i.test(id || ""); }
+      function syncAttachVisibility() { attachBtn.hidden = !isVisionModel(modelSel.value); }
+
+      // =========================================================
+      // request building
+      // =========================================================
+      function buildRequestMessages(conv) {
+        var msgs = [];
+        if (state.settings.systemPrompt && state.settings.systemPrompt.trim()) {
+          msgs.push({ role: "system", content: state.settings.systemPrompt.trim() });
+        }
+        conv.messages.forEach(function (m) {
+          if (m.role === "user" && m.images && m.images.length) {
+            var parts = m.images.map(function (src) {
+              return { type: "image_url", image_url: { url: src } };
+            });
+            parts.push({ type: "text", text: m.content || "" });
+            msgs.push({ role: "user", content: parts });
+          } else {
+            msgs.push({ role: m.role, content: m.content || "" });
+          }
+        });
+        return msgs;
+      }
+      function buildBody(conv) {
+        var model = conv.model || state.settings.model;
+        var body = {
+          model: model,
+          messages: buildRequestMessages(conv),
+          stream: true,
+          temperature: Number(state.settings.temperature),
+          top_p: Number(state.settings.topP),
+          max_tokens: Number(state.settings.maxTokens),
+          do_sample: !!state.settings.doSample
+        };
+        if (state.settings.thinkingEnabled) {
+          body.thinking = { type: "enabled" };
+          if (isReasoningModel(model)) body.reasoning_effort = state.settings.reasoningEffort;
+        } else {
+          body.thinking = { type: "disabled" };
+        }
+        var mcp = parseMcp(state.settings.mcpServers);
+        if (mcp.length) body.tools = mcp;
+        return body;
+      }
+      function isReasoningModel(id) {
+        // reasoning_effort is only honored by GLM-5.2 and above per BigModel docs.
+        return /glm-5\.[2-9]|glm-[6-9]/i.test(id || "");
+      }
+      function parseMcp(arr) {
+        return (arr || []).filter(function (s) { return s && s.url; }).map(function (s) {
+          var entry = { server_label: s.label, server_url: s.url };
+          if (s.transport) entry.transport_type = s.transport;
+          return { type: "mcp", mcp: entry };
+        });
+      }
+
+      // =========================================================
+      // send / stream
+      // =========================================================
+      function send() {
+        if (busy) return;
+        var text = inputEl.value.trim();
+        if (!text && pendingImages.length === 0) return;
+        // Block image input for non-vision models with a clear message.
+        if (pendingImages.length && !isVisionModel(state.settings.model)) {
+          toast("This model does not support image input. Select a vision model (name contains 'v', e.g. glm-4.6v).");
+          return;
+        }
+        var c = activeConv(); if (!c) { newConv(); c = activeConv(); }
+        var images = pendingImages.map(function (p) { return p.dataUrl; });
+        c.messages.push({ role: "user", content: text, images: images.length ? images : undefined });
+        if (c.messages.filter(function (m) { return m.role === "user"; }).length === 1 && text) {
+          c.title = text.slice(0, 40);
+        }
+        inputEl.value = ""; autoGrow(); pendingImages = []; renderAttachPreview(); renderSidebar();
+        renderMessages();
+        runCompletion(c);
+      }
+
+      function regenerate() {
+        if (busy) return;
+        var c = activeConv(); if (!c) return;
+        while (c.messages.length && c.messages[c.messages.length - 1].role === "assistant") c.messages.pop();
+        renderMessages();
+        runCompletion(c);
+      }
+
+      function runCompletion(conv) {
+        var assistant = { role: "assistant", content: "", reasoning: "", model: conv.model || state.settings.model, truncated: false };
+        conv.messages.push(assistant);
+        renderMessages();
+        setBusy(true);
+        abortCtrl = new AbortController();
+        var finished = false;
+
+        fetch("/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "authorization": state.settings.apiKey ? "Bearer " + state.settings.apiKey : ""
+          },
+          body: JSON.stringify(buildBody(conv)),
+          signal: abortCtrl.signal
+        }).then(function (r) {
+          if (!r.ok || !r.body) {
+            return r.text().then(function (t) {
+              assistant.content = "**Request failed (" + r.status + ").**\n\n```\n" + (t || r.statusText).slice(0, 800) + "\n```";
+              finalize();
+              throw new Error("__stop__");
+            });
+          }
+          var reader = r.body.getReader();
+          var dec = new TextDecoder();
+          var buf = "";
+          var lastRender = 0;
+          function pump() {
+            return reader.read().then(function (chunk) {
+              if (chunk.done) { finalize(); return; }
+              buf += dec.decode(chunk.value, { stream: true });
+              var lines = buf.split("\n");
+              buf = lines.pop();
+              for (var i = 0; i < lines.length; i++) {
+                var line = lines[i].trim();
+                if (!line || line.indexOf("data:") !== 0) continue;
+                var data = line.slice(5).trim();
+                if (data === "[DONE]") { finished = true; break; }
+                var json; try { json = JSON.parse(data); } catch (e) { continue; }
+                var choice = json.choices && json.choices[0];
+                if (!choice) continue;
+                var d = choice.delta || {};
+                if (d.reasoning_content) assistant.reasoning += d.reasoning_content;
+                if (d.content) assistant.content += d.content;
+                if (choice.finish_reason === "length") assistant.truncated = true;
+              }
+              var now = Date.now();
+              if (now - lastRender > 33) { lastRender = now; updateStreamingDom(assistant, false); }
+              if (finished) { finalize(); return; }
+              return pump();
+            });
+          }
+          return pump().then(function () { if (!finished && !assistant.content && !assistant.reasoning) { assistant.content = "_(empty response)_"; updateStreamingDom(assistant, true); } });
+        }).catch(function (e) {
+          if (e && e.message === "__stop__") return;
+          if (e && e.name === "AbortError") {
+            assistant.content += "\n\n_\u2026stopped._";
+            updateStreamingDom(assistant, true);
+          } else {
+            assistant.content = "**Error:** " + escapeHtml(String((e && e.message) || e));
+            updateStreamingDom(assistant, true);
+          }
+          finalize();
+        });
+
+        function finalize() {
+          updateStreamingDom(assistant, true);
+          setBusy(false);
+          abortCtrl = null;
+          saveState();
+          renderSidebar();
+        }
+      }
+
+      function updateStreamingDom(assistant, done) {
+        var last = msgList.lastChild;
+        if (!last || !last.classList || !last.classList.contains("msg")) { renderMessages(); last = msgList.lastChild; }
+        if (!last) return;
+        var body = last.querySelector(".content");
+        if (!body) return;
+        var think = body.querySelector(".think");
+        if (assistant.reasoning) {
+          if (!think) {
+            think = document.createElement("details"); think.className = "think"; think.open = true;
+            var sum = document.createElement("summary");
+            var tb = document.createElement("div"); tb.className = "think-body";
+            think.appendChild(sum); think.appendChild(tb);
+            body.insertBefore(think, body.firstChild);
+          }
+          think.querySelector(".think-body").textContent = assistant.reasoning;
+          think.querySelector("summary").textContent = done ? "Thought process" : "Thinking\u2026";
+          if (done) think.open = false;
+        }
+        if (assistant.content) {
+          body.innerHTML = renderMarkdown(assistant.content);
+          enhanceCode(body);
+          if (think) body.insertBefore(think, body.firstChild); // keep thinking on top
+        }
+        if (done) {
+          var oldMeta = last.querySelector(".msg-meta"); if (oldMeta) oldMeta.remove();
+          last.appendChild(meta(assistant, true));
+        }
+        scrollBottom();
+      }
+
+      function setBusy(b) {
+        busy = b;
+        sendBtn.className = "c-btn " + (b ? "stop" : "send");
+        sendBtn.innerHTML = b ? "\u25a0" : "\u2191";
+        sendBtn.title = b ? "Stop" : "Send";
+        hintEl.textContent = b ? "Generating \u2014 press Stop to interrupt." : "";
+      }
+      function stop() { if (abortCtrl) { try { abortCtrl.abort(); } catch (e) {} } }
+
+      // =========================================================
+      // autoscroll
+      // =========================================================
+      function nearBottom() {
+        return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 120;
+      }
+      function scrollBottom(force) {
+        if (force || nearBottom()) messages.scrollTop = messages.scrollHeight;
+      }
+
+      // =========================================================
+      // composer helpers
+      // =========================================================
+      function autoGrow() {
+        inputEl.style.height = "auto";
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + "px";
+      }
+      function renderAttachPreview() {
+        var box = $("attach-preview"); box.innerHTML = "";
+        pendingImages.forEach(function (p, i) {
+          var w = document.createElement("div"); w.className = "ap";
+          var img = document.createElement("img"); img.src = p.dataUrl;
+          var rm = document.createElement("button"); rm.className = "ap-rm"; rm.innerHTML = "\u2715";
+          rm.onclick = function () { pendingImages.splice(i, 1); renderAttachPreview(); };
+          w.appendChild(img); w.appendChild(rm); box.appendChild(w);
+        });
+      }
+      function readImages(files) {
+        Array.from(files).forEach(function (f) {
+          if (!/image\//.test(f.type)) return;
+          var r = new FileReader();
+          r.onload = function () { pendingImages.push({ name: f.name, dataUrl: r.result }); renderAttachPreview(); };
+          r.readAsDataURL(f);
+        });
+      }
+
+      // =========================================================
+      // settings modal
+      // =========================================================
+      function openSettings() { syncSettingsForm(); overlay.classList.add("open"); }
+      function closeSettings() { overlay.classList.remove("open"); }
+      function syncSettingsForm() {
+        var s = state.settings;
+        $("s-apikey").value = s.apiKey;
+        $("s-system").value = s.systemPrompt;
+        $("s-temp").value = s.temperature; $("s-temp-val").textContent = Number(s.temperature).toFixed(2);
+        $("s-topp").value = s.topP; $("s-topp-val").textContent = Number(s.topP).toFixed(2);
+        $("s-maxtok").value = s.maxTokens;
+        $("s-dosample").checked = s.doSample;
+        $("s-mcp").value = (s.mcpServers || []).map(function (m) {
+          return m.transport === "streamable-http" || !m.transport ? m.label + " " + m.url : m.label + " " + m.url + " " + m.transport;
+        }).join("\n");
+        $("s-enter").checked = s.enterToSend;
+        $("banner").style.display = s.apiKey ? "none" : "block";
+        $("banner").textContent = "No proxy API key set. If your proxy requires one, requests will return 401.";
+      }
+      function readSettingsForm() {
+        var s = state.settings;
+        s.apiKey = $("s-apikey").value.trim();
+        s.systemPrompt = $("s-system").value;
+        s.temperature = parseFloat($("s-temp").value);
+        s.topP = parseFloat($("s-topp").value);
+        s.maxTokens = parseInt($("s-maxtok").value, 10) || 4096;
+        s.doSample = $("s-dosample").checked;
+        s.mcpServers = $("s-mcp").value.split("\n").map(function (ln) {
+          var p = ln.trim().split(/\s+/); if (!p[0]) return null;
+          return { label: p[0], url: p[1] || "", transport: p[2] || "streamable-http" };
+        }).filter(Boolean);
+        s.enterToSend = $("s-enter").checked;
+        saveState();
+      }
+
+      // =========================================================
+      // toast
+      // =========================================================
+      var toastTimer;
+      function toast(msg) {
+        toastEl.textContent = msg; toastEl.classList.add("show");
+        clearTimeout(toastTimer); toastTimer = setTimeout(function () { toastEl.classList.remove("show"); }, 2600);
+      }
+
+      // =========================================================
+      // wiring
+      // =========================================================
+      $("btn-new").onclick = newConv;
+      $("btn-settings").onclick = openSettings;
+      $("btn-close-settings").onclick = function () { readSettingsForm(); closeSettings(); fetchModels(); populateEffort(); syncThinkButton(); };
+      $("btn-clear-all").onclick = function () {
+        if (!confirm("Delete ALL conversations and reset settings? This cannot be undone.")) return;
+        localStorage.removeItem(STORE);
+        state = loadState(); saveState(); applyTheme(); renderSidebar(); renderMessages();
+        syncSettingsForm(); populateModels(KNOWN_MODELS); toast("Reset complete.");
+      };
+      $("btn-theme").onclick = function () {
+        var cur = document.documentElement.getAttribute("data-theme");
+        state.settings.theme = cur === "dark" ? "light" : "dark";
+        saveState(); applyTheme();
+      };
+      $("btn-menu").onclick = function () { sidebar.classList.toggle("collapsed"); };
+      overlay.onclick = function (e) { if (e.target === overlay) closeSettings(); };
+
+      $("s-temp").addEventListener("input", function () { $("s-temp-val").textContent = parseFloat($("s-temp").value).toFixed(2); });
+      $("s-topp").addEventListener("input", function () { $("s-topp-val").textContent = parseFloat($("s-topp").value).toFixed(2); });
+      $("s-apikey").addEventListener("input", function () {
+        $("banner").style.display = $("s-apikey").value.trim() ? "none" : "block";
+      });
+
+      modelSel.onchange = function () {
+        state.settings.model = modelSel.value;
+        var c = activeConv(); if (c) c.model = modelSel.value;
+        // If images were queued for a vision model and the user switched to a
+        // non-vision one, drop them and explain.
+        if (pendingImages.length && !isVisionModel(modelSel.value)) {
+          pendingImages = []; renderAttachPreview();
+          toast("Switched to a non-vision model \u2014 attached images were removed.");
+        }
+        saveState(); syncAttachVisibility(); populateEffort();
+      };
+      // GLM-5.2 only has two distinct reasoning-effort levels (low/medium map
+      // to high, xhigh maps to max), so expose just high and max. Other models
+      // get a disabled placeholder (reasoning_effort is GLM-5.2+ only).
+      function populateEffort() {
+        var model = modelSel.value;
+        effortSel.innerHTML = "";
+        if (isReasoningModel(model)) {
+          ["max", "high"].forEach(function (v) {
+            var o = document.createElement("option");
+            o.value = v; o.textContent = v;
+            effortSel.appendChild(o);
+          });
+          var cur = state.settings.reasoningEffort;
+          effortSel.value = (cur === "high") ? "high" : "max";
+          effortSel.disabled = !state.settings.thinkingEnabled;
+        } else {
+          var o = document.createElement("option");
+          o.value = ""; o.textContent = "n/a";
+          effortSel.appendChild(o);
+          effortSel.disabled = true;
+        }
+      }
+      function syncThinkButton() {
+        var on = state.settings.thinkingEnabled;
+        btnThink.classList.toggle("on", on);
+        btnThink.textContent = on ? "Think: on" : "Think: off";
+        btnThink.title = on ? "Deep thinking on \u2014 click to turn off" : "Deep thinking off \u2014 click to turn on";
+        // Repopulate so the effort dropdown's disabled state tracks the toggle
+        // (populateEffort sets disabled = !thinkingEnabled for reasoning models).
+        populateEffort();
+      }
+      effortSel.onchange = function () {
+        state.settings.reasoningEffort = effortSel.value || "max";
+        saveState();
+      };
+      btnThink.onclick = function () {
+        state.settings.thinkingEnabled = !state.settings.thinkingEnabled;
+        saveState(); syncThinkButton();
+      };
+
+      attachBtn.onclick = function () { $("attach-input").click(); };
+      $("attach-input").onchange = function (e) { readImages(e.target.files); e.target.value = ""; };
+      // drag & drop onto composer
+      var composer = document.querySelector(".composer");
+      ["dragover", "dragenter"].forEach(function (ev) {
+        composer.addEventListener(ev, function (e) { e.preventDefault(); composer.style.borderColor = "var(--accent)"; });
+      });
+      ["dragleave", "drop"].forEach(function (ev) {
+        composer.addEventListener(ev, function (e) { e.preventDefault(); composer.style.borderColor = ""; });
+      });
+      composer.addEventListener("drop", function (e) {
+        if (!isVisionModel(modelSel.value)) { toast("Select a vision model (name contains 'v') to attach images."); return; }
+        if (e.dataTransfer && e.dataTransfer.files) readImages(e.dataTransfer.files);
+      });
+
+      inputEl.addEventListener("input", autoGrow);
+      inputEl.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" && !e.shiftKey && state.settings.enterToSend && !e.isComposing) { e.preventDefault(); send(); }
+        else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }
+      });
+      sendBtn.onclick = function () { if (busy) stop(); else send(); };
+
+      // =========================================================
+      // boot
+      // =========================================================
+      applyTheme();
+      populateModels(KNOWN_MODELS);
+      renderSidebar(); renderMessages();
+      populateEffort(); syncThinkButton();
+      fetchModels();
+      autoGrow();
+      inputEl.focus();
+      if (!state.conversations.length) newConv();
+    })();
+    </script>
+  </body>
+</html>
