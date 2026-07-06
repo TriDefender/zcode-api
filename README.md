@@ -71,6 +71,7 @@ bun run src/index.ts auth login bigmodel --import
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions (streaming + non-streaming) |
 | `POST` | `/v1/messages` | Anthropic-format messages (streaming + non-streaming) |
 | `GET` | `/v1/models` | List available models |
+| `GET` | `/webui` | Built-in chat web UI (served without the proxy key; see below) |
 | `GET` | `/health` | Health check |
 
 ## Usage Examples
@@ -120,6 +121,19 @@ curl http://localhost:8080/v1/chat/completions \
 curl http://localhost:8080/v1/models \
   -H "Authorization: Bearer your-proxy-secret"
 ```
+
+### Web UI
+
+Open `http://localhost:8080/webui` in a browser for a built-in, ChatGPT-style
+chat client. The page is served **without** the proxy API key (so it can load
+and present the key input); it then sends the key on its own `/v1/*` calls.
+
+Features: streaming responses (SSE), model picker (auto-populated from
+`/v1/models`), editable system prompt, temperature / top-p / max-tokens /
+`do_sample`, deep-thinking toggle with `reasoning_effort` (GLM-5.2+), image
+upload (auto-enabled for models whose id contains `v`), MCP HTTP servers,
+markdown + code-highlight rendering, light/dark theme, and per-browser
+multi-session autosave (localStorage). Open Settings (⚙) to configure.
 
 ## Configuration
 

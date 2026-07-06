@@ -7,6 +7,12 @@ import type { AuthManager } from "../auth/manager.js";
 import { handleChatCompletions, handleListModels } from "./routes-openai.js";
 import { handleMessages } from "./routes-anthropic.js";
 import { errorResponse } from "../proxy/handler.js";
+// Web UI source, embedded as a string (Bun `text` loader; embeds under
+// `bun build --compile`). Served at /webui WITHOUT the proxy API key gate (the
+// page must load to present the key input); the UI sends the key on its own
+// /v1/* calls. The asset is named .txt (not .html) because Bun's html loader
+// returns an opaque HTMLBundle instead of raw text.
+import webuiHtml from "./webui.txt";
 
 interface ServerOptions {
   config: ProxyConfig;
@@ -30,6 +36,16 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
     // CORS preflight
     if (method === "OPTIONS") {
       return corsResponse();
+    }
+
+    // Web UI — served before the proxy API key gate so the page can load and
+    // collect the key in-browser; the UI then authenticates its own /v1/* calls.
+    // GET-only: non-GET falls through to the normal auth gate / 404.
+    if (method === "GET" && (path === "/webui" || path.startsWith("/webui/"))) {
+      return new Response(webuiHtml, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
+      });
     }
 
     // Proxy API key auth (if configured)
