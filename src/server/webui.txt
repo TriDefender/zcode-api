@@ -174,6 +174,11 @@
         border: none; background: transparent; color: #adbac7; font-size: 12px; padding: 2px 6px; border-radius: 5px;
       }
       .md pre .copy-btn:hover { background: rgba(255,255,255,.1); color: #fff; }
+      .md pre .code-actions { display: flex; align-items: center; gap: 6px; }
+      .md pre .html-preview {
+        display: block; width: 100%; min-height: 200px; max-height: 80vh;
+        border: 0; background: #fff; resize: vertical;
+      }
       .md table { border-collapse: collapse; margin: 0 0 12px; display: block; overflow-x: auto; }
       .md th,.md td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; }
       .md hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
@@ -568,20 +573,69 @@
       function escapeHtml(s) {
         return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
       }
+      // Tiny script appended to rendered HTML so the sandboxed iframe can tell
+      // its parent how tall the content is (auto-height). Split "<script" so the
+      // host parser never sees a real end-tag inside this string.
+      var RESIZE_SCRIPT = '<' + 'script>(function(){function r(){try{parent.postMessage({__zcpPreview:true,h:document.documentElement.scrollHeight},"*")}catch(e){}}window.addEventListener("load",r);setTimeout(r,60);setTimeout(r,400);setTimeout(r,1200);})();<' + '/script>';
+      var previewListenerAdded = false;
+      function ensurePreviewListener() {
+        if (previewListenerAdded) return;
+        previewListenerAdded = true;
+        window.addEventListener("message", function (ev) {
+          var d = ev.data;
+          if (!d || d.__zcpPreview !== true || typeof d.h !== "number") return;
+          var frames = document.querySelectorAll("iframe.html-preview");
+          for (var i = 0; i < frames.length; i++) {
+            if (frames[i].contentWindow === ev.source) {
+              var h = Math.max(120, Math.min(2000, d.h | 0));
+              frames[i].style.height = h + "px";
+              break;
+            }
+          }
+        });
+      }
+      function toggleHtmlPreview(pre, code, btn, label, raw) {
+        var frame = pre.querySelector("iframe.html-preview");
+        if (!frame) {
+          ensurePreviewListener();
+          frame = document.createElement("iframe");
+          frame.className = "html-preview";
+          // allow-scripts (no allow-same-origin): JS runs but the iframe is a
+          // null origin that cannot touch the parent page's DOM/storage.
+          frame.setAttribute("sandbox", "allow-scripts");
+          frame.setAttribute("srcdoc", raw + RESIZE_SCRIPT);
+          pre.appendChild(frame);
+        }
+        var showPreview = btn.textContent === "preview";
+        code.style.display = showPreview ? "none" : "";
+        frame.style.display = showPreview ? "" : "none";
+        btn.textContent = showPreview ? "code" : "preview";
+        label.textContent = showPreview ? "preview" : "html";
+      }
       function enhanceCode(root) {
         var pres = root.querySelectorAll("pre > code:not([data-hl])");
         pres.forEach(function (code) {
           var pre = code.parentElement;
+          var raw = code.textContent;
           var lang = (code.className.match(/language-([\w+-]+)/) || [])[1] || "";
           var head = document.createElement("div"); head.className = "code-head";
           var label = document.createElement("span"); label.textContent = lang || "code";
+          var actions = document.createElement("span"); actions.className = "code-actions";
           var cp = document.createElement("button"); cp.className = "copy-btn"; cp.textContent = "copy";
           cp.onclick = function () {
-            navigator.clipboard.writeText(code.textContent).then(function () {
+            navigator.clipboard.writeText(raw).then(function () {
               cp.textContent = "copied"; setTimeout(function () { cp.textContent = "copy"; }, 1200);
             });
           };
-          head.appendChild(label); head.appendChild(cp);
+          // In-page render toggle for HTML blocks (sandboxed iframe preview).
+          if (/^html$/i.test(lang)) {
+            var pv = document.createElement("button"); pv.className = "copy-btn"; pv.textContent = "preview";
+            pv.title = "Render this HTML live (sandboxed)";
+            pv.onclick = function () { toggleHtmlPreview(pre, code, pv, label, raw); };
+            actions.appendChild(pv);
+          }
+          actions.appendChild(cp);
+          head.appendChild(label); head.appendChild(actions);
           pre.insertBefore(head, code);
           code.setAttribute("data-hl", "1");
           if (typeof hljs !== "undefined") { try { hljs.highlightElement(code); } catch (e) {} }
@@ -764,7 +818,7 @@
           function pump() {
             return reader.read().then(function (chunk) {
               if (chunk.done) { finalize(); return; }
-              buf += dec.decode(chunk, { stream: true });
+              buf += dec.decode(chunk.value, { stream: true });
               var lines = buf.split("\n");
               buf = lines.pop();
               for (var i = 0; i < lines.length; i++) {
