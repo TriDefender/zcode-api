@@ -180,8 +180,8 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       text: "You are ZCode, an interactive coding agent",
       cache_control: { type: "ephemeral" },
     });
-    expect(parsed.system[1].text).toContain("# Task Behavior");
-    expect(parsed.system[1].text).toContain("# Risky Actions");
+    expect(parsed.system[1].text).toContain("# Harness");
+    expect(parsed.system[1].text).toContain("interactive ZCode agent");
     expect(parsed.system[1].cache_control).toEqual({ type: "ephemeral" });
     expect(parsed.system[2].text).toContain("You have been invoked in the following environment:");
     expect(parsed.system[2].cache_control).toEqual({ type: "ephemeral" });
@@ -216,7 +216,7 @@ describe("transformRequestBody — start-plan system (OpenAI)", () => {
       content: "You are ZCode, an interactive coding agent",
     });
     expect(parsed.messages[1].role).toBe("system");
-    expect(parsed.messages[1].content).toContain("# Task Behavior");
+    expect(parsed.messages[1].content).toContain("# Harness");
     expect(parsed.messages[2].role).toBe("system");
     expect(parsed.messages[2].content).toContain("You have been invoked in the following environment:");
     expect(parsed.messages[3]).toEqual({ role: "user", content: "hi" });
