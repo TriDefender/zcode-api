@@ -262,6 +262,22 @@
         background: rgba(239,68,68,.12); border: 1px solid var(--danger); color: var(--text);
         padding: 8px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; display: none;
       }
+      .mcp-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+      .mcp-summary { color: var(--muted); font-size: 13px; }
+      .mcp-srv { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 13px; }
+      .mcp-srv .mcp-srv-head { display: flex; align-items: center; gap: 8px; }
+      .mcp-srv .mcp-label { font-weight: 600; }
+      .mcp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: 0 0 8px; }
+      .mcp-dot.ok { background: #22c55e; } .mcp-dot.err { background: var(--danger); } .mcp-dot.busy { background: #eab308; }
+      .mcp-srv .mcp-state { color: var(--muted); font-size: 12px; }
+      .mcp-srv .mcp-err { color: var(--danger); font-size: 12px; margin-top: 4px; word-break: break-word; }
+      .mcp-tools { margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+      .mcp-tool-chip { display: inline-block; background: var(--elevated); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; margin: 2px 2px 0 0; }
+      .msg.tool .tool-body {
+        background: var(--elevated); border: 1px dashed var(--border); border-radius: 8px;
+        padding: 8px 10px; font-size: 12px; color: var(--muted); white-space: pre-wrap; word-break: break-word;
+      }
+      .msg .toolcalls { font-size: 12px; color: var(--muted); margin-top: 4px; }
       .toast {
         position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
         background: var(--elevated); border: 1px solid var(--border); color: var(--text);
@@ -375,9 +391,30 @@
         </div>
 
         <div class="field">
-          <label for="s-mcp">MCP servers (HTTP transport, one per line)</label>
-          <textarea id="s-mcp" placeholder="my-server https://mcp.example.com/mcp&#10;another https://other.example.com/sse sse"></textarea>
-          <div class="hint">Format: <code>label URL [streamable-http|sse]</code>. The platform connects to each server and runs tools server-side.</div>
+          <label>MCP tool calling</label>
+          <div class="switch" style="margin-bottom:8px;">
+            <input type="checkbox" id="s-mcpenable" />
+            <span>Enable tools (when off, no tools are sent even if servers are connected)</span>
+          </div>
+          <label for="s-mcp" style="margin-top:6px;">MCP servers (one per line)</label>
+          <textarea id="s-mcp" placeholder="https://mcp.example.com/mcp&#10;https://mcp.github.com/mcp,ghp_xxx&#10;http://localhost:3001/mcp"></textarea>
+          <div class="hint">Format: <code>URL</code> or <code>URL,key</code> (comma-separated). Key sent as <code>Authorization: Bearer</code>. If a server needs the key in the URL, embed it there directly. Caution: keys are stored in plaintext in localStorage.</div>
+        </div>
+
+        <div class="field">
+          <label for="s-cors">CORS proxy (optional)</label>
+          <input type="text" id="s-cors" placeholder="https://corsproxy.io/?url=   (leave blank for no CORS)" />
+          <div class="hint">Needed when servers block browser CORS.</div>
+        </div>
+
+        <div class="field">
+          <label>MCP connection</label>
+          <div class="mcp-bar">
+            <button class="btn" id="btn-mcp-connect" type="button">Connect all</button>
+            <button class="btn" id="btn-mcp-disconnect" type="button">Disconnect</button>
+            <span class="mcp-summary" id="mcp-summary"></span>
+          </div>
+          <div id="mcp-status"></div>
         </div>
 
         <div class="field">
@@ -418,7 +455,9 @@
         doSample: true,
         thinkingEnabled: true,
         reasoningEffort: "max",
-        mcpServers: [],            // [{label, url, transport}]
+        mcpEnabled: true,          // master toggle: only send tools when on
+        mcpServers: [],            // [{url, authKey}] — "URL" or "URL,key" per line
+        mcpCorsProxy: "",          // optional prefix (or {url} template) for browser CORS bypass
         theme: "system",
         enterToSend: true
       };
@@ -528,6 +567,13 @@
           wrap.appendChild(imgWrap);
         }
 
+        if (m.role === "tool") {
+          var tbody = document.createElement("div"); tbody.className = "tool-body";
+          tbody.textContent = "🔧 tool result\n" + (m.content || "");
+          wrap.appendChild(tbody);
+          return wrap;
+        }
+
         if (m.role === "user") {
           var bubble = document.createElement("div"); bubble.className = "bubble";
           bubble.textContent = m.content || ""; wrap.appendChild(bubble);
@@ -542,6 +588,11 @@
           }
           body.innerHTML = renderMarkdown(m.content || "");
           enhanceCode(body);
+          if (m.toolCalls && m.toolCalls.length) {
+            var tc = document.createElement("div"); tc.className = "toolcalls";
+            tc.textContent = "🔧 called: " + m.toolCalls.map(function (x) { return x.name; }).join(", ");
+            body.appendChild(tc);
+          }
           wrap.appendChild(body);
           wrap.appendChild(meta(m, isLast));
         }
@@ -717,6 +768,16 @@
             });
             parts.push({ type: "text", text: m.content || "" });
             msgs.push({ role: "user", content: parts });
+          } else if (m.role === "assistant" && m.toolCalls && m.toolCalls.length) {
+            msgs.push({
+              role: "assistant",
+              content: m.content || "",
+              tool_calls: m.toolCalls.map(function (tc) {
+                return { id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments || "{}" } };
+              }),
+            });
+          } else if (m.role === "tool") {
+            msgs.push({ role: "tool", tool_call_id: m.toolCallId, content: m.content || "" });
           } else {
             msgs.push({ role: m.role, content: m.content || "" });
           }
@@ -740,20 +801,213 @@
         } else {
           body.thinking = { type: "disabled" };
         }
-        var mcp = parseMcp(state.settings.mcpServers);
-        if (mcp.length) body.tools = mcp;
+        var fnTools = gatherMcpTools();
+        if (fnTools.length) { body.tools = fnTools; body.tool_choice = "auto"; }
         return body;
       }
       function isReasoningModel(id) {
         // reasoning_effort is only honored by GLM-5.2 and above per BigModel docs.
         return /glm-5\.[2-9]|glm-[6-9]/i.test(id || "");
       }
-      function parseMcp(arr) {
-        return (arr || []).filter(function (s) { return s && s.url; }).map(function (s) {
-          var entry = { server_label: s.label, server_url: s.url };
-          if (s.transport) entry.transport_type = s.transport;
-          return { type: "mcp", mcp: entry };
+      // =========================================================
+      // MCP — client-managed (browser-direct, optional CORS proxy).
+      // The webui connects to each server, lists its tools, injects them as
+      // function tools, and auto-executes tool calls the model returns.
+      // =========================================================
+      var mcpState = {};          // url -> {sessionId, tools[], connected, error, status}
+      var mcpToolMap = {};        // tool name -> {url, name}
+      var mcpRpcId = 0;
+      function nextRpcId() { return ++mcpRpcId; }
+
+      function applyCorsProxy(url) {
+        var cp = (state.settings.mcpCorsProxy || "").trim();
+        if (!cp) return url;
+        if (cp.indexOf("{url}") >= 0) return cp.replace("{url}", encodeURIComponent(url));
+        return cp + encodeURIComponent(url);
+      }
+      // POST one JSON-RPC message. Resolves {status, contentType, sessionId, body}.
+      // Auth: sent only as Authorization: Bearer (KoboldAI parity). If a server
+      // needs the key in the URL, embed it directly in the server URL line.
+      function mcpFetch(server, rpc) {
+        var st = mcpState[server.url] || (mcpState[server.url] = {});
+        var headers = { "content-type": "application/json", "accept": "application/json, text/event-stream" };
+        if (st.sessionId) headers["mcp-session-id"] = st.sessionId;
+        if (server.authKey) headers["authorization"] = "Bearer " + server.authKey;
+        return fetch(applyCorsProxy(server.url), {
+          method: "POST", headers: headers, body: JSON.stringify(rpc),
+        }).then(function (r) {
+          return r.text().then(function (t) {
+            return {
+              ok: r.ok, status: r.status,
+              contentType: r.headers.get("content-type") || "",
+              sessionId: r.headers.get("mcp-session-id") || "",
+              body: t,
+            };
+          });
         });
+      }
+      // streamable-http servers may answer with SSE (data: lines) or plain JSON.
+      function parseMcpResponse(resp) {
+        var body = resp.body || "";
+        var looksSSE = resp.contentType.indexOf("text/event-stream") >= 0 || body.indexOf("data:") === 0;
+        if (looksSSE) {
+          var parsed = null;
+          body.split("\n").forEach(function (ln) {
+            if (ln.indexOf("data:") === 0) {
+              var d = ln.slice(5).trim();
+              if (d) { try { parsed = JSON.parse(d); } catch (e) {} }
+            }
+          });
+          return parsed;
+        }
+        try { return JSON.parse(body); } catch (e) { return null; }
+      }
+      function mcpCall(server, method, params) {
+        var rpc = { jsonrpc: "2.0", id: nextRpcId(), method: method };
+        if (params) rpc.params = params;
+        return mcpFetch(server, rpc).then(function (resp) {
+          var st = mcpState[server.url];
+          if (resp.sessionId && st && !st.sessionId) st.sessionId = resp.sessionId;
+          var json = parseMcpResponse(resp);
+          if (!json) throw new Error("MCP " + method + " on " + server.url + " returned no JSON (HTTP " + resp.status + ")");
+          if (json.error) throw new Error("MCP error" + (json.error.code != null ? " (" + json.error.code + ")" : "") + ": " + (json.error.message || JSON.stringify(json.error)));
+          return json;
+        });
+      }
+      // initialize + tools/list for one server. Resolves to tools[].
+      function mcpConnect(server) {
+        return mcpCall(server, "initialize", {
+          protocolVersion: "2024-11-05", capabilities: {},
+          clientInfo: { name: "zcode-proxy-webui", version: "1.0" },
+        }).then(function () {
+          // required notification before tools/list on stateful servers
+          return mcpFetch(server, { jsonrpc: "2.0", method: "notifications/initialized" });
+        }).then(function () {
+          return mcpCall(server, "tools/list", {});
+        }).then(function (j) {
+          return (j.result && j.result.tools) || [];
+        });
+      }
+      // Build function-tool entries from every connected server + refresh the
+      // tool name -> {url, name} routing map. No tools when MCP is disabled.
+      function gatherMcpTools() {
+        var out = []; mcpToolMap = {};
+        if (!state.settings.mcpEnabled) return out;
+        state.settings.mcpServers.forEach(function (s) {
+          var st = mcpState[s.url];
+          if (st && st.connected && st.tools) {
+            st.tools.forEach(function (t) {
+              if (mcpToolMap[t.name]) return; // dedupe across servers (first wins)
+              mcpToolMap[t.name] = { url: s.url, name: t.name };
+              out.push({
+                type: "function",
+                function: {
+                  name: t.name,
+                  description: (t.description || t.name).slice(0, 1024),
+                  parameters: t.inputSchema || { type: "object", properties: {} },
+                },
+              });
+            });
+          }
+        });
+        return out;
+      }
+      // Execute one model tool_call against its MCP server. Resolves to text.
+      function execMcpTool(tc) {
+        var map = mcpToolMap[tc.name];
+        if (!map) return Promise.reject(new Error("Unknown tool: " + tc.name));
+        var server = state.settings.mcpServers.find(function (s) { return s.url === map.url; });
+        if (!server) return Promise.reject(new Error("MCP server not configured: " + map.url));
+        var args = {};
+        try { args = JSON.parse(tc.arguments || "{}"); } catch (e) { args = {}; }
+        return mcpCall(server, "tools/call", { name: map.name, arguments: args }).then(function (j) {
+          var res = j.result;
+          if (!res) return "(no result)";
+          if (Array.isArray(res.content)) {
+            return res.content.map(function (c) { return c.type === "text" ? c.text : JSON.stringify(c); }).join("\n");
+          }
+          return JSON.stringify(res);
+        });
+      }
+
+      // Parse the MCP textarea (KoboldAI format: "URL" or "URL,key" per line).
+      function parseServersFromTextarea() {
+        return $("s-mcp").value.split("\n").map(function (ln) {
+          var line = ln.trim();
+          if (!line) return null;
+          var parts = line.split(",");
+          var url = (parts[0] || "").trim();
+          var key = (parts[1] || "").trim();
+          if (!url) return null;
+          return { url: url, authKey: key };
+        }).filter(function (s) { return s.url; });
+      }
+      function connectAllMcp() {
+        var servers = parseServersFromTextarea();
+        state.settings.mcpServers = servers;
+        state.settings.mcpCorsProxy = $("s-cors").value.trim();
+        state.settings.mcpEnabled = $("s-mcpenable").checked;
+        saveState();
+        mcpState = {};              // fresh sessions each connect
+        renderMcpStatus(servers);
+        var chain = Promise.resolve();
+        servers.forEach(function (s) {
+          chain = chain.then(function () {
+            var st = mcpState[s.url] = { connected: false, tools: [], sessionId: "", error: "", status: "connecting" };
+            renderMcpStatus(servers);
+            return mcpConnect(s).then(function (tools) {
+              st.connected = true; st.tools = tools || []; st.error = ""; st.status = "ok";
+            }, function (err) {
+              st.connected = false; st.tools = []; st.error = String((err && err.message) || err); st.status = "error";
+            }).then(function () { renderMcpStatus(servers); });
+          });
+        });
+        chain.then(updateMcpSummary, updateMcpSummary);
+      }
+      function disconnectMcp() {
+        mcpState = {};
+        renderMcpStatus(state.settings.mcpServers);
+        updateMcpSummary();
+      }
+      function renderMcpStatus(servers) {
+        var box = $("mcp-status"); if (!box) return;
+        box.innerHTML = "";
+        (servers || state.settings.mcpServers || []).forEach(function (s) {
+          var st = mcpState[s.url] || { connected: false, tools: [], status: "", error: "" };
+          var row = document.createElement("div"); row.className = "mcp-srv";
+          var head = document.createElement("div"); head.className = "mcp-srv-head";
+          var dot = document.createElement("span");
+          dot.className = "mcp-dot " + (st.status === "ok" ? "ok" : st.status === "error" ? "err" : st.status === "connecting" ? "busy" : "");
+          var urlEl = document.createElement("span"); urlEl.className = "mcp-label"; urlEl.textContent = s.url; urlEl.title = s.url;
+          var info = document.createElement("span"); info.className = "mcp-state";
+          if (st.status === "connecting") info.textContent = "connecting\u2026";
+          else if (st.status === "ok") info.textContent = "connected \u00b7 " + (st.tools ? st.tools.length : 0) + " tools";
+          else if (st.status === "error") info.textContent = "failed";
+          else info.textContent = "not connected";
+          head.appendChild(dot); head.appendChild(urlEl); head.appendChild(info);
+          row.appendChild(head);
+          if (st.error) { var e = document.createElement("div"); e.className = "mcp-err"; e.textContent = st.error; row.appendChild(e); }
+          if (st.tools && st.tools.length) {
+            var tw = document.createElement("div"); tw.className = "mcp-tools";
+            st.tools.forEach(function (t) {
+              var c = document.createElement("span"); c.className = "mcp-tool-chip";
+              c.textContent = t.name; c.title = t.description || "";
+              tw.appendChild(c);
+            });
+            row.appendChild(tw);
+          }
+          box.appendChild(row);
+        });
+      }
+      function updateMcpSummary() {
+        var el = $("mcp-summary"); if (!el) return;
+        var servers = state.settings.mcpServers || [];
+        var connected = 0, tools = 0;
+        servers.forEach(function (s) {
+          var st = mcpState[s.url];
+          if (st && st.connected) { connected++; tools += (st.tools ? st.tools.length : 0); }
+        });
+        el.textContent = connected + "/" + servers.length + " servers \u00b7 " + tools + " tools";
       }
 
       // =========================================================
@@ -788,78 +1042,137 @@
       }
 
       function runCompletion(conv) {
+        setBusy(true);
+        runToolLoop(conv, 0);
+      }
+
+      // One assistant turn per call; recurses while the model requests tools.
+      function runToolLoop(conv, depth) {
+        if (depth > 8) {
+          toast("Stopped after 8 tool rounds.");
+          finalizeLoop();
+          return;
+        }
         var assistant = { role: "assistant", content: "", reasoning: "", model: conv.model || state.settings.model, truncated: false };
         conv.messages.push(assistant);
         renderMessages();
-        setBusy(true);
-        abortCtrl = new AbortController();
-        var finished = false;
 
-        fetch("/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "authorization": state.settings.apiKey ? "Bearer " + state.settings.apiKey : ""
-          },
-          body: JSON.stringify(buildBody(conv)),
-          signal: abortCtrl.signal
-        }).then(function (r) {
-          if (!r.ok || !r.body) {
-            return r.text().then(function (t) {
-              assistant.content = "**Request failed (" + r.status + ").**\n\n```\n" + (t || r.statusText).slice(0, 800) + "\n```";
-              finalize();
-              throw new Error("__stop__");
+        streamOnce(conv, assistant).then(function (toolCalls) {
+          if (toolCalls && toolCalls.length) {
+            assistant.toolCalls = toolCalls;
+            saveState(); renderMessages();
+            // Auto-execute every tool call against its MCP server, sequentially.
+            var seq = Promise.resolve();
+            toolCalls.forEach(function (tc) {
+              seq = seq.then(function () {
+                return execMcpTool(tc).then(function (result) {
+                  conv.messages.push({ role: "tool", toolCallId: tc.id, content: result });
+                }, function (err) {
+                  conv.messages.push({ role: "tool", toolCallId: tc.id, content: "Error: " + String((err && err.message) || err) });
+                });
+              });
             });
-          }
-          var reader = r.body.getReader();
-          var dec = new TextDecoder();
-          var buf = "";
-          var lastRender = 0;
-          function pump() {
-            return reader.read().then(function (chunk) {
-              if (chunk.done) { finalize(); return; }
-              buf += dec.decode(chunk.value, { stream: true });
-              var lines = buf.split("\n");
-              buf = lines.pop();
-              for (var i = 0; i < lines.length; i++) {
-                var line = lines[i].trim();
-                if (!line || line.indexOf("data:") !== 0) continue;
-                var data = line.slice(5).trim();
-                if (data === "[DONE]") { finished = true; break; }
-                var json; try { json = JSON.parse(data); } catch (e) { continue; }
-                var choice = json.choices && json.choices[0];
-                if (!choice) continue;
-                var d = choice.delta || {};
-                if (d.reasoning_content) assistant.reasoning += d.reasoning_content;
-                if (d.content) assistant.content += d.content;
-                if (choice.finish_reason === "length") assistant.truncated = true;
-              }
-              var now = Date.now();
-              if (now - lastRender > 33) { lastRender = now; updateStreamingDom(assistant, false); }
-              if (finished) { finalize(); return; }
-              return pump();
+            seq.then(function () {
+              saveState(); renderMessages(); scrollBottom(true);
+              runToolLoop(conv, depth + 1);   // feed results back to the model
             });
-          }
-          return pump().then(function () { if (!finished && !assistant.content && !assistant.reasoning) { assistant.content = "_(empty response)_"; updateStreamingDom(assistant, true); } });
-        }).catch(function (e) {
-          if (e && e.message === "__stop__") return;
-          if (e && e.name === "AbortError") {
-            assistant.content += "\n\n_\u2026stopped._";
-            updateStreamingDom(assistant, true);
           } else {
-            assistant.content = "**Error:** " + escapeHtml(String((e && e.message) || e));
-            updateStreamingDom(assistant, true);
+            finalizeLoop();
           }
-          finalize();
         });
 
-        function finalize() {
-          updateStreamingDom(assistant, true);
+        function finalizeLoop() {
           setBusy(false);
           abortCtrl = null;
           saveState();
           renderSidebar();
         }
+      }
+
+      // Stream one completion. Resolves to an array of accumulated tool calls
+      // (empty/null when the model just replied with text).
+      function streamOnce(conv, assistant) {
+        return new Promise(function (resolve) {
+          abortCtrl = new AbortController();
+          var toolAccum = {};     // index -> {id, name, arguments}
+          var finished = false;
+
+          fetch("/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "authorization": state.settings.apiKey ? "Bearer " + state.settings.apiKey : "",
+            },
+            body: JSON.stringify(buildBody(conv)),
+            signal: abortCtrl.signal,
+          }).then(function (r) {
+            if (!r.ok || !r.body) {
+              return r.text().then(function (t) {
+                assistant.content = "**Request failed (" + r.status + ").**\n\n```\n" + (t || r.statusText).slice(0, 800) + "\n```";
+                updateStreamingDom(assistant, true);
+                resolve(null);
+                throw new Error("__stop__");
+              });
+            }
+            var reader = r.body.getReader();
+            var dec = new TextDecoder();
+            var buf = "";
+            var lastRender = 0;
+            function pump() {
+              return reader.read().then(function (chunk) {
+                if (chunk.done) { return; }
+                buf += dec.decode(chunk.value, { stream: true });
+                var lines = buf.split("\n");
+                buf = lines.pop();
+                for (var i = 0; i < lines.length; i++) {
+                  var line = lines[i].trim();
+                  if (!line || line.indexOf("data:") !== 0) continue;
+                  var data = line.slice(5).trim();
+                  if (data === "[DONE]") { finished = true; break; }
+                  var json; try { json = JSON.parse(data); } catch (e) { continue; }
+                  var choice = json.choices && json.choices[0];
+                  if (!choice) continue;
+                  var d = choice.delta || {};
+                  if (d.reasoning_content) assistant.reasoning += d.reasoning_content;
+                  if (d.content) assistant.content += d.content;
+                  if (d.tool_calls) {
+                    d.tool_calls.forEach(function (tc) {
+                      var idx = tc.index || 0;
+                      var slot = toolAccum[idx] = toolAccum[idx] || { id: "", name: "", arguments: "" };
+                      if (tc.id) slot.id = tc.id;
+                      if (tc.function) {
+                        if (tc.function.name) slot.name = tc.function.name;
+                        if (tc.function.arguments) slot.arguments += tc.function.arguments;
+                      }
+                    });
+                  }
+                  if (choice.finish_reason === "length") assistant.truncated = true;
+                }
+                var now = Date.now();
+                if (now - lastRender > 33) { lastRender = now; updateStreamingDom(assistant, false); }
+                if (finished) { return; }
+                return pump();
+              });
+            }
+            return pump().then(function () {
+              updateStreamingDom(assistant, true);
+              var tcs = Object.keys(toolAccum).map(function (k) { return toolAccum[k]; }).filter(function (t) { return t.id && t.name; });
+              if (!assistant.content && !assistant.reasoning && !tcs.length) {
+                assistant.content = "_(empty response)_"; updateStreamingDom(assistant, true);
+              }
+              resolve(tcs.length ? tcs : null);
+            });
+          }).catch(function (e) {
+            if (e && e.message === "__stop__") return;
+            if (e && e.name === "AbortError") {
+              assistant.content += "\n\n_\u2026stopped._"; updateStreamingDom(assistant, true);
+            } else {
+              assistant.content = "**Error:** " + escapeHtml(String((e && e.message) || e));
+              updateStreamingDom(assistant, true);
+            }
+            resolve(null);
+          });
+        });
       }
 
       function updateStreamingDom(assistant, done) {
@@ -941,7 +1254,7 @@
       // =========================================================
       // settings modal
       // =========================================================
-      function openSettings() { syncSettingsForm(); overlay.classList.add("open"); }
+      function openSettings() { syncSettingsForm(); renderMcpStatus(state.settings.mcpServers); updateMcpSummary(); overlay.classList.add("open"); }
       function closeSettings() { overlay.classList.remove("open"); }
       function syncSettingsForm() {
         var s = state.settings;
@@ -951,9 +1264,11 @@
         $("s-topp").value = s.topP; $("s-topp-val").textContent = Number(s.topP).toFixed(2);
         $("s-maxtok").value = s.maxTokens;
         $("s-dosample").checked = s.doSample;
+        $("s-mcpenable").checked = s.mcpEnabled !== false;
         $("s-mcp").value = (s.mcpServers || []).map(function (m) {
-          return m.transport === "streamable-http" || !m.transport ? m.label + " " + m.url : m.label + " " + m.url + " " + m.transport;
+          return m.authKey ? (m.url + "," + m.authKey) : m.url;
         }).join("\n");
+        $("s-cors").value = s.mcpCorsProxy || "";
         $("s-enter").checked = s.enterToSend;
         $("banner").style.display = s.apiKey ? "none" : "block";
         $("banner").textContent = "No proxy API key set. If your proxy requires one, requests will return 401.";
@@ -966,10 +1281,14 @@
         s.topP = parseFloat($("s-topp").value);
         s.maxTokens = parseInt($("s-maxtok").value, 10) || 4096;
         s.doSample = $("s-dosample").checked;
+        s.mcpEnabled = $("s-mcpenable").checked;
         s.mcpServers = $("s-mcp").value.split("\n").map(function (ln) {
-          var p = ln.trim().split(/\s+/); if (!p[0]) return null;
-          return { label: p[0], url: p[1] || "", transport: p[2] || "streamable-http" };
+          var parts = ln.trim().split(",");
+          var url = (parts[0] || "").trim();
+          if (!url) return null;
+          return { url: url, authKey: (parts[1] || "").trim() };
         }).filter(Boolean);
+        s.mcpCorsProxy = $("s-cors").value.trim();
         s.enterToSend = $("s-enter").checked;
         saveState();
       }
@@ -1001,6 +1320,8 @@
         saveState(); applyTheme();
       };
       $("btn-menu").onclick = function () { sidebar.classList.toggle("collapsed"); };
+      $("btn-mcp-connect").onclick = connectAllMcp;
+      $("btn-mcp-disconnect").onclick = disconnectMcp;
       overlay.onclick = function (e) { if (e.target === overlay) closeSettings(); };
 
       $("s-temp").addEventListener("input", function () { $("s-temp-val").textContent = parseFloat($("s-temp").value).toFixed(2); });
