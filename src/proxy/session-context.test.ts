@@ -18,7 +18,7 @@ const BASE_CONFIG: ProxyConfig = {
   defaultModel: "glm-4.6",
   models: ["glm-4.6"],
   identity: {
-    appVersion: "3.2.2",
+    appVersion: "3.3.3",
     sourceTitle: "zcode",
     refererOrigin: "https://zcode.z.ai",
   },

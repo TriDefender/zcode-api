@@ -145,7 +145,7 @@ multi-session autosave (localStorage). Open Settings (⚙) to configure.
 | `provider` | `ZCODE_PROVIDER` | `zai` | Upstream provider |
 | `plan` | — | `coding-plan` | Plan tier: `coding-plan` (direct upstream) or `start-plan` (zcode.z.ai gateway + JWT + captcha) |
 | `providers.<p>.credential` | — | — | Per-provider credential override (else uses `auth.apiKey`) |
-| `identity.appVersion` | `ZCODE_APP_VERSION` | `3.2.2` | `User-Agent: ZCode/{version}` |
+| `identity.appVersion` | `ZCODE_APP_VERSION` | `3.3.3` | `User-Agent: ZCode/{version}` |
 | `identity.sourceTitle` | `ZCODE_SOURCE_TITLE` | `cli` | `X-Title: Z Code@{title}` |
 | `identity.refererOrigin` | `ZCODE_REFERER_ORIGIN` | `https://zcode.z.ai` | `HTTP-Referer` URL |
 | config file path | `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file to load on `serve` |
