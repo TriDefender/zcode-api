@@ -137,7 +137,7 @@ function requestTraceContext(req: Request, body: string | undefined): ExplicitTr
     requestId: firstHeader(req.headers, ["x-request-id"]) ?? bodyTrace.requestId,
     traceId: firstHeader(req.headers, ["x-zcode-trace-id"]) ?? bodyTrace.traceId,
     queryId: firstHeader(req.headers, ["x-query-id"]) ?? bodyTrace.queryId,
-    sessionId: firstHeader(req.headers, ["x-opencode-session", "x-session-id", "x-parent-session-id", "helicone-session-id"])
+    sessionId: firstHeader(req.headers, ["x-opencode-session", "x-claude-code-session-id", "x-session-id", "x-parent-session-id", "helicone-session-id"])
       ?? bodyTrace.sessionId,
   };
 }

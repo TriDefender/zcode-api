@@ -56,6 +56,19 @@ describe("client session resolver", () => {
     expect(result.upstreamSessionId).toBe("subagent_agent_worker_1");
   });
 
+  it("accepts Claude Code session headers case-insensitively", () => {
+    const resolver = createClientSessionResolver();
+    const body = JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "Hi" }] });
+    const result = resolver.resolve(makeReq(body, {
+      "X-Claude-Code-Session-Id": "  claude_session_1  ",
+    }), body, "anthropic", "glm-4.6", CFG);
+
+    expect(result.source).toBe("explicit");
+    expect(result.confidence).toBe(1);
+    expect(result.sessionId).toBe("claude_session_1");
+    expect(result.upstreamSessionId).toBe("claude_session_1");
+  });
+
   it("keeps existing snake_case metadata session fallbacks", () => {
     const resolver = createClientSessionResolver();
     const body = JSON.stringify({
