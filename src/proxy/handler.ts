@@ -16,6 +16,7 @@ import { getProvider } from "../provider/providers.js";
 import { buildUpstreamHeaderPairs, buildUpstreamRequest, type UpstreamHeaderPair } from "./upstream.js";
 import { sendOrderedUpstreamRequest } from "./ordered-transport.js";
 import { transformRequestBody } from "./body-transformer.js";
+import { isKnownTextOnlyModel, isUnsupportedImageError, stripImageUrlsFromOpenAIBodyString } from "./media-sanitizer.js";
 import { type ClientSessionResult } from "./client-session.js";
 import { resolveSessionContext } from "./session-context.js";
 import { detectCaptchaChallenge, getCaptchaToken, invalidateCaptchaToken, RETRY_HEADERS } from "./captcha.js";
@@ -89,6 +90,9 @@ export async function proxyRequest(
   const translateAnthropicToOpenAI = format === "anthropic";
   const translateOpenAIToAnthropic = false;
   const upstreamFormat: Format = "openai";
+  // Flipped to true once the reactive media fallback has run, so the image-strip
+  // retry fires at most once per request.
+  let mediaRetried = false;
   const clientSession = resolveSessionContext({ clientReq, body, upstreamFormat, model: meta.model, config });
   if (debug && clientSession) {
     const shortSession = clientSession.sessionId ? clientSession.sessionId.slice(0, 10) : "-";
@@ -108,9 +112,19 @@ export async function proxyRequest(
     if (debug) debugLine(reqId, `translated Anthropic→OpenAI (bytes=${upstreamBody?.length ?? 0})`);
   }
 
-  const transformedBody = transformRequestBody(upstreamBody, { format: upstreamFormat, userId: startPlan ? undefined : cred.userId, startPlan });
+  let transformedBody = transformRequestBody(upstreamBody, { format: upstreamFormat, userId: startPlan ? undefined : cred.userId, startPlan });
   if (debug && transformedBody !== upstreamBody) {
     debugLine(reqId, `body transformed (upstreamFormat=${upstreamFormat}, startPlan=${startPlan}, bytes=${transformedBody?.length ?? 0})`);
+  }
+  // Preventive media fallback: text-only GLM models reject `image_url` content
+  // blocks with code 1210, so strip them before the first attempt when the
+  // routed model is known to be text-only.
+  if (isKnownTextOnlyModel(meta.model)) {
+    const stripped = stripImageUrlsFromOpenAIBodyString(transformedBody);
+    if (stripped.replaced > 0) {
+      transformedBody = stripped.body;
+      if (debug) debugLine(reqId, `media prevention: stripped ${stripped.replaced} image block(s) for text-only model ${meta.model}`);
+    }
   }
 
   let captchaHeaders: Record<string, string> | undefined;
@@ -183,6 +197,26 @@ export async function proxyRequest(
     }
   }
 
+  // Reactive media fallback (Anthropic clients only): when the upstream rejects
+  // an image block, strip the offending blocks and retry once on the same
+  // upstream. Only translated clients run this — passthrough clients must not
+  // have their response body consumed by error inspection.
+  let lastErrBody = "";
+  if (translateAnthropicToOpenAI) {
+    while (!upstreamResp.ok) {
+      lastErrBody = await upstreamResp.text().catch(() => "");
+      if (mediaRetried || !isUnsupportedImageError(upstreamResp.status, lastErrBody)) break;
+      const stripped = stripImageUrlsFromOpenAIBodyString(transformedBody);
+      if (stripped.replaced === 0) break;
+      mediaRetried = true;
+      if (debug) debugLine(reqId, `media fallback: stripped ${stripped.replaced} image block(s) after upstream ${upstreamResp.status}, retrying`);
+      upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, captchaHeaders, clientSession);
+      upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, stripped.body, config.identity, config.plan, captchaHeaders, clientSession);
+      upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, stripped.body, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl);
+      if (debug) debugLine(reqId, `← media retry ${upstreamResp.status} ${upstreamResp.statusText}`);
+    }
+  }
+
   const isSSE = upstreamResp.headers.get("content-type")?.includes("text/event-stream") ?? false;
 
   if (translateOpenAIToAnthropic) {
@@ -202,9 +236,10 @@ export async function proxyRequest(
 
   if (translateAnthropicToOpenAI) {
     if (!upstreamResp.ok) {
-      const errBody = await upstreamResp.text().catch(() => "");
+      // lastErrBody was already captured by the media-fallback loop above; the
+      // body stream has been consumed, so reading it again here would yield "".
       printRow(reqId, format, meta, 502, started, headersAt, 0, 0, 0);
-      return errorResponse(502, "translation_failed", `upstream returned ${upstreamResp.status}: ${errBody.slice(0, 200)}`);
+      return errorResponse(502, "translation_failed", `upstream returned ${upstreamResp.status}: ${lastErrBody.slice(0, 200)}`);
     }
     if (isSSE && upstreamResp.body) {
       const translated = openaiSseToAnthropicSse(upstreamResp.body, meta.model);
