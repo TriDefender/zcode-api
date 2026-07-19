@@ -133,9 +133,13 @@ function applyAnthropicUserId(body: Record<string, unknown>, userId: string): bo
 /**
  * start-plan: prepend ZCode gateway system blocks. The gateway rejects
  * requests without these identity blocks with 3012 "method not allowed".
+ * Forwards `body.model` so `buildStartPlanSystem` can append the dynamic
+ * "You are powered by the model named ${model}." block (matches bundle 3.3.6
+ * `buildEnvInfoSection` behavior when `envInfo.currentModel` is set).
  */
 function applyStartPlanSystem(body: Record<string, unknown>): boolean {
-  body.system = buildStartPlanSystem(body.system);
+  const model = typeof body.model === "string" ? body.model : undefined;
+  body.system = buildStartPlanSystem(body.system, model);
   return true;
 }
 
@@ -143,7 +147,8 @@ function applyStartPlanOpenAISystem(body: Record<string, unknown>): boolean {
   const messages = body.messages;
   if (!Array.isArray(messages)) return false;
 
-  const official = buildStartPlanSystem(undefined).map((block) => ({
+  const model = typeof body.model === "string" ? body.model : undefined;
+  const official = buildStartPlanSystem(undefined, model).map((block) => ({
     role: "system",
     content: typeof block === "object" && block !== null && "text" in block ? String(block.text) : "",
   }));

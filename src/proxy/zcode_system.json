@@ -15,7 +15,7 @@
   },
   {
     "type": "text",
-    "text": "# Environment\nYou have been invoked in the following environment:\n- Primary working directory: unknown\n- Is a git repository: unknown\n- Platform: unknown\n- Shell: unknown\n- OS Version: unknown",
+    "text": "# Environment\nYou have been invoked in the following environment:\n- Primary working directory: unknown\n- Is a git repository: no\n- Platform: unknown\n- Shell: unknown\n- OS Version: unknown",
     "cache_control": {
       "type": "ephemeral"
     }
