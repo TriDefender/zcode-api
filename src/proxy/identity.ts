@@ -60,12 +60,15 @@ function normalizeOsCategory(platform: NodeJS.Platform): string {
 }
 
 function buildRuntimePlatformHeaders(): Record<string, string> {
-  const platform = normalizePrintableHeaderValue(process.platform);
-  const arch = normalizePrintableHeaderValue(os.arch());
-  const release = normalizePrintableHeaderValue(os.release());
+  // Env overrides (ZCODE_IDENTITY_PLATFORM/ARCH/RELEASE) let the Android entry
+  // emit desktop-Linux identity headers without changing this module.
+  const platform = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform);
+  const arch = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH ?? os.arch());
+  const release = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE ?? os.release());
+  const platformForCategory = (process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform) as NodeJS.Platform;
   return {
     ...(platform && arch ? { "X-Platform": `${platform}-${arch}` } : {}),
-    "X-Os-Category": normalizeOsCategory(process.platform),
+    "X-Os-Category": normalizeOsCategory(platformForCategory),
     ...(release ? { "X-Os-Version": release } : {}),
   };
 }

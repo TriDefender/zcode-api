@@ -5,9 +5,9 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { loadConfig } from "./config/loader.js";
 import { AuthManager } from "./auth/manager.js";
-import { startServer } from "./server/server.js";
+import { startServer, type ProxyServer } from "./server/server.js";
 
-let proxyServer: ReturnType<typeof Bun.serve>;
+let proxyServer: ProxyServer;
 let mockUpstreamServer: ReturnType<typeof Bun.serve>;
 let proxyPort: number;
 let mockPort: number;
@@ -17,7 +17,7 @@ function findFreePort(): number {
   return 18000 + Math.floor(Math.random() * 1000);
 }
 
-beforeAll(() => {
+beforeAll(async () => {
   mockPort = findFreePort();
   proxyPort = findFreePort();
 
@@ -194,7 +194,7 @@ beforeAll(() => {
     apiKey: "integrationTestKey.integrationTestSecret",
   });
 
-  proxyServer = startServer({ config, auth });
+  proxyServer = await startServer({ config, auth });
 });
 
 afterAll(() => {

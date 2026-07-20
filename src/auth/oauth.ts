@@ -125,9 +125,15 @@ export abstract class AuthCodeOAuthClient {
   /**
    * Start the localhost callback server and return the authorize URL.
    * Call `waitForCallback()` (or `authorize()`) afterwards, then `close()`.
+   *
+   * The bind port is `0` (OS-assigned random) unless the env var
+   * `ZCODE_OAUTH_CALLBACK_PORT` is set, in which case that exact port is used.
+   * The Android entry sets the env var so the WebView redirect URL is
+   * predictable across launches.
    */
   start(): Promise<{ authorizeUrl: string; callbackUrl: string; state: string }> {
     const state = randomBytes(32).toString("hex");
+    const requestedPort = Number(process.env.ZCODE_OAUTH_CALLBACK_PORT ?? 0) || 0;
 
     return new Promise((resolve, reject) => {
       this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
@@ -135,7 +141,7 @@ export abstract class AuthCodeOAuthClient {
       });
 
       this.server.on("error", reject);
-      this.server.listen(0, "127.0.0.1", () => {
+      this.server.listen(requestedPort, "127.0.0.1", () => {
         const addr = this.server!.address();
         if (!addr || typeof addr !== "object") {
           reject(new Error("Failed to bind localhost callback server"));

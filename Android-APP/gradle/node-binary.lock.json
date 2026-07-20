@@ -1,0 +1,68 @@
+{
+  "_comment": "Pinned Node.js runtime + Termux shared-library dependencies for the Android APK. Captured 2026-07-20 from https://packages.termux.dev/apt/termux-main/dists/stable/main/binary-aarch64/Packages.gz",
+  "node": {
+    "package": "nodejs-lts",
+    "version": "24.17.0",
+    "url": "https://packages.termux.dev/apt/termux-main/pool/main/n/nodejs-lts/nodejs-lts_24.17.0_aarch64.deb",
+    "innerExe": "data/data/com.termux/files/usr/bin/node",
+    "bundledAs": "libnode.so",
+    "sha256": "391428ee751dd1e960c8d3fbe02f7c2c18bb2b20a226d55ac920364e0bb51604",
+    "size_bytes": 45170680,
+    "needed": [
+      "libz.so.1", "libcares.so", "libsqlite3.so", "libcrypto.so.3", "libssl.so.3",
+      "libicui18n.so.78", "libicuuc.so.78", "libc.so", "libm.so", "libdl.so", "libc++_shared.so"
+    ],
+    "transitive_needed": ["libicudata.so.78"]
+  },
+  "deps": {
+    "libc++": {
+      "package": "libc++",
+      "version": "29",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libc/libc++/libc++_29_aarch64.deb",
+      "sha256": "bb9f12113c137aa0e8513bb51cc49fe77a5ce3ca39ab9e92c57d228ecdf00222",
+      "sonames": ["libc++_shared.so"],
+      "bundledAs": ["libc++_shared.so"]
+    },
+    "openssl": {
+      "package": "openssl",
+      "version": "1:3.6.3",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/o/openssl/openssl_1:3.6.3_aarch64.deb",
+      "sha256": "86760e9ce736f463236f2c15b1eb3a3fdcfc5778d0fd7077a917448dcc90f3aa",
+      "sonames": ["libssl.so.3", "libcrypto.so.3"],
+      "bundledAs": ["libssl.so", "libcrypto.so"]
+    },
+    "c-ares": {
+      "package": "c-ares",
+      "version": "1.34.8",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/c/c-ares/c-ares_1.34.8_aarch64.deb",
+      "sha256": "7681fc23e822d7988ba8b2adf3468f93ae68f724dda365cff1385096a9fa87e6",
+      "sonames": ["libcares.so"],
+      "bundledAs": ["libcares.so"]
+    },
+    "libicu": {
+      "package": "libicu",
+      "version": "78.3",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libi/libicu/libicu_78.3_aarch64.deb",
+      "sha256": "f536403f65a08fe0df6e7304184e902d54def77d5c3bd5edfd9109d57601d276",
+      "sonames": ["libicui18n.so.78", "libicuuc.so.78", "libicudata.so.78"],
+      "bundledAs": ["libicui18n.so", "libicuuc.so", "libicudata.so"]
+    },
+    "libsqlite": {
+      "package": "libsqlite",
+      "version": "3.53.3",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libs/libsqlite/libsqlite_3.53.3_aarch64.deb",
+      "sha256": "147365c5633b571bea063ab6c27022577fca89d73e99a7607030602b0166eded",
+      "sonames": ["libsqlite3.so"],
+      "bundledAs": ["libsqlite3.so"]
+    },
+    "zlib": {
+      "package": "zlib",
+      "version": "1.3.2",
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/z/zlib/zlib_1.3.2_aarch64.deb",
+      "sha256": "75e7d0af17fcc3b40004309fdc00a1ddb9ae08346dce5e269902c34ac3966ac9",
+      "sonames": ["libz.so.1"],
+      "bundledAs": ["libz.so"]
+    }
+  },
+  "_soname_rename_note": "AGP only packages files matching *.so; versioned soname suffixes (.so.1, .so.3, .so.78) must be stripped from the filename. The DT_SONAME field embedded in each ELF preserves the runtime soname, so the dynamic linker still resolves DT_NEEDED correctly."
+}

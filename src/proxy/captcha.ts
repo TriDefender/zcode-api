@@ -28,7 +28,14 @@
  */
 import { JSDOM, ResourceLoader, VirtualConsole } from "jsdom";
 import type { FetchOptions } from "jsdom";
-import ALIYUN_SDK_LOCAL from "./AliyunCaptcha.js.txt" with { type: "text" };
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+declare const __dirname: string | undefined;
+
+const CAPTCHA_MODULE_DIR = typeof __dirname !== "undefined" ? __dirname : dirname(fileURLToPath(import.meta.url));
+const ALIYUN_SDK_LOCAL = readFileSync(join(CAPTCHA_MODULE_DIR, "AliyunCaptcha.js.txt"), "utf-8");
 
 const CAPTCHA_HEADER = "x-aliyun-captcha-verify-param";
 const REGION_HEADER = "x-aliyun-captcha-verify-region";
