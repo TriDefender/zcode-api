@@ -18,7 +18,20 @@ import { sendOrderedUpstreamRequest } from "./ordered-transport.js";
 import { transformRequestBody } from "./body-transformer.js";
 import { type ClientSessionResult } from "./client-session.js";
 import { resolveSessionContext } from "./session-context.js";
-import { detectCaptchaChallenge, getCaptchaToken, invalidateCaptchaToken, RETRY_HEADERS } from "./captcha.js";
+import { gzipSync } from "node:zlib";
+
+// captcha.ts is loaded lazily inside the `startPlan` branch (only path that
+// touches it). Combined with `--external:jsdom` in the esbuild Android bundle,
+// this keeps jsdom's ~15 MB source out of the v1 Android bundle and prevents
+// Node from eagerly evaluating the static `import { JSDOM } from "jsdom"` at
+// startup. Desktop Bun keeps the same code path; the dynamic import resolves
+// synchronously enough on Bun's warm cache.
+type CaptchaModule = typeof import("./captcha.js");
+let captchaModule: CaptchaModule | null = null;
+async function loadCaptcha(): Promise<CaptchaModule> {
+  if (!captchaModule) captchaModule = await import("./captcha.js");
+  return captchaModule;
+}
 import { translateRequestOpenAIToAnthropic, translateResponseAnthropicToOpenAI } from "../translator/openai-to-anthropic.js";
 import { translateRequestAnthropicToOpenAI, translateResponseOpenAIToAnthropic } from "../translator/anthropic-to-openai.js";
 import { anthropicSseToOpenaiSse, openaiSseToAnthropicSse } from "../translator/sse-translator.js";
@@ -116,8 +129,9 @@ export async function proxyRequest(
   let captchaHeaders: Record<string, string> | undefined;
   if (startPlan) {
     try {
-      const token = await getCaptchaToken(config.identity.appVersion);
-      captchaHeaders = { [RETRY_HEADERS.PARAM]: token.verifyParam, [RETRY_HEADERS.REGION]: token.region };
+      const captcha = await loadCaptcha();
+      const token = await captcha.getCaptchaToken(config.identity.appVersion);
+      captchaHeaders = { [captcha.RETRY_HEADERS.PARAM]: token.verifyParam, [captcha.RETRY_HEADERS.REGION]: token.region };
     } catch {
       // Will solve on 403 fallback below
     }
@@ -154,19 +168,21 @@ export async function proxyRequest(
     return errorResponse(401, "start_plan_jwt_invalid", "Start-plan JWT was rejected. Re-run: zcode-proxy auth login");
   }
 
-  // start-plan: on explicit captcha challenge, force re-solve and retry once
-  const captchaChallenge = startPlan ? detectCaptchaChallenge(upstreamResp) : null;
-  if (captchaChallenge) {
+  // start-plan: on explicit captcha challenge, force re-solve and retry once.
+  // `&& captcha` looks redundant but is required for TS null-narrowing.
+  const captcha = startPlan ? await loadCaptcha() : null;
+  const captchaChallenge = captcha ? captcha.detectCaptchaChallenge(upstreamResp) : null;
+  if (captchaChallenge && captcha) {
     if (debug) debugLine(reqId, "captcha challenge — re-solving and retrying once");
     try { upstreamResp.body?.cancel(); } catch {}
     console.log(`${reqId} captcha challenge, re-solving...`);
-    invalidateCaptchaToken();
+    captcha.invalidateCaptchaToken();
     try {
-      const fresh = await getCaptchaToken(config.identity.appVersion);
+      const fresh = await captcha.getCaptchaToken(config.identity.appVersion);
       console.log(`${reqId} captcha re-solved (token ${fresh.verifyParam.length} chars), retrying...`);
       const retryHeaders = {
-        [RETRY_HEADERS.PARAM]: fresh.verifyParam,
-        [RETRY_HEADERS.REGION]: fresh.region,
+        [captcha.RETRY_HEADERS.PARAM]: fresh.verifyParam,
+        [captcha.RETRY_HEADERS.REGION]: fresh.region,
       };
       upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, retryHeaders, clientSession);
       upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, retryHeaders, clientSession);
@@ -363,7 +379,7 @@ async function translatedBatchResponse(
   if (clientAcceptsGzip(clientReq)) {
     respHeaders.set("content-encoding", "gzip");
     printRow(reqId, format, meta, upstream.status, started, headersAt, openaiResp.usage?.completion_tokens ?? 0, 0, 0);
-    return new Response(Bun.gzipSync(payload), {
+    return new Response(gzipSync(payload), {
       status: upstream.status,
       headers: respHeaders,
     });
@@ -406,7 +422,7 @@ async function translatedOpenAIToAnthropicBatchResponse(
   if (clientAcceptsGzip(clientReq)) {
     respHeaders.set("content-encoding", "gzip");
     printRow(reqId, format, meta, upstream.status, started, headersAt, anthropicResp.usage.output_tokens, 0, 0);
-    return new Response(Bun.gzipSync(payload), {
+    return new Response(gzipSync(payload), {
       status: upstream.status,
       headers: respHeaders,
     });
@@ -551,9 +567,12 @@ function previewBody(body: string): string {
   return `${flat.slice(0, DEBUG_BODY_PREVIEW)}…(${flat.length} bytes total)`;
 }
 
+const COMPACT_LOG = process.env.ZCODE_LOG_FORMAT === "compact";
+
 function printHeader(): void {
   if (headerPrinted) return;
   headerPrinted = true;
+  if (COMPACT_LOG) return;
   console.log(
     "| #    | Time       | Fmt | Model       | Mode   | Stat |    TTFB |   Tok |  tok/s |   Total |",
   );
@@ -574,9 +593,28 @@ function printRow(
   streamEndAt: number,
 ): void {
   printHeader();
-  const ts = localTime(started);
   const tag = format === "anthropic" ? "ANT" : "OAI";
   const mode = meta.stream ? "stream" : "batch";
+
+  if (COMPACT_LOG) {
+    const ttfbMs = headersAt - started;
+    const totalMs = streamEndAt > started ? streamEndAt - started : ttfbMs;
+    const ttfbStr = fmtMs(ttfbMs);
+    const tokStr = tokens > 0 ? `${tokens}tok` : "";
+    const tpsStr = avgTps > 0 ? `${avgTps.toFixed(0)}t/s` : "";
+    const parts = [reqId, tag, meta.model, String(status), mode];
+    if (meta.stream && streamEndAt > started) {
+      parts.push(`${ttfbStr}→${fmtMs(totalMs)}`);
+    } else {
+      parts.push(ttfbStr);
+    }
+    if (tokStr) parts.push(tokStr);
+    if (tpsStr) parts.push(tpsStr);
+    console.log(parts.join(" "));
+    return;
+  }
+
+  const ts = localTime(started);
   const ttfb = `${headersAt - started}ms`;
   const total = streamEndAt > started ? `${streamEndAt - started}ms` : "-";
   const tok = tokens > 0 ? String(tokens) : "-";
@@ -584,6 +622,12 @@ function printRow(
   console.log(
     `| ${reqId.padEnd(4)} | ${ts.padEnd(10)} | ${tag} | ${meta.model.padEnd(11)} | ${mode.padEnd(6)} | ${String(status).padStart(4)} | ${ttfb.padStart(7)} | ${tok.padStart(5)} | ${tps.padStart(6)} | ${total.padStart(7)} |`,
   );
+}
+
+function fmtMs(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${Math.floor(ms / 60_000)}m${Math.floor((ms % 60_000) / 1000)}s`;
 }
 
 function observeStream(

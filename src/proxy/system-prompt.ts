@@ -17,7 +17,15 @@
  * @see zcode_system.json
  * @see PROMPT.md
  */
-import blocks from "./zcode_system.json" with { type: "json" };
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+declare const __dirname: string | undefined;
+
+const MODULE_DIR = typeof __dirname !== "undefined" ? __dirname : dirname(fileURLToPath(import.meta.url));
+const BLOCKS_PATH = join(MODULE_DIR, "zcode_system.json");
+const blocks = JSON.parse(readFileSync(BLOCKS_PATH, "utf-8"));
 
 interface SystemBlock {
   type: "text";

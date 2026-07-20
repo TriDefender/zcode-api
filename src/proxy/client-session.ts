@@ -4,6 +4,7 @@
  * The resolver stores only hashes and generated IDs. It deliberately avoids
  * prompt markers, response mutation, and full prompt persistence.
  */
+import nodeCrypto from "node:crypto";
 import type { Format } from "../translator/types.js";
 import type { ClientIdentityConfig } from "../config/types.js";
 
@@ -252,9 +253,7 @@ function hashJson(value: unknown): string {
 }
 
 function hashString(value: string): string {
-  const bytes = new TextEncoder().encode(value);
-  const digest = new Bun.CryptoHasher("sha256").update(bytes).digest("hex");
-  return String(digest);
+  return nodeCrypto.createHash("sha256").update(value, "utf-8").digest("hex");
 }
 
 function stableStringify(value: unknown): string {

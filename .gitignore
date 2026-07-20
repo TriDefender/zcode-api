@@ -11,3 +11,10 @@ dist/
 /zcode-proxy-linux-*
 /zcode-proxy-darwin-*
 .idea/
+
+# Android build artifacts
+Android-APP/app/build/
+Android-APP/.gradle/
+Android-APP/.kotlin/
+Android-APP/local.properties
+Android-APP/gradlew.bat

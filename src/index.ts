@@ -5,21 +5,25 @@
 import { loadConfig } from "./config/loader.js";
 import { EXAMPLE_CONFIG_YAML } from "./config/template.js";
 import { AuthManager } from "./auth/manager.js";
-import { startServer } from "./server/server.js";
+import { startServer, type ProxyServer } from "./server/server.js";
+import { startControlListener, LogBuffer, type ControlState } from "./android/control.js";
 import { loadCredential, saveCredential, clearCredential, getStorePath } from "./auth/store.js";
 import { ZaiOAuthClient, BigmodelOAuthClient } from "./auth/oauth.js";
 import { KeyResolver } from "./auth/resolver.js";
 import type { Credential } from "./auth/types.js";
 import type { ProviderId } from "./provider/types.js";
 import type { ProxyConfig } from "./config/types.js";
+import { parse, stringify } from "yaml";
 import { spawn } from "node:child_process";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
+declare const __filename: string | undefined;
+
 const VERSION = "2.2.0";
 
-if (import.meta.main) main();
+if (require.main === module) main();
 
 export interface ServeArgs {
   configPath?: string;
@@ -41,12 +45,23 @@ export function parseServeArgs(args: string[]): ServeArgs {
   return { configPath, debug };
 }
 
-function main(): void {
+export function main(): void {
+  try {
+    runCli();
+  } catch (err) {
+    process.stderr.write(`zcode-proxy: uncaught error: ${(err as Error).stack ?? String(err)}\n`);
+    process.exit(1);
+  }
+}
+
+function runCli(): void {
   const args = process.argv.slice(2);
   const cmd = args[0] ?? "serve";
 
   if (cmd === "auth") {
     authCommand(args.slice(1));
+  } else if (cmd === "android") {
+    runAndroid();
   } else if (cmd === "serve" || cmd.endsWith(".yaml") || cmd.endsWith(".yml")) {
     const serveArgs = cmd === "serve"
       ? parseServeArgs(args.slice(1))
@@ -70,6 +85,7 @@ Usage:
   zcode-proxy serve [config.yaml]   Start the proxy server (default)
   zcode-proxy serve debug [config.yaml]
                                     Start with verbose per-request diagnostics
+  zcode-proxy android               Android entry: proxy + localhost control listener
   zcode-proxy auth login <provider> Login via OAuth (provider: zai | bigmodel)
   zcode-proxy auth login <provider> --import
                                     Import API key from ~/.zcode/v2/config.json
@@ -114,7 +130,7 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
 
   if (debug) printDebugBanner(config, path);
 
-  const server = startServer({ config, auth, debug });
+  const server = await startServer({ config, auth, debug });
   const url = `http://${server.hostname}:${server.port}`;
   console.log(`zcode-proxy listening on ${url}`);
   console.log(`  provider: ${config.provider}`);
@@ -126,12 +142,126 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   process.on("SIGINT", () => {
     console.log("\nShutting down...");
     server.stop(true);
-    process.exit(0);
   });
   process.on("SIGTERM", () => {
     server.stop(true);
-    process.exit(0);
   });
+}
+
+/**
+ * Android entry — starts the proxy plus a localhost control listener.
+ * Caller (Kotlin shell) must set env: ZCODE_CONTROL_PORT (control listener),
+ * ZCODE_OAUTH_CALLBACK_PORT (fixed OAuth callback port for WebView redirect).
+ */
+async function runAndroid(): Promise<void> {
+  const path = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
+  if (!existsSync(path)) {
+    writeFileSync(path, EXAMPLE_CONFIG_YAML, "utf-8");
+  }
+  const config = loadConfig(path);
+
+  const logBuffer = new LogBuffer();
+  const origLog = console.log;
+  const origErr = console.error;
+  const origWarn = console.warn;
+  console.log = (...args: unknown[]) => { logBuffer.push(args.join(" ")); origLog(...args); };
+  console.error = (...args: unknown[]) => { logBuffer.push("[error] " + args.join(" ")); origErr(...args); };
+  console.warn = (...args: unknown[]) => { logBuffer.push("[warn] " + args.join(" ")); origWarn(...args); };
+
+  let auth = new AuthManager({
+    mode: config.auth.mode,
+    provider: config.provider,
+    apiKey: config.auth.apiKey ?? config.providers[config.provider].credential,
+  });
+
+  const serverRef: { current: ProxyServer | null } = { current: null };
+
+  async function startProxy(): Promise<{ ok: true; port: number } | { ok: false; error: string }> {
+    if (serverRef.current) return { ok: false, error: "already_running" };
+    if (config.auth.mode === "oauth") {
+      const cred = await loadCredential().catch(() => null);
+      if (!cred) return { ok: false, error: "not_logged_in" };
+      auth.setOAuthCredential(cred);
+    }
+    try {
+      const s = await startServer({ config, auth });
+      serverRef.current = s;
+      console.log(`zcode-proxy listening on http://${s.hostname}:${s.port}`);
+      return { ok: true, port: s.port };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  async function stopProxy(): Promise<{ ok: true } | { ok: false; error: string }> {
+    const s = serverRef.current;
+    if (!s) return { ok: false, error: "not_running" };
+    try {
+      s.stop(false);
+      serverRef.current = null;
+      console.log("zcode-proxy stopped");
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  async function setConfig(changes: {
+    provider?: ProviderId;
+    plan?: "coding-plan" | "start-plan";
+  }): Promise<{ ok: true; provider: ProviderId; plan: "coding-plan" | "start-plan" } | { ok: false; error: string }> {
+    if (serverRef.current) return { ok: false, error: "stop_proxy_first" };
+    if (changes.provider) config.provider = changes.provider;
+    if (changes.plan) config.plan = changes.plan;
+    auth = new AuthManager({
+      mode: config.auth.mode,
+      provider: config.provider,
+      apiKey: config.auth.apiKey ?? config.providers[config.provider].credential,
+    });
+    updateConfigYaml(path, { provider: config.provider, plan: config.plan });
+    console.log(`config updated: provider=${config.provider} plan=${config.plan}`);
+    return { ok: true, provider: config.provider, plan: config.plan };
+  }
+
+  console.log("control listener ready; proxy stopped — use startProxy command to start");
+
+  const controlPort = Number(process.env.ZCODE_CONTROL_PORT ?? 0) || 0;
+  const controlState: ControlState = {
+    provider: config.provider,
+    plan: config.plan,
+    proxyPort: serverRef.current?.port ?? 0,
+  };
+  const controlListener = await startControlListener({
+    port: controlPort,
+    state: controlState,
+    logBuffer,
+    onStartProxy: startProxy,
+    onStopProxy: stopProxy,
+    onSetConfig: setConfig,
+    onShutdown: async () => {
+      serverRef.current?.stop(true);
+    },
+  });
+
+  console.log(`control listener: 127.0.0.1:${controlPort}`);
+  console.log(`provider: ${config.provider}`);
+  console.log(`plan: ${config.plan}`);
+
+  process.on("SIGINT", () => {
+    void controlListener.close().then(() => serverRef.current?.stop(true));
+  });
+  process.on("SIGTERM", () => {
+    void controlListener.close().then(() => serverRef.current?.stop(true));
+  });
+}
+
+/** Targeted YAML update of top-level `provider` and `plan` keys. */
+function updateConfigYaml(path: string, fields: { provider: ProviderId; plan: "coding-plan" | "start-plan" }): void {
+  const raw = readFileSync(path, "utf-8");
+  const parsed = parse(raw) ?? {};
+  parsed.provider = fields.provider;
+  parsed.plan = fields.plan;
+  writeFileSync(path, stringify(parsed), "utf-8");
 }
 
 function printDebugBanner(config: ProxyConfig, path: string): void {
