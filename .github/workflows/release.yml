@@ -17,6 +17,7 @@ jobs:
     outputs:
       tag: ${{ steps.check.outputs.tag }}
       version: ${{ steps.check.outputs.version }}
+      versionCode: ${{ steps.check.outputs.versionCode }}
       is_prerelease: ${{ steps.check.outputs.is_prerelease }}
     steps:
       - name: Validate tag and determine prerelease
@@ -35,6 +36,11 @@ jobs:
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          # Android versionCode must be a monotonic integer; derive from semver
+          # major.minor.patch (prerelease suffix stripped). Formula supports
+          # minor/patch up to 99 each — sufficient for this project.
+          VERSION_CODE=$(printf '%s' "${TAG#v}" | awk -F. '{ gsub(/[^0-9].*/, "", $3); print ($1 * 10000) + ($2 * 100) + $3 }')
+          echo "versionCode=${VERSION_CODE}" >> "$GITHUB_OUTPUT"
           if printf '%s' "$TAG" | grep -qiE 'alpha|beta|rc'; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
           else
@@ -122,6 +128,9 @@ jobs:
         run: chmod +x gradlew
       - name: Build debug APK
         working-directory: Android-APP
+        env:
+          ORG_GRADLE_PROJECT_androidApp_versionCode: ${{ needs.detect.outputs.versionCode }}
+          ORG_GRADLE_PROJECT_androidApp_versionName: ${{ needs.detect.outputs.tag }}
         run: ./gradlew :app:assembleDebug --no-daemon
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
@@ -144,6 +153,8 @@ jobs:
           ORG_GRADLE_PROJECT_androidSigning_storePassword: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ORG_GRADLE_PROJECT_androidSigning_keyAlias: ${{ secrets.ANDROID_KEY_ALIAS }}
           ORG_GRADLE_PROJECT_androidSigning_keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ORG_GRADLE_PROJECT_androidApp_versionCode: ${{ needs.detect.outputs.versionCode }}
+          ORG_GRADLE_PROJECT_androidApp_versionName: ${{ needs.detect.outputs.tag }}
         run: ./gradlew :app:assembleRelease --no-daemon
       - name: Upload release APK
         if: env.KEYSTORE_BASE64 != ''

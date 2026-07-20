@@ -12,8 +12,8 @@ android {
         applicationId = "com.zcode.proxy"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "3.0.0-android"
+        versionCode = providers.gradleProperty("androidApp.versionCode").orNull?.toIntOrNull() ?: 1
+        versionName = providers.gradleProperty("androidApp.versionName").orNull ?: "3.0.0-android"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
