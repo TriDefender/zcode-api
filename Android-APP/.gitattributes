@@ -1,0 +1,18 @@
+# Auto-detect text files
+* text=auto
+
+# Shell scripts must use LF
+*.sh text eol=lf
+gradlew text eol=lf
+
+# Windows scripts use CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files
+*.jar binary
+*.so binary
+*.png binary
+*.jpg binary
+*.zip binary
+*.apk binary
