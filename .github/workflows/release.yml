@@ -51,7 +51,7 @@ jobs:
     needs: detect
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1"
@@ -80,7 +80,7 @@ jobs:
           - target: bun-darwin-arm64
             outfile: zcode-proxy-darwin-arm64
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1"
@@ -92,7 +92,7 @@ jobs:
           --define "require.resolve=undefined"
           src/index.ts --outfile ${{ matrix.outfile }}
       - name: Upload artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.outfile }}
           path: ${{ matrix.outfile }}
@@ -102,7 +102,7 @@ jobs:
     needs: [detect, verify]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1"
@@ -127,7 +127,7 @@ jobs:
           ORG_GRADLE_PROJECT_androidApp_versionName: ${{ needs.detect.outputs.tag }}
         run: ./gradlew :app:assembleDebug --no-daemon
       - name: Upload debug APK
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: app-debug.apk
           path: Android-APP/app/build/outputs/apk/debug/app-debug.apk
@@ -154,7 +154,7 @@ jobs:
         if: env.KEYSTORE_BASE64 != ''
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: app-release.apk
           path: Android-APP/app/build/outputs/apk/release/app-release.apk
@@ -166,7 +166,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Create and push tag
         env:
           TAG: ${{ needs.detect.outputs.tag }}
@@ -174,7 +174,7 @@ jobs:
           git tag "$TAG"
           git push origin "$TAG"
       - name: Download artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -194,7 +194,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Compute lowercase image name
         id: img
         run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER@L}/zcode-proxy" >> "$GITHUB_OUTPUT"

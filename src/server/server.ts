@@ -116,7 +116,7 @@ export function startServer(opts: ServerOptions): Promise<ProxyServer> {
     const onClientClose = (): void => {
       if (!res.writableEnded) abortController.abort();
     };
-    req.on("close", onClientClose);
+    res.on("close", onClientClose);
     try {
       const webReq = nodeReqToWebRequest(req, abortController.signal);
       const resp = await handler(webReq).then((r) => addCorsHeaders(r));
