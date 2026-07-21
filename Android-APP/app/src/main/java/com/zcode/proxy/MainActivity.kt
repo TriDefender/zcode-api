@@ -150,11 +150,16 @@ class MainActivity : ComponentActivity() {
                         val r = controlClient?.startOAuth(provider)
                         if (r != null && r.optBoolean("ok", false)) {
                             val url = r.optString("authorizeUrl")
-                            val intent = Intent(this@MainActivity, OAuthWebViewActivity::class.java).apply {
-                                putExtra(OAuthWebViewActivity.EXTRA_AUTHORIZE_URL, url)
-                                putExtra(OAuthWebViewActivity.EXTRA_PROVIDER, provider)
+                            val customTabsIntent = androidx.browser.customtabs.CustomTabsIntent.Builder()
+                                .setShowTitle(true)
+                                .build()
+                            try {
+                                customTabsIntent.launchUrl(this@MainActivity, android.net.Uri.parse(url))
+                            } catch (e: Exception) {
+                                val fallback = android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                                fallback.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                try { startActivity(fallback) } catch (_: Exception) {}
                             }
-                            startActivity(intent)
                         } else {
                             toast = "startOAuth failed: ${r?.optString("error") ?: "unreachable"}"
                         }

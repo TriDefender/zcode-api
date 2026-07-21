@@ -25,10 +25,6 @@
             </intent-filter>
         </activity>
 
-        <activity
-            android:name=".OAuthWebViewActivity"
-            android:exported="false" />
-
         <service
             android:name=".ServerService"
             android:foregroundServiceType="dataSync"

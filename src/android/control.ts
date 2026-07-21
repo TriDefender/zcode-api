@@ -255,6 +255,21 @@ async function dispatch(
         callbackUrl: started.callbackUrl,
         state: started.state,
       };
+      client.waitForCallback().then(async (code) => {
+        try {
+          const { accessToken, userId, jwt } = await client.exchangeCode(code, started.callbackUrl, started.state);
+          const resolver = new KeyResolver();
+          const cred: Credential = await resolver.resolveCodingPlanCredential(accessToken, cmd.provider, userId);
+          if (jwt) cred.jwt = jwt;
+          await saveCredential(cred);
+          console.log(`OAuth completed for ${cmd.provider} via browser callback`);
+        } catch (err) {
+          console.error(`OAuth auto-complete failed: ${(err as Error).message}`);
+        } finally {
+          await client.close().catch(() => {});
+          if (state.activeOauth?.state === started.state) state.activeOauth = undefined;
+        }
+      }).catch(() => {});
       return {
         ok: true,
         event: "oauthUrl",
