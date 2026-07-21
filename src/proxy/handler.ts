@@ -149,7 +149,7 @@ export async function proxyRequest(
 
   let upstreamResp: Response;
   try {
-    upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl);
+    upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal);
   } catch (err) {
     if (debug) debugError(reqId, "upstream_unreachable", (err as Error).message);
     printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
@@ -253,6 +253,7 @@ async function sendUpstreamRequest(
   translateMode: boolean,
   useOrderedTransport: boolean,
   fetchImpl: typeof fetch,
+  abortSignal?: AbortSignal,
 ): Promise<Response> {
   if (useOrderedTransport) {
     return sendOrderedUpstreamRequest({
@@ -263,7 +264,9 @@ async function sendUpstreamRequest(
       decompress: translateMode,
     });
   }
-  return fetchImpl(upstreamReq, translateMode ? {} : { decompress: false });
+  const fetchOpts: RequestInit & { decompress?: boolean } = translateMode ? {} : { decompress: false };
+  if (abortSignal) fetchOpts.signal = abortSignal;
+  return fetchImpl(upstreamReq, fetchOpts);
 }
 
 /** Read the request body as a string, returning undefined for empty bodies. */

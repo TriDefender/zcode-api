@@ -9606,7 +9606,7 @@ async function proxyRequest(clientReq, format, opts) {
   }
   let upstreamResp;
   try {
-    upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl);
+    upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal);
   } catch (err) {
     if (debug) debugError(reqId, "upstream_unreachable", err.message);
     printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
@@ -9694,7 +9694,7 @@ function shouldUseOrderedTransport(config, clientSession, hasCustomFetchImpl) {
   if (hasCustomFetchImpl) return false;
   return clientSession?.action === "enforce" || clientSession?.source === "explicit";
 }
-async function sendUpstreamRequest(upstreamReq, headerPairs, body, translateMode, useOrderedTransport, fetchImpl) {
+async function sendUpstreamRequest(upstreamReq, headerPairs, body, translateMode, useOrderedTransport, fetchImpl, abortSignal) {
   if (useOrderedTransport) {
     return sendOrderedUpstreamRequest({
       url: upstreamReq.url,
@@ -9704,7 +9704,9 @@ async function sendUpstreamRequest(upstreamReq, headerPairs, body, translateMode
       decompress: translateMode
     });
   }
-  return fetchImpl(upstreamReq, translateMode ? {} : { decompress: false });
+  const fetchOpts = translateMode ? {} : { decompress: false };
+  if (abortSignal) fetchOpts.signal = abortSignal;
+  return fetchImpl(upstreamReq, fetchOpts);
 }
 async function readBody(req) {
   if (req.method === "GET" || req.method === "HEAD") return void 0;
@@ -10126,11 +10128,17 @@ function startServer(opts) {
   const handler = createFetchHandler(opts);
   const { port: requestedPort, host } = opts.config.server;
   const server = (0, import_node_http.createServer)(async (req, res) => {
+    const abortController = new AbortController();
+    const onClientClose = () => {
+      if (!res.writableEnded) abortController.abort();
+    };
+    req.on("close", onClientClose);
     try {
-      const webReq = nodeReqToWebRequest(req);
+      const webReq = nodeReqToWebRequest(req, abortController.signal);
       const resp = await handler(webReq).then((r) => addCorsHeaders(r));
-      await writeWebResponseToNodeResp(resp, res);
+      await writeWebResponseToNodeResp(resp, res, abortController.signal);
     } catch (err) {
+      if (abortController.signal.aborted) return;
       if (!res.headersSent) {
         res.writeHead(500, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { type: "internal_error", message: err.message } }));
@@ -10162,7 +10170,7 @@ function startServer(opts) {
     });
   });
 }
-function nodeReqToWebRequest(req) {
+function nodeReqToWebRequest(req, signal) {
   const headers = new Headers();
   for (const [key, val] of Object.entries(req.headers)) {
     if (val == null) continue;
@@ -10176,18 +10184,19 @@ function nodeReqToWebRequest(req) {
   const url = `http://${host}${req.url ?? "/"}`;
   const method = req.method ?? "GET";
   if (method === "GET" || method === "HEAD") {
-    return new Request(url, { method, headers });
+    return new Request(url, { method, headers, signal });
   }
   const bodyStream = import_node_stream.Readable.toWeb(req);
   const init = {
     method,
     headers,
     body: bodyStream,
-    duplex: "half"
+    duplex: "half",
+    signal
   };
   return new Request(url, init);
 }
-async function writeWebResponseToNodeResp(resp, res) {
+async function writeWebResponseToNodeResp(resp, res, abortSignal) {
   const headers = {};
   resp.headers.forEach((value, key) => {
     const existing = headers[key];
@@ -10205,6 +10214,11 @@ async function writeWebResponseToNodeResp(resp, res) {
     return;
   }
   const reader = resp.body.getReader();
+  const onAbort = () => {
+    reader.cancel().catch(() => {
+    });
+  };
+  abortSignal?.addEventListener("abort", onAbort);
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -10215,10 +10229,19 @@ async function writeWebResponseToNodeResp(resp, res) {
     }
     res.end();
   } catch (err) {
-    try {
-      res.destroy(err);
-    } catch {
+    if (abortSignal?.aborted) {
+      try {
+        res.end();
+      } catch {
+      }
+    } else {
+      try {
+        res.destroy(err);
+      } catch {
+      }
     }
+  } finally {
+    abortSignal?.removeEventListener("abort", onAbort);
   }
 }
 function checkProxyKey(authHeader, expected) {

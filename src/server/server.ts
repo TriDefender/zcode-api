@@ -112,11 +112,17 @@ export function startServer(opts: ServerOptions): Promise<ProxyServer> {
   const { port: requestedPort, host } = opts.config.server;
 
   const server: Server = createServer(async (req, res) => {
+    const abortController = new AbortController();
+    const onClientClose = (): void => {
+      if (!res.writableEnded) abortController.abort();
+    };
+    req.on("close", onClientClose);
     try {
-      const webReq = nodeReqToWebRequest(req);
+      const webReq = nodeReqToWebRequest(req, abortController.signal);
       const resp = await handler(webReq).then((r) => addCorsHeaders(r));
-      await writeWebResponseToNodeResp(resp, res);
+      await writeWebResponseToNodeResp(resp, res, abortController.signal);
     } catch (err) {
+      if (abortController.signal.aborted) return;
       if (!res.headersSent) {
         res.writeHead(500, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { type: "internal_error", message: (err as Error).message } }));
@@ -152,7 +158,7 @@ export function startServer(opts: ServerOptions): Promise<ProxyServer> {
 }
 
 /** Convert a Node.js IncomingMessage to a Web API Request. */
-function nodeReqToWebRequest(req: import("node:http").IncomingMessage): Request {
+function nodeReqToWebRequest(req: import("node:http").IncomingMessage, signal?: AbortSignal): Request {
   const headers = new Headers();
   for (const [key, val] of Object.entries(req.headers)) {
     if (val == null) continue;
@@ -167,7 +173,7 @@ function nodeReqToWebRequest(req: import("node:http").IncomingMessage): Request 
   const method = req.method ?? "GET";
 
   if (method === "GET" || method === "HEAD") {
-    return new Request(url, { method, headers });
+    return new Request(url, { method, headers, signal });
   }
 
   // Cast: Node's ReadableStream type ≠ Web ReadableStream type at the type layer, but `Readable.toWeb` returns a spec-compliant stream at runtime.
@@ -177,12 +183,13 @@ function nodeReqToWebRequest(req: import("node:http").IncomingMessage): Request 
     headers,
     body: bodyStream,
     duplex: "half",
+    signal,
   };
   return new Request(url, init);
 }
 
 /** Write a Web API Response to a Node.js ServerResponse. */
-async function writeWebResponseToNodeResp(resp: Response, res: import("node:http").ServerResponse): Promise<void> {
+async function writeWebResponseToNodeResp(resp: Response, res: import("node:http").ServerResponse, abortSignal?: AbortSignal): Promise<void> {
   const headers: Record<string, string | string[]> = {};
   resp.headers.forEach((value, key) => {
     const existing = headers[key];
@@ -203,6 +210,8 @@ async function writeWebResponseToNodeResp(resp: Response, res: import("node:http
   }
 
   const reader = resp.body.getReader();
+  const onAbort = (): void => { reader.cancel().catch(() => {}); };
+  abortSignal?.addEventListener("abort", onAbort);
   try {
     while (true) {
       const { done, value } = await reader.read();
@@ -213,7 +222,13 @@ async function writeWebResponseToNodeResp(resp: Response, res: import("node:http
     }
     res.end();
   } catch (err) {
-    try { res.destroy(err as Error); } catch {}
+    if (abortSignal?.aborted) {
+      try { res.end(); } catch {}
+    } else {
+      try { res.destroy(err as Error); } catch {}
+    }
+  } finally {
+    abortSignal?.removeEventListener("abort", onAbort);
   }
 }
 
