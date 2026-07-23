@@ -1,28 +1,87 @@
 /**
- * Bundled config template — loaded via `readFileSync` so the same code runs on
- * Bun (source mode) and Node (esbuild CJS bundle for Android).
+ * Bundled config template — inlined as a string constant so it compiles into
+ * the single-file binary (`bun build --compile`) without requiring a sidecar
+ * `config.example.yaml` file at runtime.
  *
- * Source of truth: config.example.yaml at repo root. The bundler (Bun
- * `--compile` for desktop, esbuild for Android) keeps the .yaml file alongside
- * the emitted JS so the runtime path resolves correctly.
+ * Source of truth: config.example.yaml at repo root. When editing the schema,
+ * update BOTH this file AND config.example.yaml to keep them in sync.
  */
-import { readFileSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 
-declare const __dirname: string | undefined;
+export const EXAMPLE_CONFIG_YAML: string = `server:
+  port: 8080
+  host: "0.0.0.0"
 
-const MODULE_DIR = typeof __dirname !== "undefined" ? __dirname : dirname(fileURLToPath(import.meta.url));
+auth:
+  # "apikey"  = use a pre-obtained API key directly
+  # "oauth"   = use OAuth login flow (run \`bun run src/index.ts auth login\` first)
+  mode: apikey
 
-// Two layouts: Android bundle (asset is sibling of server.cjs) and desktop
-// source mode (asset is at repo root, two levels up from src/config/).
-const TEMPLATE_PATH = [
-  join(MODULE_DIR, "config.example.yaml"),
-  join(MODULE_DIR, "..", "..", "config.example.yaml"),
-].find(existsSync);
+  # For apikey mode:
+  #   Z.AI:     "yourApiKey.yourSecretKey"
+  #   Bigmodel: "yourApiKey"
+  apiKey: "YOUR_API_KEY_HERE"
 
-if (!TEMPLATE_PATH) {
-  throw new Error(`config.example.yaml not found alongside ${MODULE_DIR} or two levels up`);
-}
+  # Key that clients must provide to use the proxy.
+  # Set to null/omit to disable client auth.
+  proxyApiKey: "your-proxy-secret"
 
-export const EXAMPLE_CONFIG_YAML: string = readFileSync(TEMPLATE_PATH, "utf-8");
+  # For oauth mode (path to stored credentials from login flow):
+  # oauthCredentialsPath: "~/.zcode-proxy/credentials.json"
+
+# Which upstream provider to use: "zai" or "bigmodel"
+provider: zai
+
+# Which plan tier to use:
+#   "coding-plan" (default) — direct upstream endpoints, permanent API key
+#   "start-plan"            — routes through zcode.z.ai with JWT auth (requires \`auth login\`)
+plan: coding-plan
+
+providers:
+  zai:
+    anthropicBase: "https://api.z.ai/api/anthropic"
+    openaiBase: "https://api.z.ai/api/coding/paas/v4"
+  bigmodel:
+    anthropicBase: "https://open.bigmodel.cn/api/anthropic"
+    openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4"
+
+defaultModel: glm-4.6
+
+models:
+  - glm-4.5-air
+  - glm-4.6
+  - glm-4.6v
+  - glm-4.7
+  - glm-5
+  - glm-5-turbo
+  - glm-5v-turbo
+  - glm-5.1
+  - glm-5.2
+
+# Configurable identity headers injected on every upstream request to mimic the
+# ZCode desktop client (User-Agent, X-ZCode-App-Version, X-Title,
+# X-ZCode-Agent, HTTP-Referer). Runtime platform headers (X-Platform,
+# X-Os-Category, X-Os-Version) are detected dynamically and are not configured
+# here. All fields below are optional; env vars override YAML, which overrides
+# defaults.
+identity:
+  # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
+  # Must be printable ASCII; non-conforming values fall back to the default.
+  # Default: "3.3.3" (current ZCode release). Override to match your real client.
+  appVersion: "3.3.3"
+  # X-Title suffix → "Z Code@{sourceTitle}". Default "cli".
+  sourceTitle: "cli"
+  # HTTP-Referer URL. Default "https://zcode.z.ai".
+  refererOrigin: "https://zcode.z.ai"
+
+# Local client-session inference for cache-affinity experiments.
+# "observe" (default) logs inferred sessions in debug mode but does not change
+# upstream x-session-id. "enforce" reuses a stable x-session-id for inferred
+# coding-plan sessions. "off" disables inference entirely.
+clientIdentity:
+  mode: observe
+  ttlSeconds: 900
+  maxSessions: 1024
+
+logging:
+  level: info
+`;

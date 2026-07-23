@@ -81,8 +81,16 @@ export async function loadCredential(): Promise<Credential | null> {
   const raw = readFileSync(STORE_FILE, "utf-8");
   const parsed = JSON.parse(raw);
   if (!parsed.encrypted) return null;
-  const json = await decrypt(parsed.encrypted);
-  return JSON.parse(json) as Credential;
+  try {
+    const json = await decrypt(parsed.encrypted);
+    return JSON.parse(json) as Credential;
+  } catch (e) {
+    // Stale/corrupt credential file — key derivation is machine-specific
+    // ({homedir}-{platform}-{arch}), so cross-machine copies or OS reinstalls
+    // produce undecryptable ciphertext. Silently treat as "not logged in".
+    console.warn(`Ignoring corrupted or stale credentials at ${STORE_FILE}: ${(e as Error).message}`);
+    return null;
+  }
 }
 
 export function clearCredential(): void {
