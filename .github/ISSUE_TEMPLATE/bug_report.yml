@@ -18,6 +18,8 @@ body:
         ```powershell
         $env:ZCODE_DUMP_UPSTREAM = "D:\zcodeplus\dumps\trace.jsonl"
         bun run src/index.ts serve debug config.yaml
+        #也可以直接跑exe，用下面这条：
+        .\zcode-proxy serve debug config.yaml
         ```
 
         每个 request 会产生 4 行 JSONL（client_in / upstream_out / upstream_in / upstream_stream_summary），按 `reqId` 配对。dump 自动脱敏 API key / JWT / proxy key，**但仍请检查一遍再粘贴**。
