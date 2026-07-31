@@ -36,6 +36,7 @@ import { translateRequestOpenAIToAnthropic, translateResponseAnthropicToOpenAI }
 import { translateRequestAnthropicToOpenAI, translateResponseOpenAIToAnthropic } from "../translator/anthropic-to-openai.js";
 import { anthropicSseToOpenaiSse, openaiSseToAnthropicSse } from "../translator/sse-translator.js";
 import type { OpenAIChatRequest, OpenAIChatResponse, AnthropicMessagesRequest, AnthropicMessagesResponse } from "../translator/types.js";
+import { dumpPhase, dumpHeaders, dumpBody, dumpEnabled } from "./dump.js";
 
 /** Options for the proxy handler. */
 export interface ProxyHandlerOptions {
@@ -81,6 +82,15 @@ export async function proxyRequest(
   const body = await readBody(clientReq);
 
   const meta = peekBody(body);
+
+  if (dumpEnabled()) {
+    dumpPhase(reqId, "client_in", {
+      method: clientReq.method,
+      url: clientReq.url,
+      headers: dumpHeaders(clientReq.headers),
+      body: dumpBody(body),
+    });
+  }
 
   const staticProvider = getProvider(config.provider);
   const provider = {
@@ -147,6 +157,19 @@ export async function proxyRequest(
     if (transformedBody) debugLine(reqId, `  body preview: ${previewBody(transformedBody)}`);
   }
 
+  if (dumpEnabled()) {
+    dumpPhase(reqId, "upstream_out", {
+      method: upstreamReq.method,
+      url: upstreamReq.url,
+      headers: dumpHeaders(upstreamReq.headers),
+      body: dumpBody(transformedBody),
+      upstreamFormat,
+      translateMode: translateOpenAIToAnthropic || translateAnthropicToOpenAI,
+      useOrderedTransport,
+      startPlan,
+    });
+  }
+
   let upstreamResp: Response;
   try {
     upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal);
@@ -160,6 +183,16 @@ export async function proxyRequest(
   if (debug) {
     debugLine(reqId, `← ${upstreamResp.status} ${upstreamResp.statusText}`);
     debugLine(reqId, `  ${formatResponseHeaders(upstreamResp.headers)}`);
+  }
+
+  if (dumpEnabled()) {
+    dumpPhase(reqId, "upstream_in", {
+      status: upstreamResp.status,
+      statusText: upstreamResp.statusText,
+      headers: dumpHeaders(upstreamResp.headers),
+      isSSE: upstreamResp.headers.get("content-type")?.includes("text/event-stream") ?? false,
+      ttfbMs: headersAt - started,
+    });
   }
 
   if (upstreamResp.status === 401 && startPlan) {
@@ -643,9 +676,12 @@ function observeStream(
   contentEncoding: string | null,
 ): void {
   const compressed = contentEncoding !== null;
+  const dumpOn = dumpEnabled();
   let tokens = 0;
   let sseBuffer = "";
   let firstChunkAt = 0;
+  let totalBytes = 0;
+  let firstBytesSample = "";
 
   function parseSse(text: string): void {
     for (const line of text.split("\n")) {
@@ -674,6 +710,12 @@ function observeStream(
         const { done, value } = await reader.read();
         if (done) break;
         if (firstChunkAt === 0) firstChunkAt = Date.now();
+        if (dumpOn && value) {
+          totalBytes += value.byteLength;
+          if (firstBytesSample.length < 4096) {
+            firstBytesSample += decoder.decode(value.slice(0, 4096 - firstBytesSample.length), { stream: true });
+          }
+        }
         if (!compressed) {
           sseBuffer += decoder.decode(value, { stream: true });
           const idx = sseBuffer.lastIndexOf("\n");
@@ -690,5 +732,17 @@ function observeStream(
     const totalMs = endAt - requestSentAt;
     const avgTps = tokens > 0 && totalMs > 0 ? tokens / (totalMs / 1000) : 0;
     printRow(reqId, format, meta, status, requestSentAt, requestSentAt + ttfbMs, tokens, avgTps, endAt);
+    if (dumpOn) {
+      dumpPhase(reqId, "upstream_stream_summary", {
+        status,
+        contentEncoding,
+        compressed,
+        totalBytes,
+        tokensObserved: tokens,
+        ttfbMs,
+        totalMs,
+        firstBytesSample: firstBytesSample.length > 0 ? firstBytesSample.slice(0, 4096) : "(empty stream)",
+      });
+    }
   })().catch(() => {});
 }
