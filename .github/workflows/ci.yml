@@ -1,0 +1,40 @@
+name: CI
+
+# Triggered on every PR (any target) and on every push to master so direct
+# commits are gated too. Required status checks (Settings → Branches →
+# Branch protection rules) make CI failures block merge.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref — keeps PR feedback fast and saves
+# CI minutes when a PR is force-pushed repeatedly.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Type check & tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Type check
+        run: bun x tsc --noEmit
+
+      - name: Run tests
+        run: bun test

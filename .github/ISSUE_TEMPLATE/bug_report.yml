@@ -1,0 +1,315 @@
+name: 🐛 Bug 报告
+description: 向 zcode-proxy 报告一个可复现的问题（502 / 200 空 body / 翻译错误 / 鉴权失败 等）
+title: "[Bug] "
+labels: ["bug", "needs-triage"]
+body:
+  # ---------- 前置确认 ----------
+  - type: markdown
+    attributes:
+      value: |
+        感谢你抽时间反馈问题！为了能快速定位，请先做以下三件事：
+
+        1. **升级到最新版**：旧版 bug 大多已修复，请先 `git pull`（源码）或重新下载 Release 二进制确认问题仍在。
+        2. **搜索现有 issue**：避免重复报告。
+        3. **打开 debug 模式复现一次**：`zcode-proxy serve debug config.yaml`，把日志贴到下面"诊断日志"一栏。
+
+        如果方便，强烈建议同时开启 body dump（比 debug 模式的 body 预览详细 10 倍）：
+
+        ```powershell
+        $env:ZCODE_DUMP_UPSTREAM = "D:\zcodeplus\dumps\trace.jsonl"
+        bun run src/index.ts serve debug config.yaml
+        ```
+
+        每个 request 会产生 4 行 JSONL（client_in / upstream_out / upstream_in / upstream_stream_summary），按 `reqId` 配对。dump 自动脱敏 API key / JWT / proxy key，**但仍请检查一遍再粘贴**。
+
+  - type: checkboxes
+    id: prerequisites
+    attributes:
+      label: 前置确认
+      description: 提交前请逐项确认
+      options:
+        - label: 我已在最新版本上复现（master 或最新 Release）
+          required: true
+        - label: 我已搜索过现有 issue（含已关闭的）
+          required: true
+        - label: 我已用 `serve debug` 模式复现过一次并保留了日志
+          required: true
+        - label: 我已确认粘贴内容里的 API key / JWT / proxy key 已脱敏
+          required: true
+
+  # ---------- 症状分类 ----------
+  - type: dropdown
+    id: symptom
+    attributes:
+      label: 问题症状
+      description: 选最贴近的一个；多个症状可在"补充说明"里列出
+      options:
+        - 502 upstream_unreachable（连不上上游 / DNS / TLS）
+        - 502 translation_failed（OpenAI<->Anthropic 翻译失败 / 上游 4xx/5xx）
+        - 200 但响应体为空 / 流提前结束
+        - 3012 / start-plan 拒绝（system_prompt 或指纹问题）
+        - 401 / start_plan_jwt_invalid（JWT 过期或被拒）
+        - 403 / captcha 验证失败（start-plan）
+        - 403 / 其他鉴权失败（coding-plan 的 api-key / Bearer）
+        - SSE 流解析错误（客户端报 JSON 解析失败 / 字段缺失）
+        - 字段顺序 / 格式可疑（不报错但行为异常）
+        - 翻译问题（reasoning/thinking、cache_control、tool_use 等丢失或错位）
+        - 启动 / 配置加载失败
+        - Android APK 问题（仅 Android）
+        - 其他（请在"补充说明"里描述）
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 一句话描述问题
+      description: 例如「Anthropic 客户端流式请求时，首个 delta 缺 role=assistant，客户端报错」
+      placeholder: "在这里写一句话总结"
+    validations:
+      required: true
+
+  # ---------- 环境信息 ----------
+  - type: markdown
+    attributes:
+      value: |
+        ## 环境信息
+
+  - type: input
+    id: version
+    attributes:
+      label: zcode-proxy 版本
+      description: 运行 `zcode-proxy version` 拿到的字符串；若是源码运行，写 commit hash
+      placeholder: "2.2.0 或 commit 57cfb30"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: 运行方式
+      options:
+        - Bun 源码运行（`bun run src/index.ts`）
+        - Bun 编译二进制（zcode-proxy.exe / linux-x64 / darwin-arm64 等）
+        - Android APK
+        - 其他
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统
+      options:
+        - Windows
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux x64
+        - Linux arm64
+        - Android
+    validations:
+      required: true
+
+  # ---------- 配置维度 ----------
+  - type: markdown
+    attributes:
+      value: |
+        ## 三大配置维度
+
+        zcode-proxy 的行为由这三件事决定，**全部必填**：
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider（上游服务商）
+      options:
+        - zai（Z.AI）
+        - bigmodel（智谱）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: plan
+    attributes:
+      label: Plan（计费层级）
+      description: 决定走哪条上游路径
+      options:
+        - coding-plan（直连上游，API key 鉴权）
+        - start-plan（zcode.z.ai 网关，JWT + captcha）
+    validations:
+      required: true
+
+  - type: dropdown
+    id: client_format
+    attributes:
+      label: 客户端请求格式
+      description: 客户端打到 zcode-proxy 的格式，**不是**上游格式
+      options:
+        - OpenAI（POST /v1/chat/completions）
+        - Anthropic（POST /v1/messages）
+    validations:
+      required: true
+
+  - type: input
+    id: client
+    attributes:
+      label: 客户端类型 + 版本
+      description: 哪个工具发的请求；如能附上一段最小请求示例更好
+      placeholder: "例如 Claude Code 1.2.3 / Cline 3.5 / curl 8.5 / Python openai 1.50 / @ai-sdk/openai-compatible"
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: 使用的模型
+      placeholder: "例如 glm-4.6 / glm-5.2 / glm-4.6v"
+    validations:
+      required: true
+
+  # ---------- 复现 ----------
+  - type: markdown
+    attributes:
+      value: |
+        ## 复现
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      description: 越具体越好，最好别人照着步骤能直接复现
+      placeholder: |
+        1. config.yaml 设置 provider: zai, plan: start-plan, auth: oauth
+        2. 启动：`bun run src/index.ts serve debug config.yaml`
+        3. 用 Claude Code 发一个普通对话请求：……（贴请求命令或客户端配置）
+        4. 上游返回 200，但 SSE 流到一半中断，客户端报……
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望行为
+      placeholder: "客户端应收到完整回复，无报错"
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      placeholder: "客户端报错 / 流提前结束 / 字段缺失 / ……"
+    validations:
+      required: true
+
+  # ---------- 诊断日志 ----------
+  - type: markdown
+    attributes:
+      value: |
+        ## 诊断日志（必填）
+
+        至少提供 `serve debug` 模式的日志。**强烈建议同时提供 `ZCODE_DUMP_UPSTREAM` 的 trace**，能直接看到 zcode-proxy 实际发什么 body、上游返回什么 headers / stream，定位效率提升 10 倍。
+
+        dump 文件每行是一个 JSON 对象，按 `reqId` 配对 4 个 phase：
+
+        ```
+        {"reqId":"#001","phase":"client_in",...}      ← 客户端打到 zcode-proxy 的原始请求
+        {"reqId":"#001","phase":"upstream_out",...}   ← zcode-proxy 实际发给上游的（核心）
+        {"reqId":"#001","phase":"upstream_in",...}    ← 上游响应 status + headers
+        {"reqId":"#001","phase":"upstream_stream_summary",...}  ← 流总字节 + 首 4KB 抽样
+        ```
+
+        > dump 已自动脱敏 `authorization` / `x-api-key` / `x-zcode-captcha-*` / `proxy-api-key`，但请你**再扫一遍**才粘贴。
+
+  - type: textarea
+    id: debug_log
+    attributes:
+      label: serve debug 模式日志
+      description: 必填。`zcode-proxy serve debug config.yaml` 输出的相关行（含 `→ POST` 和 `← 200/5xx`）
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: dump
+    attributes:
+      label: ZCODE_DUMP_UPSTREAM trace（强烈建议）
+      description: trace.jsonl 里出问题那 1-2 个请求的所有 phase 行（用 reqId 过滤后粘贴）。如果没开 dump，写"未开启"
+      render: json
+      placeholder: |
+        {"ts":"2026-07-31T13:00:00.000Z","reqId":"#001","phase":"client_in","method":"POST","url":"http://localhost:8080/v1/chat/completions","headers":{...},"body":{...}}
+        {"ts":"2026-07-31T13:00:00.100Z","reqId":"#001","phase":"upstream_out","method":"POST","url":"https://api.z.ai/api/coding/paas/v4/chat/completions","headers":{...},"body":{...},"upstreamFormat":"openai","translateMode":false,"startPlan":false}
+        {"ts":"2026-07-31T13:00:01.000Z","reqId":"#001","phase":"upstream_in","status":200,"statusText":"OK","headers":{...},"isSSE":true,"ttfbMs":900}
+        {"ts":"2026-07-31T13:00:05.000Z","reqId":"#001","phase":"upstream_stream_summary","status":200,"contentEncoding":null,"compressed":false,"totalBytes":12345,"tokensObserved":42,"firstBytesSample":"data: {...}\n\n"}
+
+  # ---------- 可选信息 ----------
+  - type: markdown
+    attributes:
+      value: |
+        ## 可选信息
+
+  - type: textarea
+    id: config
+    attributes:
+      label: config.yaml 关键片段（脱敏）
+      description: 只贴影响行为的字段（auth.mode / provider / plan / identity / clientIdentity 等）；**API key / proxy key / JWT 必须替换为 `<redacted>`**
+      render: yaml
+      placeholder: |
+        auth:
+          mode: apikey   # 或 oauth
+        provider: zai
+        plan: start-plan   # 或 coding-plan
+        identity:
+          appVersion: "3.3.3"
+          sourceTitle: cli
+          refererOrigin: https://zcode.z.ai
+        # clientIdentity:  # 仅在用了 session affinity 时贴
+        #   mode: observe
+
+  - type: dropdown
+    id: identity_mode
+    attributes:
+      label: 是否使用了 clientIdentity（session affinity）？
+      description: 这会影响是否走 ordered-transport（raw TCP 保序）路径
+      options:
+        - 未使用（默认 off）
+        - observe 模式
+        - enforce 模式（用 raw TCP）
+        - 不确定
+
+  - type: dropdown
+    id: first_time
+    attributes:
+      label: 这是首次出现还是偶发？
+      options:
+        - 首次出现
+        - 一直如此（每次都能复现）
+        - 偶发（提供触发条件）
+        - 升级到某版本后才出现
+
+  - type: input
+    id: regression_version
+    attributes:
+      label: 如果是回归，最后能正常工作的版本
+      placeholder: "例如 2.1.0 之前正常，2.2.0 开始有问题"
+
+  - type: textarea
+    id: context
+    attributes:
+      label: 其他补充信息
+      description: 客户端报错截图、相关 issue 链接、网络环境（公司代理/VPN/特殊 DNS）、上游响应原文等任何你觉得相关的信息
+
+  # ---------- 脱敏提醒 ----------
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        ⚠️ **再次检查脱敏**。提交前请确认：
+
+        - `auth.apiKey` / `providers.<p>.credential` → `<redacted>`
+        - `auth.proxyApiKey` → `<redacted>`
+        - dump 之外的客户端 raw 日志里 `Authorization: Bearer xxx` / `x-api-key: xxx` → `<redacted>`
+        - OAuth JWT / refresh token → `<redacted>`
+        - 公司内网域名 / IP（如走企业代理）→ `<redacted>`
