@@ -9,23 +9,12 @@
  */
 import { createServer, type Server } from "node:http";
 import { Readable } from "node:stream";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import webuiHtml from "./webui.txt" with { type: "text" };
 import type { ProxyConfig } from "../config/types.js";
 import type { AuthManager } from "../auth/manager.js";
 import { handleChatCompletions, handleListModels } from "./routes-openai.js";
 import { handleMessages } from "./routes-anthropic.js";
 import { errorResponse } from "../proxy/handler.js";
-
-declare const __dirname: string | undefined;
-
-const MODULE_DIR = typeof __dirname !== "undefined" ? __dirname : dirname(fileURLToPath(import.meta.url));
-// Web UI source, served at /webui WITHOUT the proxy API key gate (the page
-// must load to present the key input); the UI sends the key on its own
-// /v1/* calls. Asset lives next to this module so it resolves in both source
-// mode and the esbuild bundle.
-const webuiHtml = readFileSync(join(MODULE_DIR, "webui.txt"), "utf-8");
 
 interface ServerOptions {
   config: ProxyConfig;
