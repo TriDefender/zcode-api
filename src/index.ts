@@ -21,7 +21,7 @@ import { homedir } from "node:os";
 
 declare const __filename: string | undefined;
 
-const VERSION = "2.2.0";
+const VERSION = "2.6.0";
 
 if (require.main === module) main();
 

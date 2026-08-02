@@ -3,8 +3,9 @@
  * @see .omo/plans/zcode-proxy.md Task 6
  */
 import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { gzipSync } from "node:zlib";
 import { createServer } from "node:net";
-import { buildUpstreamRequest, buildUpstreamURL, buildAuthHeaders } from "./upstream.js";
+import { buildUpstreamRequest, buildUpstreamHeaderPairs, buildUpstreamURL, buildAuthHeaders } from "./upstream.js";
 import { sendOrderedUpstreamRequest } from "./ordered-transport.js";
 import { buildZcodeTraceHeaders } from "./trace-headers.js";
 import { proxyRequest, errorResponse, shouldUseOrderedTransport } from "./handler.js";
@@ -310,6 +311,29 @@ describe("sendOrderedUpstreamRequest", () => {
     })).rejects.toThrow(/Invalid upstream header name/);
   });
 });
+describe("buildUpstreamHeaderPairs — accept-encoding forwarding", () => {
+  it("forwards the client's accept-encoding when present (e.g. identity)", () => {
+    const req = makeClientReq("{}", { "accept-encoding": "identity" });
+    const pairs = buildUpstreamHeaderPairs(req, "openai", ZAI_CRED, IDENTITY);
+    const ae = pairs.find(([k]) => k === "accept-encoding");
+    expect(ae?.[1]).toBe("identity");
+  });
+
+  it("defaults to gzip when the client sent no accept-encoding", () => {
+    const req = makeClientReq("{}");
+    const pairs = buildUpstreamHeaderPairs(req, "openai", ZAI_CRED, IDENTITY);
+    const ae = pairs.find(([k]) => k === "accept-encoding");
+    expect(ae?.[1]).toBe("gzip");
+  });
+
+  it("forwards multi-value accept-encoding verbatim", () => {
+    const req = makeClientReq("{}", { "accept-encoding": "gzip, deflate, br" });
+    const pairs = buildUpstreamHeaderPairs(req, "openai", ZAI_CRED, IDENTITY);
+    const ae = pairs.find(([k]) => k === "accept-encoding");
+    expect(ae?.[1]).toBe("gzip, deflate, br");
+  });
+});
+
 describe("buildUpstreamRequest", () => {
   it("constructs full Anthropic request with correct URL + headers", async () => {
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
@@ -700,9 +724,25 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     expect(resp.headers.get("anthropic-ratelimit-tokens-reset")).toBe("2025-01-01T00:00:00Z");
   });
 
-  it("preserves upstream content-encoding when upstream sends it", async () => {
+  it("preserves upstream content-encoding when the client advertises gzip", async () => {
     const fetchMock = mock(async (): Promise<Response> => {
       return new Response(OPENAI_RESPONSE, {
+        status: 200,
+        headers: { "content-type": "application/json", "content-encoding": "gzip" },
+      });
+    });
+
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}', { "accept-encoding": "gzip" });
+
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    expect(resp.headers.get("content-encoding")).toBe("gzip");
+  });
+
+  it("decompresses upstream gzip body when the client did not advertise gzip", async () => {
+    const gzipped = gzipSync(new TextEncoder().encode(OPENAI_RESPONSE));
+    const fetchMock = mock(async (): Promise<Response> => {
+      return new Response(gzipped, {
         status: 200,
         headers: { "content-type": "application/json", "content-encoding": "gzip" },
       });
@@ -712,7 +752,9 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
-    expect(resp.headers.get("content-encoding")).toBe("gzip");
+    expect(resp.headers.get("content-encoding")).toBeNull();
+    const body = await resp.json();
+    expect(body.object).toBe("chat.completion");
   });
 
   it("forwards malformed JSON body to OpenAI-compatible upstream", async () => {

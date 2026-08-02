@@ -149,9 +149,13 @@ export function buildUpstreamHeaderPairs(
   extraHeaders?: Record<string, string>,
   clientSession?: UpstreamClientSession,
 ): UpstreamHeaderPair[] {
+  // Forward the client's Accept-Encoding so the upstream compresses only when
+  // the client can decode it. Hardcoding "gzip" broke clients (e.g. some Tauri
+  // builds) that send `accept-encoding: identity` and cannot auto-decompress.
+  const clientAcceptEncoding = clientReq.headers.get("accept-encoding") ?? "gzip";
   return [
     ["content-type", "application/json"],
-    ["accept-encoding", "gzip"],
+    ["accept-encoding", clientAcceptEncoding],
     ...Object.entries(collectPassthroughHeaders(clientReq)),
     ...Object.entries(buildAuthHeaders(format, cred, identity, plan, clientSession)),
     ...Object.entries(extraHeaders ?? {}),

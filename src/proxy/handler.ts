@@ -267,11 +267,11 @@ export async function proxyRequest(
   if (isSSE && upstreamResp.body) {
     const [clientBody, statsBody] = upstreamResp.body.tee();
     observeStream(reqId, format, meta, upstreamResp.status, started, statsBody, upstreamResp.headers.get("content-encoding"));
-    return passthroughResponse(upstreamResp, clientBody);
+    return passthroughResponse(upstreamResp, clientAcceptsGzip(clientReq), clientBody);
   }
 
   printRow(reqId, format, meta, upstreamResp.status, started, headersAt, 0, 0, 0);
-  return passthroughResponse(upstreamResp);
+  return passthroughResponse(upstreamResp, clientAcceptsGzip(clientReq));
 }
 
 export function shouldUseOrderedTransport(config: ProxyConfig, clientSession: ClientSessionResult | undefined, hasCustomFetchImpl: boolean): boolean {
@@ -312,9 +312,22 @@ async function readBody(req: Request): Promise<string | undefined> {
 
 /**
  * Create a passthrough response that streams the upstream body to the client.
- * Preserves status, headers, and body stream.
+ * Preserves status and the allowlisted headers, and honors the client's
+ * `Accept-Encoding` for gzip.
+ *
+ * The upstream request always advertises `accept-encoding: gzip` (see
+ * `buildUpstreamHeaderPairs`), so the upstream typically returns a gzip body.
+ * If THIS client did not advertise gzip, we decompress before forwarding and
+ * drop the now-mismatched `content-encoding`/`content-length` headers —
+ * otherwise clients whose HTTP stack does not auto-decompress (e.g. some
+ * Tauri-based clients) receive raw gzip bytes and fail to parse the JSON
+ * body with "non-JSON body" errors despite a 200 status.
  */
-function passthroughResponse(upstream: Response, body?: ReadableStream<Uint8Array>): Response {
+function passthroughResponse(
+  upstream: Response,
+  clientAcceptsGzip: boolean,
+  body?: ReadableStream<Uint8Array>,
+): Response {
   const headers = new Headers();
   const forwardHeaders = [
     "content-type",
@@ -334,7 +347,21 @@ function passthroughResponse(upstream: Response, body?: ReadableStream<Uint8Arra
     if (v) headers.set(h, v);
   }
 
-  return new Response(body ?? upstream.body, {
+  const upstreamEncoding = headers.get("content-encoding")?.toLowerCase() ?? "";
+  const source = body ?? upstream.body;
+  if (upstreamEncoding.includes("gzip") && !clientAcceptsGzip && source) {
+    const gunzip = new DecompressionStream("gzip") as unknown as ReadableWritablePair<Uint8Array, Uint8Array>;
+    const decompressed = source.pipeThrough(gunzip);
+    headers.delete("content-encoding");
+    headers.delete("content-length");
+    return new Response(decompressed, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers,
+    });
+  }
+
+  return new Response(source, {
     status: upstream.status,
     statusText: upstream.statusText,
     headers,
