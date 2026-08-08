@@ -107,7 +107,12 @@ export function translateResponseOpenAIToAnthropic(
   }
 
   if (choice?.message?.content) {
-    content.push({ type: "text", text: choice.message.content });
+    const textContent = typeof choice.message.content === "string"
+      ? choice.message.content
+      : Array.isArray(choice.message.content)
+        ? choice.message.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("")
+        : "";
+    if (textContent) content.push({ type: "text", text: textContent });
   }
 
   if (choice?.message?.tool_calls) {

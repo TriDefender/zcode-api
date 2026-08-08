@@ -66,6 +66,8 @@ export interface OpenAIUsage {
   /** Anthropic-style direct cache fields (some compatible upstreams emit these). */
   cache_read_input_tokens?: number;
   cache_creation_input_tokens?: number;
+  /** Standard OpenAI reasoning-token breakdown (mirrors `prompt_tokens_details`). */
+  output_tokens_details?: { reasoning_tokens?: number; audio_tokens?: number };
 }
 
 /** Tool definition in OpenAI format. */
@@ -94,6 +96,7 @@ export interface OpenAIChatRequest {
   user?: string;
   tools?: OpenAIToolDefinition[];
   tool_choice?: "none" | "auto" | "required" | { type: "function"; function: { name: string | undefined } };
+  parallel_tool_calls?: boolean;
   response_format?: { type: "text" | "json_object" };
   seed?: number;
   reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
@@ -108,19 +111,16 @@ export interface OpenAIChatResponse {
   model: string;
   choices: OpenAIChoice[];
   usage?: OpenAIUsage;
+  status?: number;
+  statusText?: string;
+  headers?: Record<string, string>;
 }
 
-/** Choice in a non-streaming response. */
-interface OpenAIChoice {
-  index: number;
-  message: {
-    role: "assistant";
-    content: string | null;
-    tool_calls?: OpenAIToolCall[];
-    /** Reasoning / chain-of-thought content (GLM, DeepSeek-R1, o1-style models). */
-    reasoning_content?: string;
-  };
-  finish_reason: "stop" | "length" | "tool_calls" | "content_filter" | null;
+/** Single choice in a non-streaming chat completion response. */
+export interface OpenAIChoice {
+  index?: number;
+  message: OpenAIMessage;
+  finish_reason?: "stop" | "length" | "tool_calls" | "content_filter" | null;
 }
 
 /** Streaming chunk (SSE `data:` payload). */
@@ -135,7 +135,7 @@ export interface OpenAIStreamChunk {
 }
 
 /** Choice in a streaming chunk. */
-interface OpenAIStreamChoice {
+export interface OpenAIStreamChoice {
   index: number;
   delta: {
     role?: "assistant";
@@ -143,7 +143,7 @@ interface OpenAIStreamChoice {
     reasoning_content?: string;
     tool_calls?: OpenAIStreamToolCall[];
   };
-  finish_reason: "stop" | "length" | "tool_calls" | "content_filter" | null;
+  finish_reason?: "stop" | "length" | "tool_calls" | "content_filter" | null;
 }
 
 /** /v1/models list entry. */

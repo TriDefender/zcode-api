@@ -23,6 +23,8 @@ const BASE_CONFIG: ProxyConfig = {
     refererOrigin: "https://zcode.z.ai",
   },
   clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
+  responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
   logging: { level: "info" },
 };
 

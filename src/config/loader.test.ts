@@ -76,6 +76,8 @@ auth:
     expect(cfg.providers.zai.anthropicBase).toBe("https://api.z.ai/api/anthropic");
     expect(cfg.providers.bigmodel.openaiBase).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
     expect(cfg.clientIdentity).toEqual({ mode: "observe", ttlSeconds: 900, maxSessions: 1024 });
+    expect(cfg.responses).toEqual({ enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 });
+    expect(cfg.mcp).toEqual({ enabled: true, webSearch: true, webReader: false, zread: false });
   });
 
   it("clientIdentity: YAML values override defaults", () => {
@@ -90,6 +92,27 @@ clientIdentity:
 `);
     const cfg = loadConfig(path);
     expect(cfg.clientIdentity).toEqual({ mode: "enforce", ttlSeconds: 60, maxSessions: 8 });
+  });
+
+  it("responses + mcp: YAML values override defaults", () => {
+    const path = writeYaml(`
+auth:
+  mode: apikey
+  apiKey: "abc"
+responses:
+  enabled: false
+  store:
+    maxEntries: 50
+    ttlMs: 3600000
+mcp:
+  enabled: true
+  webSearch: false
+  webReader: true
+  zread: true
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.responses).toEqual({ enabled: false, storeMaxEntries: 50, storeTtlMs: 3600000 });
+    expect(cfg.mcp).toEqual({ enabled: true, webSearch: false, webReader: true, zread: true });
   });
 
   it("throws on invalid clientIdentity.mode", () => {

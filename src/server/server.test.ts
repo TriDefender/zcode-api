@@ -23,6 +23,8 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
     models: ["glm-4.6"],
     identity: { appVersion: "test-1.0.0", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai" },
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
+    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+    mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
     logging: { level: "info" },
     ...overrides,
   };
@@ -109,6 +111,25 @@ describe("server routing", () => {
       }),
     );
     expect(resp.status).toBe(200);
+  });
+
+  it("does not expose POST /v1/responses when Responses API is disabled", async () => {
+    const config = makeConfig({ responses: { enabled: false, storeMaxEntries: 1000, storeTtlMs: 86400000 } });
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    let upstreamCalls = 0;
+    const fetchImpl = Object.assign(async (_request: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
+      upstreamCalls++;
+      return new Response("unexpected", { status: 500 });
+    }, { preconnect: fetch.preconnect });
+    const handler = createFetchHandler({ config, auth, fetchImpl });
+
+    const resp = await handler(new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "glm-4.6", input: "Hi" }),
+    }));
+    expect(resp.status).toBe(404);
+    expect(upstreamCalls).toBe(0);
   });
 
   it("GET /health returns ok status", async () => {

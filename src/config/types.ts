@@ -54,6 +54,31 @@ export interface ClientIdentityConfig {
   maxSessions: number;
 }
 
+/**
+ * Responses-API (`/v1/responses`) configuration. When `enabled`, the proxy
+ * translates Codex-style Responses requests to the GLM Chat Completions upstream.
+ */
+export interface ResponsesConfig {
+  /** Enable the `/v1/responses` route. Default `true`. */
+  enabled: boolean;
+  /** Max stored responses (LRU). Default 1000. */
+  storeMaxEntries: number;
+  /** Stored-response TTL in ms. Default 24h (in-memory; cleared on restart). */
+  storeTtlMs: number;
+}
+
+/** GLM MCP hosted-tool configuration. Endpoints are derived from the active provider. */
+export interface McpConfig {
+  /** Enable MCP interception (web_search) and function-tool injection (web_reader/zread). Default `true`. */
+  enabled: boolean;
+  /** Intercept `web_search` / `web_search_preview` hosted tools via GLM `web_search_prime` MCP. Default `true`. */
+  webSearch: boolean;
+  /** Inject `webReader` as a function tool the model can call. Default `false` (off by default to limit scope). */
+  webReader: boolean;
+  /** Inject the three `zread` tools as function tools. Default `false`. */
+  zread: boolean;
+}
+
 /** Top-level proxy configuration. */
 export interface ProxyConfig {
   server: {
@@ -81,6 +106,10 @@ export interface ProxyConfig {
   identity: ProxyIdentity;
   /** Local client session inference for cache-affinity experiments. */
   clientIdentity: ClientIdentityConfig;
+  /** Responses-API (`/v1/responses`) configuration. */
+  responses: ResponsesConfig;
+  /** GLM MCP hosted-tool configuration. */
+  mcp: McpConfig;
   logging: {
     level: "debug" | "info" | "warn" | "error";
   };

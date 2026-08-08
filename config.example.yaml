@@ -73,5 +73,29 @@ clientIdentity:
   ttlSeconds: 900
   maxSessions: 1024
 
+# Responses API (/v1/responses) — Codex CLI / OpenAI Agents SDK endpoint.
+# Translates Responses requests to the GLM Chat Completions upstream.
+# State (previous_response_id) is held in-memory (cleared on restart, 24h TTL).
+responses:
+  enabled: true
+  store:
+    maxEntries: 1000
+    ttlMs: 86400000
+
+# GLM MCP hosted-tool integration.
+# Endpoints are derived from `provider`:
+#   zai      → https://api.z.ai/api/mcp/{tool}/mcp
+#   bigmodel → https://open.bigmodel.cn/api/mcp/{tool}/mcp
+# Auth reuses the upstream credential (auth.apiKey / OAuth) — no extra key needed.
+mcp:
+  enabled: true
+  # Intercept `web_search`/`web_search_preview` hosted tools via GLM's
+  # `web_search_prime` MCP. Adds a one-shot agentic loop on /v1/responses.
+  webSearch: true
+  # Inject `webReader` as a function tool the model can call directly.
+  webReader: false
+  # Inject the three `zread` tools (search_doc/get_repo_structure/read_file).
+  zread: false
+
 logging:
   level: info

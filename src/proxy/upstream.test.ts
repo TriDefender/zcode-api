@@ -210,6 +210,8 @@ describe("buildAuthHeaders", () => {
       "X-Title",
       "X-ZCode-Agent",
       "X-Platform",
+      "X-Client-Language",
+      "X-Client-Timezone",
       "X-Os-Category",
       "X-Os-Version",
       "x-request-id",
@@ -396,7 +398,9 @@ describe("proxyRequest", () => {
     models: ["glm-4.6"],
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
-    logging: { level: "info" },
+    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+  logging: { level: "info" },
   };
 
   it("uses ordered transport for session-aware start-plan requests only outside injected fetch tests", () => {
@@ -570,7 +574,9 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     models: ["glm-4.6"],
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
-    logging: { level: "info" },
+    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+  logging: { level: "info" },
   };
 
   function makeOpenAIReq(body: string, headers: Record<string, string> = {}): Request {
@@ -808,7 +814,9 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
     models: ["glm-4.6"],
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
-    logging: { level: "info" },
+    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+  logging: { level: "info" },
   };
 
   it("Anthropic client request translates through OpenAI-compatible upstream", async () => {
@@ -1111,7 +1119,9 @@ describe("proxyRequest — tool-call roundtrip (OpenAI passthrough upstream)", (
     models: ["glm-4.6"],
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
-    logging: { level: "info" },
+    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+  logging: { level: "info" },
   };
 
   function makeOpenAIReq(body: string): Request {
@@ -1275,7 +1285,9 @@ describe("proxyRequest — thinking endpoint matrix", () => {
     models: ["glm-4.6"],
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
-    logging: { level: "info" },
+    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+  logging: { level: "info" },
   };
 
   function makeOpenAIReq(stream: boolean): Request {

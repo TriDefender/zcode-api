@@ -27,6 +27,8 @@ const TEST_CONFIG: ProxyConfig = {
   models: ["glm-4.6"],
   identity: IDENTITY,
   clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
+  responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
   logging: { level: "info" },
 };
 

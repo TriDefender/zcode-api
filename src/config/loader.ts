@@ -4,7 +4,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
-import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity } from "./types.js";
+import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig } from "./types.js";
 
 /** Environment variable keys that override YAML values. */
 const ENV = {
@@ -34,6 +34,13 @@ const DEFAULTS = {
   CLIENT_IDENTITY_MODE: "observe" as const,
   CLIENT_IDENTITY_TTL_SECONDS: 900,
   CLIENT_IDENTITY_MAX_SESSIONS: 1024,
+  RESPONSES_ENABLED: true,
+  RESPONSES_STORE_MAX_ENTRIES: 1000,
+  RESPONSES_STORE_TTL_MS: 24 * 60 * 60 * 1000,
+  MCP_ENABLED: true,
+  MCP_WEB_SEARCH: true,
+  MCP_WEB_READER: false,
+  MCP_ZREAD: false,
 };
 
 /** Printable-ASCII gate copied from the ZCode bundle's `rYn` helper. */
@@ -95,6 +102,8 @@ export function loadConfig(path: string): ProxyConfig {
   });
 
   const clientIdentity = resolveClientIdentity(parsed?.clientIdentity);
+  const responses = resolveResponsesConfig(parsed?.responses);
+  const mcp = resolveMcpConfig(parsed?.mcp);
 
   const config: ProxyConfig = {
     server: { port, host },
@@ -106,6 +115,8 @@ export function loadConfig(path: string): ProxyConfig {
     models,
     identity,
     clientIdentity,
+    responses,
+    mcp,
     logging: { level: logLevel },
   };
 
@@ -125,6 +136,32 @@ function resolveClientIdentityMode(raw: unknown): ClientIdentityConfig["mode"] {
   if (raw === undefined || raw === null) return DEFAULTS.CLIENT_IDENTITY_MODE;
   if (raw === "off" || raw === "observe" || raw === "enforce") return raw;
   throw new Error(`Invalid clientIdentity.mode "${String(raw)}": must be "off", "observe", or "enforce"`);
+}
+
+function resolveResponsesConfig(raw: unknown): ResponsesConfig {
+  const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const storeRaw = obj.store && typeof obj.store === "object" ? obj.store as Record<string, unknown> : {};
+  return {
+    enabled: resolveBool(obj.enabled, DEFAULTS.RESPONSES_ENABLED),
+    storeMaxEntries: resolvePositiveInt(storeRaw.maxEntries, DEFAULTS.RESPONSES_STORE_MAX_ENTRIES, "responses.store.maxEntries"),
+    storeTtlMs: resolvePositiveInt(storeRaw.ttlMs, DEFAULTS.RESPONSES_STORE_TTL_MS, "responses.store.ttlMs"),
+  };
+}
+
+function resolveMcpConfig(raw: unknown): McpConfig {
+  const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  return {
+    enabled: resolveBool(obj.enabled, DEFAULTS.MCP_ENABLED),
+    webSearch: resolveBool(obj.webSearch ?? obj.web_search, DEFAULTS.MCP_WEB_SEARCH),
+    webReader: resolveBool(obj.webReader ?? obj.web_reader, DEFAULTS.MCP_WEB_READER),
+    zread: resolveBool(obj.zread, DEFAULTS.MCP_ZREAD),
+  };
+}
+
+function resolveBool(raw: unknown, fallback: boolean): boolean {
+  if (typeof raw === "boolean") return raw;
+  if (typeof raw === "string") return raw === "true" || raw === "1";
+  return fallback;
 }
 
 function resolvePositiveInt(raw: unknown, fallback: number, name: string): number {

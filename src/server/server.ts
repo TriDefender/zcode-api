@@ -14,7 +14,9 @@ import type { ProxyConfig } from "../config/types.js";
 import type { AuthManager } from "../auth/manager.js";
 import { handleChatCompletions, handleListModels } from "./routes-openai.js";
 import { handleMessages } from "./routes-anthropic.js";
+import { handleResponsesRoute } from "./routes-responses.js";
 import { errorResponse } from "../proxy/handler.js";
+import type { ResponseStore } from "../responses/store.js";
 
 interface ServerOptions {
   config: ProxyConfig;
@@ -23,6 +25,8 @@ interface ServerOptions {
   fetchImpl?: typeof fetch;
   /** When true, enable per-request debug diagnostics in the proxy handler. */
   debug?: boolean;
+  /** Responses-API state store. When absent, `/v1/responses` runs stateless (`previous_response_id` returns 404). */
+  responseStore?: ResponseStore;
 }
 
 /** Minimal server handle: what the caller needs to print URLs and shut down. */
@@ -39,6 +43,13 @@ export interface ProxyServer {
 export function createFetchHandler(opts: ServerOptions): (req: Request) => Promise<Response> {
   const { config, auth } = opts;
   const proxyOpts = { config, auth, fetchImpl: opts.fetchImpl, debug: opts.debug === true };
+  const responsesOpts = {
+    config,
+    auth,
+    fetchImpl: opts.fetchImpl,
+    debug: opts.debug === true,
+    ...(opts.responseStore ? { responseStore: opts.responseStore } : {}),
+  };
 
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
@@ -68,6 +79,9 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
 
     if (path === "/v1/chat/completions" && method === "POST") {
       return handleChatCompletions(req, proxyOpts);
+    }
+    if (config.responses.enabled && path === "/v1/responses" && method === "POST") {
+      return handleResponsesRoute(req, responsesOpts);
     }
     if (path === "/v1/models" && method === "GET") {
       return handleListModels();

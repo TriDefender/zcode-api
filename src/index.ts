@@ -7,6 +7,7 @@ import { EXAMPLE_CONFIG_YAML } from "./config/template.js";
 import { AuthManager } from "./auth/manager.js";
 import { startServer, type ProxyServer } from "./server/server.js";
 import { startControlListener, LogBuffer, type ControlState } from "./android/control.js";
+import { ResponseStore } from "./responses/store.js";
 import { loadCredential, saveCredential, clearCredential, getStorePath } from "./auth/store.js";
 import { ZaiOAuthClient, BigmodelOAuthClient } from "./auth/oauth.js";
 import { KeyResolver } from "./auth/resolver.js";
@@ -130,13 +131,14 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
 
   if (debug) printDebugBanner(config, path);
 
-  const server = await startServer({ config, auth, debug });
+  const server = await startServer(buildServerOptions(config, auth, debug));
   const url = `http://${server.hostname}:${server.port}`;
   console.log(`zcode-proxy listening on ${url}`);
   console.log(`  provider: ${config.provider}`);
   console.log(`  plan: ${config.plan}`);
   console.log(`  auth mode: ${config.auth.mode}`);
   console.log(`  models: ${config.models.length} available`);
+  if (config.responses.enabled) console.log(`  /v1/responses: ON`);
   if (debug) console.log(`  debug: ON`);
 
   process.on("SIGINT", () => {
@@ -146,6 +148,15 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   process.on("SIGTERM", () => {
     server.stop(true);
   });
+}
+
+/** Build `startServer` options, wiring the Responses store and MCP pool when their config gates are on. */
+function buildServerOptions(config: ProxyConfig, auth: AuthManager, debug: boolean): { config: ProxyConfig; auth: AuthManager; debug: boolean; responseStore?: ResponseStore } {
+  const opts: { config: ProxyConfig; auth: AuthManager; debug: boolean; responseStore?: ResponseStore } = { config, auth, debug };
+  if (config.responses.enabled) {
+    opts.responseStore = new ResponseStore({ maxEntries: config.responses.storeMaxEntries, ttlMs: config.responses.storeTtlMs });
+  }
+  return opts;
 }
 
 /**
@@ -184,7 +195,7 @@ async function runAndroid(): Promise<void> {
       auth.setOAuthCredential(cred);
     }
     try {
-      const s = await startServer({ config, auth });
+      const s = await startServer(buildServerOptions(config, auth, false));
       serverRef.current = s;
       console.log(`zcode-proxy listening on http://${s.hostname}:${s.port}`);
       return { ok: true, port: s.port };

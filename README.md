@@ -70,6 +70,7 @@ bun run src/index.ts auth login bigmodel --import
 |--------|------|-------------|
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions (streaming + non-streaming) |
 | `POST` | `/v1/messages` | Anthropic-format messages (streaming + non-streaming) |
+| `POST` | `/v1/responses` | OpenAI Responses API (Codex CLI / Agents SDK; translates to GLM Chat Completions) |
 | `GET` | `/v1/models` | List available models |
 | `GET` | `/webui` | Built-in chat web UI (served without the proxy key; see below) |
 | `GET` | `/health` | Health check |
