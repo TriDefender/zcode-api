@@ -400,6 +400,7 @@ describe("proxyRequest", () => {
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
   mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+  async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   logging: { level: "info" },
   };
 
@@ -576,6 +577,7 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
   mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+  async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   logging: { level: "info" },
   };
 
@@ -816,6 +818,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
   mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+  async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   logging: { level: "info" },
   };
 
@@ -1121,6 +1124,7 @@ describe("proxyRequest — tool-call roundtrip (OpenAI passthrough upstream)", (
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
   mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+  async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   logging: { level: "info" },
   };
 
@@ -1287,6 +1291,7 @@ describe("proxyRequest — thinking endpoint matrix", () => {
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
   mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+  async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   logging: { level: "info" },
   };
 

@@ -7674,7 +7674,11 @@ var ENV = {
   API_KEY: "ZCODE_API_KEY",
   APP_VERSION: "ZCODE_APP_VERSION",
   SOURCE_TITLE: "ZCODE_SOURCE_TITLE",
-  REFERER_ORIGIN: "ZCODE_REFERER_ORIGIN"
+  REFERER_ORIGIN: "ZCODE_REFERER_ORIGIN",
+  ASYNC_ENABLED: "ZCODE_ASYNC_ENABLED",
+  ASYNC_ORIGIN: "ZCODE_ASYNC_ORIGIN",
+  ASYNC_MAX_RETRIES: "ZCODE_ASYNC_MAX_RETRIES",
+  ASYNC_MAX_WAIT_MS: "ZCODE_ASYNC_MAX_WAIT_MS"
 };
 var DEFAULTS = {
   PORT: 8080,
@@ -7699,7 +7703,16 @@ var DEFAULTS = {
   MCP_ENABLED: true,
   MCP_WEB_SEARCH: true,
   MCP_WEB_READER: false,
-  MCP_ZREAD: false
+  MCP_ZREAD: false,
+  ASYNC_ENABLED: false,
+  ASYNC_ORIGIN: "https://zcode.z.ai",
+  ASYNC_POLL_INTERVAL_MS: 5e3,
+  ASYNC_KEEPALIVE_INTERVAL_MS: 3e3,
+  ASYNC_MAX_WAIT_MS: 0,
+  ASYNC_MAX_RETRIES: 3,
+  ASYNC_SETTLE_TIMEOUT_MS: 8e3,
+  ASYNC_CONTROL_TIMEOUT_MS: 15e3,
+  ASYNC_DEFAULT_MODEL: ""
 };
 var ASCII_PRINTABLE = /^[\x20-\x7e]+$/;
 function loadConfig(path) {
@@ -7740,6 +7753,7 @@ function loadConfig(path) {
   const clientIdentity = resolveClientIdentity(parsed?.clientIdentity);
   const responses = resolveResponsesConfig(parsed?.responses);
   const mcp = resolveMcpConfig(parsed?.mcp);
+  const asyncCfg = resolveAsyncConfig(parsed?.async);
   const config = {
     server: { port, host },
     auth: { proxyApiKey, mode, apiKey, oauthCredentialsPath },
@@ -7752,6 +7766,7 @@ function loadConfig(path) {
     clientIdentity,
     responses,
     mcp,
+    async: asyncCfg,
     logging: { level: logLevel }
   };
   validate(config);
@@ -7787,6 +7802,54 @@ function resolveMcpConfig(raw) {
     zread: resolveBool(obj.zread, DEFAULTS.MCP_ZREAD)
   };
 }
+function resolveAsyncConfig(raw) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  const enabledEnv = process.env[ENV.ASYNC_ENABLED];
+  const originEnv = process.env[ENV.ASYNC_ORIGIN];
+  const maxRetriesEnv = process.env[ENV.ASYNC_MAX_RETRIES];
+  const maxWaitMsEnv = process.env[ENV.ASYNC_MAX_WAIT_MS];
+  const origin = (originEnv ?? (typeof obj.origin === "string" ? obj.origin : DEFAULTS.ASYNC_ORIGIN)).trim() || DEFAULTS.ASYNC_ORIGIN;
+  validateOrigin(origin);
+  return {
+    enabled: enabledEnv !== void 0 ? resolveBool(enabledEnv, DEFAULTS.ASYNC_ENABLED) : resolveBool(obj.enabled, DEFAULTS.ASYNC_ENABLED),
+    origin,
+    pollIntervalMs: resolvePositiveInt(obj.pollIntervalMs ?? obj.poll_interval_ms, DEFAULTS.ASYNC_POLL_INTERVAL_MS, "async.pollIntervalMs"),
+    keepAliveIntervalMs: resolvePositiveInt(obj.keepAliveIntervalMs ?? obj.keepalive_interval_ms, DEFAULTS.ASYNC_KEEPALIVE_INTERVAL_MS, "async.keepAliveIntervalMs"),
+    maxWaitMs: resolveNonNegativeInt(maxWaitMsEnv ?? obj.maxWaitMs ?? obj.max_wait_ms, DEFAULTS.ASYNC_MAX_WAIT_MS, "async.maxWaitMs"),
+    maxRetries: resolveNonNegativeInt(maxRetriesEnv ?? obj.maxRetries ?? obj.max_retries, DEFAULTS.ASYNC_MAX_RETRIES, "async.maxRetries"),
+    settleTimeoutMs: resolvePositiveInt(obj.settleTimeoutMs ?? obj.settle_timeout_ms, DEFAULTS.ASYNC_SETTLE_TIMEOUT_MS, "async.settleTimeoutMs"),
+    controlTimeoutMs: resolvePositiveInt(obj.controlTimeoutMs ?? obj.control_timeout_ms, DEFAULTS.ASYNC_CONTROL_TIMEOUT_MS, "async.controlTimeoutMs"),
+    defaultModel: typeof obj.defaultModel === "string" ? obj.defaultModel : DEFAULTS.ASYNC_DEFAULT_MODEL
+  };
+}
+function validateOrigin(origin) {
+  let parsed;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw new Error(`async.origin "${origin}" is not a valid URL`);
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(`async.origin must use http: or https: scheme (got ${parsed.protocol})`);
+  }
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+  const isLoopback2 = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+  if (parsed.protocol === "http:" && !isLoopback2) {
+    throw new Error(`async.origin http:// is only allowed for loopback hosts (got ${hostname}). Use https:// for remote origins.`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error(`async.origin must not contain userinfo`);
+  }
+  if (parsed.hash) {
+    throw new Error(`async.origin must not contain a fragment`);
+  }
+  if (parsed.pathname !== "/" && parsed.pathname !== "") {
+    throw new Error(`async.origin must not contain a path (got "${parsed.pathname}"); clients append their own paths`);
+  }
+  if (parsed.search) {
+    throw new Error(`async.origin must not contain a query string`);
+  }
+}
 function resolveBool(raw, fallback) {
   if (typeof raw === "boolean") return raw;
   if (typeof raw === "string") return raw === "true" || raw === "1";
@@ -7797,6 +7860,14 @@ function resolvePositiveInt(raw, fallback, name) {
   const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
   if (!Number.isInteger(n) || n < 1) {
     throw new Error(`${name} must be a positive integer`);
+  }
+  return n;
+}
+function resolveNonNegativeInt(raw, fallback, name) {
+  if (raw === void 0 || raw === null) return fallback;
+  const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
   }
   return n;
 }
@@ -12940,6 +13011,1012 @@ async function handleResponsesRoute(req, opts) {
   return handleResponses(req, opts);
 }
 
+// src/async/openai-stream-adapter.ts
+function anthropicSseToOpenaiSseWithKeepalive(upstream, model = "glm-4.6") {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const state = initState(model);
+  let doneSent = false;
+  let errored = false;
+  function emit(out) {
+    if (errored) return;
+    try {
+      controller0.enqueue(encoder.encode(out));
+    } catch {
+    }
+  }
+  let controller0;
+  return new ReadableStream({
+    start(controller) {
+      controller0 = controller;
+      const reader = upstream.getReader();
+      let buffer = "";
+      reader.read().then(function pump({ done, value }) {
+        if (done) {
+          if (buffer.trim()) processBlock(buffer, state);
+          buffer = "";
+          emitDone();
+          try {
+            controller.close();
+          } catch {
+          }
+          return;
+        }
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split("\n\n");
+        buffer = blocks.pop() ?? "";
+        for (const block of blocks) {
+          processBlock(block, state);
+          if (errored) {
+            try {
+              controller.close();
+            } catch {
+            }
+            return;
+          }
+        }
+        return reader.read().then(pump);
+      }).catch((err) => {
+        if (!errored) {
+          const errPayload = JSON.stringify({ error: { message: `async stream error: ${err.message}`, type: "server_error" } });
+          emit(`data: ${errPayload}
+
+`);
+          emitDone();
+        }
+        try {
+          controller.close();
+        } catch {
+        }
+      }).finally(() => {
+        reader.releaseLock?.();
+      });
+    }
+  });
+  function processBlock(block, st) {
+    const trimmed = block.trim();
+    if (trimmed === "") return;
+    if (trimmed.startsWith(":")) {
+      emit(block + "\n\n");
+      return;
+    }
+    if (trimmed.startsWith("event: error") || trimmed.startsWith("event:error")) {
+      const dataLine = block.split("\n").find((l) => l.startsWith("data:"));
+      let anthropicMsg = "unknown error";
+      let anthropicType = "api_error";
+      if (dataLine) {
+        try {
+          const data = JSON.parse(dataLine.slice(5).trim());
+          if (data?.error?.message) anthropicMsg = String(data.error.message);
+          if (data?.error?.type) anthropicType = String(data.error.type);
+        } catch {
+        }
+      }
+      const oaiPayload = JSON.stringify({ error: { message: anthropicMsg, type: anthropicType } });
+      emit(`data: ${oaiPayload}
+
+`);
+      emitDone();
+      errored = true;
+      return;
+    }
+    const parsed = parseSSEChunk(block);
+    for (const p of parsed) {
+      const out = translateEvent(st, p);
+      if (out) emit(out);
+    }
+  }
+  function emitDone() {
+    if (doneSent) return;
+    doneSent = true;
+    emit("data: [DONE]\n\n");
+  }
+}
+
+// src/async/types.ts
+function isTicketReady(s) {
+  return s === "ready" || s === "active";
+}
+function isTicketExpired(s) {
+  return s === "expired" || s === "not_found";
+}
+var OffPeakServerError = class extends Error {
+  httpStatus;
+  bizCode;
+  constructor(message, httpStatus, bizCode) {
+    super(message);
+    this.name = "OffPeakServerError";
+    this.httpStatus = httpStatus;
+    this.bizCode = bizCode;
+  }
+};
+
+// src/async/client.ts
+var DEFAULT_CONTROL_TIMEOUT_MS = 15e3;
+var MAX_BATCH_STATUS = 100;
+function createOffPeakClient(opts) {
+  const origin = opts.origin.replace(/\/+$/, "");
+  const credentials = opts.credentials;
+  const controlTimeoutMs = opts.controlTimeoutMs ?? DEFAULT_CONTROL_TIMEOUT_MS;
+  const settleTimeoutMs = opts.settleTimeoutMs ?? controlTimeoutMs;
+  const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+  function buildHeaders(hasBody) {
+    const h = {
+      authorization: `Bearer ${credentials.jwt}`,
+      "x-coding-plan-api-key": credentials.codingPlanApiKey
+    };
+    if (hasBody) h["content-type"] = "application/json";
+    if (credentials.bigmodelOrganization) h["bigmodel-organization"] = credentials.bigmodelOrganization;
+    if (credentials.bigmodelProject) h["bigmodel-project"] = credentials.bigmodelProject;
+    return h;
+  }
+  async function request(method, path, body, timeoutMs, externalSignal, isSettle, settleAsSuccess) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    if (externalSignal) {
+      if (externalSignal.aborted) controller.abort();
+      else externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    const url = `${origin}/api/v1/off-peak${path}`;
+    const init = {
+      method,
+      headers: buildHeaders(body !== void 0),
+      signal: controller.signal
+    };
+    if (body !== void 0) init.body = JSON.stringify(body);
+    let resp;
+    let raw = "";
+    try {
+      try {
+        resp = await fetchImpl(url, init);
+      } catch (err) {
+        const msg = err?.message ?? String(err);
+        if (/abort/i.test(msg)) throw new OffPeakServerError(`off-peak request aborted: ${method} ${path}`, 0);
+        throw new OffPeakServerError(`off-peak network error: ${method} ${path}: ${msg}`, 0);
+      }
+      raw = await resp.text();
+    } finally {
+      clearTimeout(timer);
+      externalSignal?.removeEventListener("abort", onExternalAbort);
+    }
+    if (!resp.ok) {
+      if (isSettle && settleAsSuccess && resp.status >= 400 && resp.status < 500) {
+        return void 0;
+      }
+      let bizCode;
+      let serverMsg = `HTTP ${resp.status}`;
+      try {
+        const parsed = JSON.parse(raw);
+        bizCode = parsed?.code !== void 0 ? String(parsed.code) : void 0;
+        if (parsed?.msg) serverMsg = String(parsed.msg);
+        else if (parsed?.message) serverMsg = String(parsed.message);
+      } catch {
+        if (raw.length > 0 && raw.length < 200) serverMsg = raw;
+      }
+      throw new OffPeakServerError(
+        `off-peak ${method} ${path} failed: ${serverMsg}`,
+        resp.status,
+        bizCode
+      );
+    }
+    if (raw.length === 0) return void 0;
+    let parsedJson;
+    try {
+      parsedJson = JSON.parse(raw);
+    } catch {
+      return void 0;
+    }
+    if (parsedJson && typeof parsedJson === "object") {
+      const obj = parsedJson;
+      if ("code" in obj || "data" in obj) {
+        const code = obj.code;
+        if (code !== 0) {
+          if (code === void 0) {
+          } else {
+            const msg = obj.msg ?? obj.message ?? `biz code ${String(code)}`;
+            throw new OffPeakServerError(
+              `off-peak ${method} ${path} biz error: ${msg}`,
+              resp?.status ?? 0,
+              String(code)
+            );
+          }
+        } else if (obj.data !== void 0) {
+          return obj.data;
+        }
+      }
+    }
+    return parsedJson;
+  }
+  return {
+    async getAvailability(signal) {
+      const data = await request("GET", "/ticket/availability", void 0, controlTimeoutMs, signal, false, false);
+      if (!data) throw new OffPeakServerError("off-peak availability empty response", 0);
+      const canTakeNumber = data.can_take_number === true;
+      if (!canTakeNumber && data.next_take_at === void 0) {
+        throw new OffPeakServerError("off-peak availability missing next_take_at while unavailable", 0);
+      }
+      const result2 = { canTakeNumber };
+      if (data.next_take_at !== void 0) result2.nextTakeAt = data.next_take_at;
+      return result2;
+    },
+    async takeTicket(taskId, signal) {
+      if (!taskId || typeof taskId !== "string") {
+        throw new Error("takeTicket: taskId must be a non-empty string");
+      }
+      const data = await request("POST", "/ticket", { task_id: taskId }, controlTimeoutMs, signal, false, false);
+      if (!data || typeof data.ticket_id !== "string" || typeof data.state !== "string") {
+        throw new OffPeakServerError("off-peak takeTicket malformed response", 0);
+      }
+      const state = data.state;
+      const result2 = {
+        ticketId: data.ticket_id,
+        state,
+        registeredAt: Date.now()
+      };
+      if (data.position != null) result2.position = data.position;
+      if (data.next_poll_after !== void 0) result2.nextPollAfterMs = data.next_poll_after * 1e3;
+      return result2;
+    },
+    async batchStatus(ticketIds, signal) {
+      if (ticketIds.length === 0) return { tickets: [] };
+      const truncated = ticketIds.slice(0, MAX_BATCH_STATUS);
+      const data = await request(
+        "POST",
+        "/ticket/status",
+        { ticket_ids: truncated },
+        controlTimeoutMs,
+        signal,
+        false,
+        false
+      );
+      if (!data || !Array.isArray(data.tickets)) {
+        throw new OffPeakServerError("off-peak batchStatus malformed response", 0);
+      }
+      const result2 = {
+        tickets: data.tickets.map((t) => {
+          if (typeof t.ticket_id !== "string" || typeof t.state !== "string") {
+            throw new OffPeakServerError("off-peak batchStatus ticket entry malformed", 0);
+          }
+          const item = {
+            ticketId: t.ticket_id,
+            state: t.state
+          };
+          if (t.position != null) item.position = t.position;
+          if (t.active_deadline !== void 0) item.activeDeadline = t.active_deadline;
+          return item;
+        })
+      };
+      if (data.next_poll_after !== void 0) result2.nextPollAfterMs = data.next_poll_after * 1e3;
+      return result2;
+    },
+    async settle(ticketId, opts2 = {}) {
+      const settleAsSuccess = opts2.settleAsSuccess !== false;
+      await request(
+        "POST",
+        `/ticket/${encodeURIComponent(ticketId)}/settle`,
+        void 0,
+        settleTimeoutMs,
+        opts2.signal,
+        true,
+        settleAsSuccess
+      );
+    }
+  };
+}
+
+// src/async/keepalive.ts
+function keepaliveFrame(text = "keepalive") {
+  const clean = text.replace(/[\r\n]/g, " ");
+  return new TextEncoder().encode(`: ${clean}
+
+`);
+}
+
+// src/async/bridge.ts
+var EXPIRED_MARKER = "off-peak-ticket-expired";
+function runAsyncBridge(opts) {
+  const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+  const encoder = new TextEncoder();
+  let outcomeResolve;
+  const outcome = new Promise((r) => {
+    outcomeResolve = r;
+  });
+  let outcomeResolved = false;
+  function resolveOutcome(o) {
+    if (outcomeResolved) return;
+    outcomeResolved = true;
+    outcomeResolve(o);
+  }
+  let aborted = false;
+  const settledTickets = /* @__PURE__ */ new Set();
+  function settleOnce(ticketId) {
+    if (settledTickets.has(ticketId)) return;
+    settledTickets.add(ticketId);
+    void opts.client.settle(ticketId).catch(() => {
+    });
+  }
+  function log(info) {
+    try {
+      opts.onTransition?.(info);
+    } catch {
+    }
+  }
+  function emitKeepalive(controller) {
+    if (aborted) return;
+    try {
+      controller.enqueue(keepaliveFrame());
+    } catch {
+    }
+  }
+  function emitTerminalError(controller, message, type = "api_error") {
+    if (aborted) return;
+    const payload = JSON.stringify({ type: "error", error: { type, message } });
+    try {
+      controller.enqueue(encoder.encode(`event: error
+data: ${payload}
+
+`));
+    } catch {
+    }
+  }
+  async function waitForReady(ticketId, deadlineAt) {
+    while (true) {
+      if (aborted) return { state: "expired" };
+      const result2 = await opts.client.batchStatus([ticketId], opts.clientSignal);
+      if (aborted) return { state: "expired" };
+      const ticket = result2.tickets[0];
+      if (!ticket) return { state: "not_found" };
+      if (isTicketReady(ticket.state)) return { state: ticket.state };
+      if (ticket.state !== "queued") return { state: "expired" };
+      const delay = result2.nextPollAfterMs ?? opts.pollIntervalMs;
+      if (opts.maxWaitMs > 0 && Date.now() + delay > deadlineAt) {
+        return { state: "expired" };
+      }
+      await sleep(delay, opts.clientSignal);
+    }
+  }
+  async function forwardLLM(ticketId) {
+    const url = `${opts.origin.replace(/\/+$/, "")}/api/v1/off-peak/anthropic/v1/messages`;
+    const headers = {
+      "content-type": "application/json",
+      authorization: `Bearer ${opts.credentials.jwt}`,
+      "x-coding-plan-api-key": opts.credentials.codingPlanApiKey,
+      "x-off-peak-ticket-id": ticketId,
+      ...buildIdentityHeaders(opts.identity)
+    };
+    if (opts.credentials.bigmodelOrganization) headers["bigmodel-organization"] = opts.credentials.bigmodelOrganization;
+    if (opts.credentials.bigmodelProject) headers["bigmodel-project"] = opts.credentials.bigmodelProject;
+    const resp = await fetchImpl(url, {
+      method: "POST",
+      headers,
+      body: opts.llmRequestBody,
+      signal: opts.clientSignal
+    });
+    if (!resp.ok) {
+      const bodyText = await resp.text().catch(() => "");
+      if (bodyText.includes(EXPIRED_MARKER)) {
+        return { response: new Response(bodyText, { status: resp.status, headers: resp.headers }), expiredInBody: true };
+      }
+      return { response: new Response(bodyText, { status: resp.status, headers: resp.headers }), expiredInBody: false };
+    }
+    return { response: resp, expiredInBody: false };
+  }
+  const stream = new ReadableStream({
+    async start(controller) {
+      if (opts.clientSignal) {
+        if (opts.clientSignal.aborted) aborted = true;
+        else opts.clientSignal.addEventListener("abort", () => {
+          aborted = true;
+        }, { once: true });
+      }
+      let keepAliveTimer;
+      function startKeepalive() {
+        if (keepAliveTimer) return;
+        keepAliveTimer = setInterval(() => emitKeepalive(controller), opts.keepAliveIntervalMs);
+      }
+      function stopKeepalive() {
+        if (keepAliveTimer) {
+          clearInterval(keepAliveTimer);
+          keepAliveTimer = void 0;
+        }
+      }
+      const requestStartedAt = Date.now();
+      const deadlineAt = opts.maxWaitMs > 0 ? requestStartedAt + opts.maxWaitMs : Number.MAX_SAFE_INTEGER;
+      let currentTicket = opts.initialTicket;
+      let attempt = 0;
+      try {
+        while (true) {
+          if (aborted) {
+            log({ phase: "abort", attempt, ticketId: currentTicket.ticketId });
+            settleOnce(currentTicket.ticketId);
+            return;
+          }
+          if (!isTicketReady(currentTicket.state)) {
+            log({ phase: "wait", attempt, ticketId: currentTicket.ticketId, state: currentTicket.state });
+            startKeepalive();
+            const wait = await waitForReady(currentTicket.ticketId, deadlineAt);
+            if (aborted) {
+              stopKeepalive();
+              log({ phase: "abort", attempt, ticketId: currentTicket.ticketId });
+              settleOnce(currentTicket.ticketId);
+              return;
+            }
+            if (isTicketExpired(wait.state)) {
+              stopKeepalive();
+              settleOnce(currentTicket.ticketId);
+              if (opts.maxWaitMs > 0 && Date.now() >= deadlineAt) {
+                emitTerminalError(controller, `async max wait timeout (${opts.maxWaitMs}ms exceeded)`, "timeout");
+                resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+                return;
+              }
+              log({ phase: "expired", attempt, ticketId: currentTicket.ticketId, state: wait.state, message: "expired in queue" });
+              attempt++;
+              if (attempt > opts.maxRetries) {
+                emitTerminalError(controller, `async upstream exhausted retries (ticket expired in queue ${attempt}x)`, "api_error");
+                resolveOutcome({ attempts: attempt, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+                return;
+              }
+              try {
+                currentTicket = await opts.client.takeTicket(opts.taskId, opts.clientSignal);
+              } catch (takeErr) {
+                emitTerminalError(controller, `async retake failed: ${takeErr.message}`, "api_error");
+                resolveOutcome({ attempts: attempt, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+                return;
+              }
+              continue;
+            }
+            stopKeepalive();
+          }
+          log({ phase: "ready", attempt, ticketId: currentTicket.ticketId });
+          let resp;
+          let expiredInBody;
+          try {
+            const forward = await forwardLLM(currentTicket.ticketId);
+            resp = forward.response;
+            expiredInBody = forward.expiredInBody;
+          } catch (err) {
+            if (aborted) {
+              settleOnce(currentTicket.ticketId);
+              return;
+            }
+            emitTerminalError(controller, `async upstream network error: ${err.message}`, "api_error");
+            settleOnce(currentTicket.ticketId);
+            resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+            return;
+          }
+          if (!resp.ok || expiredInBody) {
+            const bodyText = await resp.text().catch(() => "");
+            if (expiredInBody || bodyText.includes(EXPIRED_MARKER)) {
+              log({ phase: "expired", attempt, ticketId: currentTicket.ticketId, message: "expired during LLM (pre-stream)" });
+              settleOnce(currentTicket.ticketId);
+              attempt++;
+              if (attempt > opts.maxRetries) {
+                emitTerminalError(controller, `async upstream exhausted retries (ticket expired during LLM ${attempt}x)`, "api_error");
+                resolveOutcome({ attempts: attempt, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+                return;
+              }
+              try {
+                currentTicket = await opts.client.takeTicket(opts.taskId, opts.clientSignal);
+              } catch (takeErr) {
+                emitTerminalError(controller, `async retake failed: ${takeErr.message}`, "api_error");
+                resolveOutcome({ attempts: attempt, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+                return;
+              }
+              continue;
+            }
+            emitTerminalError(controller, `async upstream HTTP ${resp.status}`, "api_error");
+            settleOnce(currentTicket.ticketId);
+            resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+            return;
+          }
+          let midStreamExpiredPreCommit = false;
+          let midStreamExpiredPostCommit = false;
+          let committed = false;
+          if (resp.body) {
+            const reader = resp.body.getReader();
+            const streamDecoder = new TextDecoder();
+            let pending = "";
+            const MAX_PENDING_FRAME_BYTES = 1 * 1024 * 1024;
+            try {
+              while (true) {
+                if (aborted) {
+                  await reader.cancel().catch(() => {
+                  });
+                  settleOnce(currentTicket.ticketId);
+                  return;
+                }
+                const { done, value } = await reader.read();
+                if (done) {
+                  if (pending.length > 0 && !aborted && !midStreamExpiredPreCommit && !midStreamExpiredPostCommit) {
+                    if (pending.includes(EXPIRED_MARKER)) {
+                      if (!committed) midStreamExpiredPreCommit = true;
+                      else midStreamExpiredPostCommit = true;
+                    } else if (pending.endsWith("\n\n")) {
+                      try {
+                        controller.enqueue(encoder.encode(pending));
+                      } catch {
+                      }
+                    }
+                    pending = "";
+                  }
+                  break;
+                }
+                if (aborted) break;
+                pending += streamDecoder.decode(value, { stream: true }).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+                if (pending.length > MAX_PENDING_FRAME_BYTES) {
+                  await reader.cancel().catch(() => {
+                  });
+                  emitTerminalError(controller, "async upstream SSE frame exceeded 1 MiB boundary", "api_error");
+                  settleOnce(currentTicket.ticketId);
+                  resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+                  return;
+                }
+                let frameBoundaryFound = false;
+                while (true) {
+                  const idx = pending.indexOf("\n\n");
+                  if (idx === -1) break;
+                  const frame = pending.slice(0, idx + 2);
+                  pending = pending.slice(idx + 2);
+                  if (frame.includes(EXPIRED_MARKER)) {
+                    if (!committed) {
+                      midStreamExpiredPreCommit = true;
+                    } else {
+                      midStreamExpiredPostCommit = true;
+                    }
+                    await reader.cancel().catch(() => {
+                    });
+                    frameBoundaryFound = true;
+                    break;
+                  }
+                  try {
+                    controller.enqueue(encoder.encode(frame));
+                    committed = true;
+                  } catch {
+                    await reader.cancel().catch(() => {
+                    });
+                    frameBoundaryFound = true;
+                    break;
+                  }
+                }
+                if (midStreamExpiredPreCommit || midStreamExpiredPostCommit || frameBoundaryFound) break;
+              }
+              streamDecoder.decode();
+            } finally {
+              reader.releaseLock?.();
+            }
+          }
+          if (midStreamExpiredPreCommit && !aborted) {
+            log({ phase: "expired", attempt, ticketId: currentTicket.ticketId, message: "expired during LLM (mid-stream, pre-commit)" });
+            settleOnce(currentTicket.ticketId);
+            attempt++;
+            if (attempt > opts.maxRetries) {
+              emitTerminalError(controller, `async upstream exhausted retries (ticket expired mid-stream ${attempt}x)`, "api_error");
+              resolveOutcome({ attempts: attempt, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+              return;
+            }
+            try {
+              currentTicket = await opts.client.takeTicket(opts.taskId, opts.clientSignal);
+            } catch (takeErr) {
+              emitTerminalError(controller, `async retake failed: ${takeErr.message}`, "api_error");
+              resolveOutcome({ attempts: attempt, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+              return;
+            }
+            continue;
+          }
+          if (midStreamExpiredPostCommit && !aborted) {
+            log({ phase: "error", attempt, ticketId: currentTicket.ticketId, message: "expired mid-stream after commit; cannot retry" });
+            settleOnce(currentTicket.ticketId);
+            emitTerminalError(controller, "async upstream ticket expired mid-stream after output started", "api_error");
+            resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+            return;
+          }
+          if (aborted) {
+            log({ phase: "abort", attempt, ticketId: currentTicket.ticketId });
+            settleOnce(currentTicket.ticketId);
+            resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: "abort" });
+            return;
+          }
+          log({ phase: "done", attempt, ticketId: currentTicket.ticketId });
+          settleOnce(currentTicket.ticketId);
+          resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: "done" });
+          return;
+        }
+      } catch (err) {
+        if (!aborted) {
+          emitTerminalError(controller, `async bridge internal error: ${err.message}`, "api_error");
+        }
+        settleOnce(currentTicket.ticketId);
+        resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
+      } finally {
+        stopKeepalive();
+        try {
+          controller.close();
+        } catch {
+        }
+        resolveOutcome({
+          attempts: attempt + 1,
+          finalTicketId: currentTicket.ticketId,
+          terminalPhase: aborted ? "abort" : "error"
+        });
+      }
+    },
+    cancel() {
+      aborted = true;
+    }
+  });
+  return { stream, outcome };
+}
+function sleep(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve();
+      return;
+    }
+    const t = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+// src/async/handler.ts
+var MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
+var SINGLE_SPACE = new Uint8Array([32]);
+function buildCredentials(cred) {
+  return {
+    jwt: cred.jwt ?? "",
+    codingPlanApiKey: credentialString(cred)
+  };
+}
+function generateTaskId() {
+  return `proxy-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+function resolveModel(req, config) {
+  const explicit = typeof req.model === "string" ? req.model.trim() : "";
+  if (explicit) return explicit;
+  if (config.async.defaultModel && config.async.defaultModel.trim()) return config.async.defaultModel.trim();
+  return config.defaultModel;
+}
+async function readBody2(req) {
+  const contentLength = req.headers.get("content-length");
+  if (contentLength) {
+    const cl = parseInt(contentLength, 10);
+    if (Number.isFinite(cl) && cl > MAX_REQUEST_BODY_BYTES) {
+      req.body?.cancel().catch(() => {
+      });
+      return { ok: false, response: errorResponse(413, "request_too_large", `body exceeds ${MAX_REQUEST_BODY_BYTES} byte cap`) };
+    }
+  }
+  if (!req.body) {
+    return { ok: false, response: errorResponse(400, "invalid_request_error", "missing request body") };
+  }
+  const reader = req.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_REQUEST_BODY_BYTES) {
+        await reader.cancel().catch(() => {
+        });
+        return { ok: false, response: errorResponse(413, "request_too_large", `body exceeds ${MAX_REQUEST_BODY_BYTES} byte cap`) };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { ok: false, response: errorResponse(400, "invalid_request_error", "could not read request body") };
+  } finally {
+    reader.releaseLock?.();
+  }
+  const body = new TextDecoder().decode(Buffer.concat(chunks));
+  if (!body || body.length === 0) {
+    return { ok: false, response: errorResponse(400, "invalid_request_error", "empty request body") };
+  }
+  return { ok: true, body };
+}
+async function resolveCredential(opts) {
+  let cred;
+  try {
+    cred = await opts.auth.getCredential();
+  } catch (err) {
+    return { ok: false, response: errorResponse(401, "authentication_error", `credential resolution failed: ${err.message}`) };
+  }
+  if (!cred.jwt) {
+    return {
+      ok: false,
+      response: errorResponse(
+        400,
+        "async_credentials_unavailable",
+        "async endpoints require oauth mode (credential lacks JWT). Re-login via `auth login` or use sync /v1/* endpoints."
+      )
+    };
+  }
+  return { ok: true, cred, credentials: buildCredentials(cred) };
+}
+function buildClient(opts, credentials) {
+  return createOffPeakClient({
+    origin: opts.config.async.origin,
+    credentials,
+    controlTimeoutMs: opts.config.async.controlTimeoutMs,
+    settleTimeoutMs: opts.config.async.settleTimeoutMs,
+    fetchImpl: opts.fetchImpl
+  });
+}
+async function takeTicketOr502(client, taskId, opts, signal) {
+  try {
+    const ticket = await client.takeTicket(taskId, signal);
+    return { ok: true, ticket };
+  } catch (err) {
+    return { ok: false, response: errorResponse(502, "async_take_ticket_failed", `off-peak takeTicket failed: ${err.message}`) };
+  }
+}
+function buildBridge(opts, client, credentials, llmRequestBody, initialTicket, taskId, req) {
+  return runAsyncBridge({
+    client,
+    credentials,
+    origin: opts.config.async.origin,
+    identity: opts.config.identity,
+    llmRequestBody,
+    initialTicket,
+    taskId,
+    pollIntervalMs: opts.config.async.pollIntervalMs,
+    keepAliveIntervalMs: opts.config.async.keepAliveIntervalMs,
+    maxRetries: opts.config.async.maxRetries,
+    maxWaitMs: opts.config.async.maxWaitMs,
+    clientSignal: req.signal,
+    fetchImpl: opts.fetchImpl,
+    onTransition: opts.debug ? (info) => {
+      console.log(`[async] task=${taskId} ticket=${info.ticketId} phase=${info.phase} attempt=${info.attempt}${info.state ? ` state=${info.state}` : ""}${info.message ? ` msg=${info.message}` : ""}`);
+    } : void 0
+  });
+}
+function sseHeaders() {
+  return {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache",
+    connection: "keep-alive"
+  };
+}
+async function handleAsyncMessages(req, opts) {
+  const cred = await resolveCredential(opts);
+  if (!cred.ok) return cred.response;
+  const bodyResult = await readBody2(req);
+  if (!bodyResult.ok) return bodyResult.response;
+  let parsedBody;
+  try {
+    parsedBody = JSON.parse(bodyResult.body);
+  } catch {
+    return errorResponse(400, "invalid_request_error", "request body is not valid JSON");
+  }
+  if (!Array.isArray(parsedBody.messages) || parsedBody.messages.length === 0) {
+    return errorResponse(400, "invalid_request_error", "missing or invalid `messages` field");
+  }
+  const clientWantsStream = parsedBody.stream === true;
+  const upstreamBody = {
+    ...parsedBody,
+    model: resolveModel(parsedBody, opts.config),
+    stream: true
+  };
+  const upstreamBodyText = transformRequestBody(JSON.stringify(upstreamBody), { format: "anthropic", userId: cred.cred.userId }) ?? JSON.stringify(upstreamBody);
+  const client = buildClient(opts, cred.credentials);
+  const taskId = generateTaskId();
+  const ticket = await takeTicketOr502(client, taskId, opts, req.signal);
+  if (!ticket.ok) return ticket.response;
+  const { stream, outcome } = buildBridge(opts, client, cred.credentials, upstreamBodyText, ticket.ticket, taskId, req);
+  void outcome;
+  if (clientWantsStream) {
+    return new Response(stream, { status: 200, headers: sseHeaders() });
+  }
+  return new Response(nonStreamChunkedJson(stream), {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache", "transfer-encoding": "chunked" }
+  });
+}
+async function handleAsyncChat(req, opts) {
+  const cred = await resolveCredential(opts);
+  if (!cred.ok) return cred.response;
+  const bodyResult = await readBody2(req);
+  if (!bodyResult.ok) return bodyResult.response;
+  let openaiReq;
+  try {
+    openaiReq = JSON.parse(bodyResult.body);
+  } catch {
+    return errorResponse(400, "invalid_request_error", "request body is not valid JSON");
+  }
+  if (!Array.isArray(openaiReq.messages) || openaiReq.messages.length === 0) {
+    return errorResponse(400, "invalid_request_error", "missing or invalid `messages` field");
+  }
+  openaiReq.model = resolveModel(openaiReq, opts.config);
+  const clientWantsStream = openaiReq.stream === true;
+  let anthropicReq;
+  try {
+    anthropicReq = translateRequestOpenAIToAnthropic(openaiReq);
+  } catch (err) {
+    return errorResponse(400, "invalid_request_error", `OpenAI\u2192Anthropic translation failed: ${err.message}`);
+  }
+  anthropicReq.stream = true;
+  const upstreamBodyText = transformRequestBody(JSON.stringify(anthropicReq), { format: "anthropic", userId: cred.cred.userId }) ?? JSON.stringify(anthropicReq);
+  const client = buildClient(opts, cred.credentials);
+  const taskId = generateTaskId();
+  const ticket = await takeTicketOr502(client, taskId, opts, req.signal);
+  if (!ticket.ok) return ticket.response;
+  const { stream: rawStream, outcome } = buildBridge(opts, client, cred.credentials, upstreamBodyText, ticket.ticket, taskId, req);
+  void outcome;
+  if (clientWantsStream) {
+    const openaiStream = anthropicSseToOpenaiSseWithKeepalive(rawStream, openaiReq.model);
+    return new Response(openaiStream, { status: 200, headers: sseHeaders() });
+  }
+  return new Response(nonStreamChunkedJson(rawStream, { translate: "openai", model: openaiReq.model }), {
+    status: 200,
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache", "transfer-encoding": "chunked" }
+  });
+}
+async function handleAsyncHealth(_req, opts) {
+  const cred = await resolveCredential(opts);
+  if (!cred.ok) return cred.response;
+  const client = buildClient(opts, cred.credentials);
+  try {
+    const avail = await client.getAvailability();
+    return new Response(JSON.stringify(avail), { status: 200, headers: { "content-type": "application/json" } });
+  } catch (err) {
+    return errorResponse(502, "async_health_failed", err.message);
+  }
+}
+function nonStreamChunkedJson(bridgeStream, translateOpts) {
+  const encoder = new TextEncoder();
+  return new ReadableStream({
+    async start(controller) {
+      const reader = bridgeStream.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = "";
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          try {
+            controller.enqueue(SINGLE_SPACE);
+          } catch {
+            return;
+          }
+          sseBuffer += decoder.decode(value, { stream: true });
+        }
+        sseBuffer += decoder.decode();
+      } finally {
+        reader.releaseLock?.();
+      }
+      const anthropicMsg = reconstructAnthropicBatch(sseBuffer);
+      if (!anthropicMsg) {
+        const errPayload = { error: { type: "async_aggregation_failed", message: "could not reconstruct response from bridge stream" } };
+        try {
+          controller.enqueue(encoder.encode(JSON.stringify(errPayload)));
+        } catch {
+        }
+        controller.close();
+        return;
+      }
+      const finalJson = translateOpts?.translate === "openai" ? JSON.stringify(translateResponseAnthropicToOpenAI(anthropicMsg, translateOpts.model)) : JSON.stringify(anthropicMsg);
+      try {
+        controller.enqueue(encoder.encode(finalJson));
+      } catch {
+      }
+      controller.close();
+    }
+  });
+}
+function reconstructAnthropicBatch(sseText) {
+  const blocks = sseText.split("\n\n");
+  let message = null;
+  const content = [];
+  let currentBlock = null;
+  let currentToolJson = "";
+  let sawMessageStop = false;
+  let sawError = false;
+  for (const block of blocks) {
+    const lines = block.split("\n");
+    let eventType;
+    let data;
+    for (const line of lines) {
+      if (line.startsWith("event:")) eventType = line.slice(6).trim();
+      else if (line.startsWith("data:")) data = line.slice(5).trim();
+    }
+    if (!data) continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      continue;
+    }
+    const type = eventType ?? parsed.type;
+    switch (type) {
+      case "message_start": {
+        const msg = parsed.message;
+        message = { ...msg ?? {} };
+        break;
+      }
+      case "content_block_start": {
+        const cb = parsed.content_block;
+        if (!cb || !cb.type) break;
+        if (cb.type === "text") currentBlock = { type: "text", text: "" };
+        else if (cb.type === "thinking") currentBlock = { type: "thinking", thinking: "" };
+        else if (cb.type === "tool_use" && typeof cb.id === "string" && typeof cb.name === "string") {
+          currentBlock = { type: "tool_use", id: cb.id, name: cb.name, input: {} };
+          currentToolJson = "";
+        }
+        break;
+      }
+      case "content_block_delta": {
+        const delta = parsed.delta;
+        if (!currentBlock || !delta) break;
+        if (delta.type === "text_delta" && currentBlock.type === "text" && typeof delta.text === "string") {
+          currentBlock.text += delta.text;
+        } else if (delta.type === "thinking_delta" && currentBlock.type === "thinking" && typeof delta.thinking === "string") {
+          currentBlock.thinking += delta.thinking;
+        } else if (delta.type === "signature_delta" && currentBlock.type === "thinking" && typeof delta.signature === "string") {
+          currentBlock.signature = (currentBlock.signature ?? "") + delta.signature;
+        } else if (delta.type === "input_json_delta" && currentBlock.type === "tool_use" && typeof delta.partial_json === "string") {
+          currentToolJson += delta.partial_json;
+        }
+        break;
+      }
+      case "content_block_stop": {
+        if (currentBlock) {
+          if (currentBlock.type === "tool_use") {
+            try {
+              currentBlock.input = JSON.parse(currentToolJson || "{}");
+            } catch {
+              currentBlock.input = {};
+            }
+            currentToolJson = "";
+          }
+          content.push(currentBlock);
+          currentBlock = null;
+        }
+        break;
+      }
+      case "message_delta": {
+        const delta = parsed.delta;
+        const usage = parsed.usage;
+        if (delta && message) Object.assign(message, delta);
+        if (usage && message) message.usage = { ...message.usage ?? { input_tokens: 0, output_tokens: 0 }, ...usage };
+        break;
+      }
+      case "message_stop":
+        sawMessageStop = true;
+        break;
+      case "error":
+        sawError = true;
+        break;
+      default:
+        break;
+    }
+  }
+  if (sawError || !sawMessageStop || !message) return null;
+  message.content = content;
+  if (!message.stop_reason) message.stop_reason = "end_turn";
+  if (!message.role) message.role = "assistant";
+  if (!message.usage) message.usage = { input_tokens: 0, output_tokens: 0 };
+  return message;
+}
+
+// src/server/routes-async.ts
+async function handleAsyncMessagesRoute(req, opts) {
+  return handleAsyncMessages(req, opts);
+}
+async function handleAsyncChatRoute(req, opts) {
+  return handleAsyncChat(req, opts);
+}
+async function handleAsyncHealthRoute(req, opts) {
+  return handleAsyncHealth(req, opts);
+}
+
 // src/server/server.ts
 function createFetchHandler(opts) {
   const { config, auth } = opts;
@@ -12950,6 +14027,12 @@ function createFetchHandler(opts) {
     fetchImpl: opts.fetchImpl,
     debug: opts.debug === true,
     ...opts.responseStore ? { responseStore: opts.responseStore } : {}
+  };
+  const asyncOpts = {
+    config,
+    auth,
+    fetchImpl: opts.fetchImpl,
+    debug: opts.debug === true
   };
   return async (req) => {
     const url = new URL(req.url);
@@ -12982,6 +14065,17 @@ function createFetchHandler(opts) {
     if (path === "/v1/messages" && method === "POST") {
       return handleMessages(req, proxyOpts);
     }
+    if (config.async.enabled) {
+      if (path === "/async/v1/messages" && method === "POST") {
+        return handleAsyncMessagesRoute(req, asyncOpts);
+      }
+      if (path === "/async/v1/chat/completions" && method === "POST") {
+        return handleAsyncChatRoute(req, asyncOpts);
+      }
+      if (path === "/async/v1/health" && method === "GET") {
+        return handleAsyncHealthRoute(req, asyncOpts);
+      }
+    }
     if (path === "/health" || path === "/") {
       return new Response(JSON.stringify({ status: "ok", provider: config.provider }), {
         status: 200,
@@ -13000,6 +14094,9 @@ function startServer(opts) {
       if (!res.writableEnded) abortController.abort();
     };
     res.on("close", onClientClose);
+    if ((req.url ?? "").startsWith("/async/")) {
+      req.setTimeout(24 * 60 * 60 * 1e3);
+    }
     try {
       const webReq = nodeReqToWebRequest(req, abortController.signal);
       const resp = await handler(webReq).then((r) => addCorsHeaders(r));
@@ -13613,7 +14710,7 @@ async function handleControlRequest(req, state, ctx) {
   if (req.method !== "POST" || parsed.pathname !== "/control") {
     return { status: 404, body: { ok: false, error: `not_found: ${req.method} ${parsed.pathname}` } };
   }
-  const body = await readBody2(req);
+  const body = await readBody3(req);
   let cmd;
   try {
     cmd = JSON.parse(body);
@@ -13746,7 +14843,7 @@ function writeJson(res, status, body) {
   });
   res.end(json);
 }
-function readBody2(req) {
+function readBody3(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));

@@ -97,5 +97,30 @@ mcp:
   # Inject the three `zread` tools (search_doc/get_repo_structure/read_file).
   zread: false
 
+# Async (off-peak / "idle plan") bridge.
+# When enabled, exposes POST /async/v1/messages and /async/v1/chat/completions
+# that route through ZCode's off-peak ticket-queue backend — free compute when
+# the GLM cluster has idle capacity. The proxy holds the connection open with
+# SSE keepalives during queue wait, forwards the LLM stream once a ticket is
+# ready, and auto-retries on ticket-expired (up to maxRetries).
+#
+# IMPORTANT: requires `auth.mode: oauth` (off-peak needs the JWT from login).
+# apikey-only mode lacks the JWT and the route returns 400
+# `async_credentials_unavailable`.
+#
+# Env overrides: ZCODE_ASYNC_ENABLED, ZCODE_ASYNC_ORIGIN.
+async:
+  enabled: false
+  origin: "https://zcode.z.ai"
+  pollIntervalMs: 5000
+  keepAliveIntervalMs: 3000
+  # Maximum total wait for ticket to become ready, in ms. 0 = unlimited.
+  maxWaitMs: 0
+  maxRetries: 3
+  settleTimeoutMs: 8000
+  controlTimeoutMs: 15000
+  # Optional model override; empty uses the request's `model`.
+  defaultModel: ""
+
 logging:
   level: info

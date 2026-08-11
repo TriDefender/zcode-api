@@ -26,6 +26,8 @@ beforeEach(() => {
   delete process.env.ZCODE_APP_VERSION;
   delete process.env.ZCODE_SOURCE_TITLE;
   delete process.env.ZCODE_REFERER_ORIGIN;
+  delete process.env.ZCODE_ASYNC_ENABLED;
+  delete process.env.ZCODE_ASYNC_ORIGIN;
 });
 
 afterEach(() => {
@@ -78,6 +80,17 @@ auth:
     expect(cfg.clientIdentity).toEqual({ mode: "observe", ttlSeconds: 900, maxSessions: 1024 });
     expect(cfg.responses).toEqual({ enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 });
     expect(cfg.mcp).toEqual({ enabled: true, webSearch: true, webReader: false, zread: false });
+    expect(cfg.async).toEqual({
+      enabled: false,
+      origin: "https://zcode.z.ai",
+      pollIntervalMs: 5000,
+      keepAliveIntervalMs: 3000,
+      maxWaitMs: 0,
+      maxRetries: 3,
+      settleTimeoutMs: 8000,
+      controlTimeoutMs: 15000,
+      defaultModel: "",
+    });
   });
 
   it("clientIdentity: YAML values override defaults", () => {
@@ -113,6 +126,105 @@ mcp:
     const cfg = loadConfig(path);
     expect(cfg.responses).toEqual({ enabled: false, storeMaxEntries: 50, storeTtlMs: 3600000 });
     expect(cfg.mcp).toEqual({ enabled: true, webSearch: false, webReader: true, zread: true });
+  });
+
+  it("async: YAML values override defaults", () => {
+    const path = writeYaml(`
+auth:
+  mode: apikey
+  apiKey: "abc"
+async:
+  enabled: true
+  origin: "https://custom.example.com"
+  pollIntervalMs: 1000
+  keepAliveIntervalMs: 500
+  maxWaitMs: 600000
+  maxRetries: 5
+  settleTimeoutMs: 3000
+  controlTimeoutMs: 8000
+  defaultModel: "glm-5"
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.async).toEqual({
+      enabled: true,
+      origin: "https://custom.example.com",
+      pollIntervalMs: 1000,
+      keepAliveIntervalMs: 500,
+      maxWaitMs: 600000,
+      maxRetries: 5,
+      settleTimeoutMs: 3000,
+      controlTimeoutMs: 8000,
+      defaultModel: "glm-5",
+    });
+  });
+
+  it("async: snake_case YAML keys also accepted", () => {
+    const path = writeYaml(`
+auth:
+  mode: apikey
+  apiKey: "abc"
+async:
+  poll_interval_ms: 2000
+  keepalive_interval_ms: 700
+  max_wait_ms: 300000
+  max_retries: 2
+  settle_timeout_ms: 4000
+  control_timeout_ms: 9000
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.async.pollIntervalMs).toBe(2000);
+    expect(cfg.async.keepAliveIntervalMs).toBe(700);
+    expect(cfg.async.maxWaitMs).toBe(300000);
+    expect(cfg.async.maxRetries).toBe(2);
+    expect(cfg.async.settleTimeoutMs).toBe(4000);
+    expect(cfg.async.controlTimeoutMs).toBe(9000);
+  });
+
+  it("async: ZCODE_ASYNC_ENABLED env overrides YAML", () => {
+    const path = writeYaml(`
+auth:
+  mode: apikey
+  apiKey: "abc"
+async:
+  enabled: false
+`);
+    process.env.ZCODE_ASYNC_ENABLED = "true";
+    const cfg = loadConfig(path);
+    expect(cfg.async.enabled).toBe(true);
+  });
+
+  it("async: maxWaitMs=0 is allowed (non-negative, not positive)", () => {
+    const path = writeYaml(`
+auth:
+  mode: apikey
+  apiKey: "abc"
+async:
+  maxWaitMs: 0
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.async.maxWaitMs).toBe(0);
+  });
+
+  it("async: throws on negative maxWaitMs", () => {
+    const path = writeYaml(`
+auth:
+  mode: apikey
+  apiKey: "abc"
+async:
+  maxWaitMs: -1
+`);
+    expect(() => loadConfig(path)).toThrow(/non-negative/);
+  });
+
+  it("async: throws on zero pollIntervalMs (must be positive)", () => {
+    const path = writeYaml(`
+auth:
+  mode: apikey
+  apiKey: "abc"
+async:
+  pollIntervalMs: 0
+`);
+    expect(() => loadConfig(path)).toThrow(/positive integer/);
   });
 
   it("throws on invalid clientIdentity.mode", () => {

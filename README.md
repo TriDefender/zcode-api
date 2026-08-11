@@ -71,9 +71,54 @@ bun run src/index.ts auth login bigmodel --import
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions (streaming + non-streaming) |
 | `POST` | `/v1/messages` | Anthropic-format messages (streaming + non-streaming) |
 | `POST` | `/v1/responses` | OpenAI Responses API (Codex CLI / Agents SDK; translates to GLM Chat Completions) |
+| `POST` | `/async/v1/messages` | **Async (off-peak)** Anthropic-format — routes to free idle-compute pool (oauth-only) |
+| `POST` | `/async/v1/chat/completions` | **Async (off-peak)** OpenAI-format — same backend, translates request/response |
+| `GET`  | `/async/v1/health` | Probe off-peak queue availability (oauth-only) |
 | `GET` | `/v1/models` | List available models |
 | `GET` | `/webui` | Built-in chat web UI (served without the proxy key; see below) |
 | `GET` | `/health` | Health check |
+
+### Async (Off-Peak / Idle Plan)
+
+`/async/*` routes are gated by `async.enabled: true` in config (default `false`).
+They require `auth.mode: oauth` (the off-peak backend needs both the JWT from
+login and the coding-plan API key — apikey-only mode returns 400
+`async_credentials_unavailable`).
+
+When enabled, requests are routed through ZCode's off-peak ticket-queue backend:
+the proxy takes a ticket, holds the connection open with SSE keepalive comments
+while waiting for a free slot, then streams the upstream response through. If
+the ticket expires mid-run (server reclaims the slot), the proxy automatically
+takes a new ticket and resends the original request (up to `async.maxRetries`,
+default 3). Client disconnect triggers a fire-and-forget `/ticket/{id}/settle`
+call as the universal close-out signal.
+
+Streaming (`stream: true`) is the expected mode for coding harnesss; non-stream
+is supported as a fallback (the proxy internally still consumes upstream as a
+stream, then emits one aggregated JSON body).
+
+**Off-peak is one-shot, not conversational.** Each `/async/*` request is an
+independent task with its own ticket; the proxy does NOT preserve conversation
+history across requests. To do multi-turn, send the full conversation in each
+request (typical for stateless chat completions clients), or use the synchronous
+`/v1/*` endpoints which can leverage server-side session affinity.
+
+**Phase 1 limitations** (planned for Phase 2):
+- No native async task API (`POST /async/v1/tasks` with persistent store) — bridge mode only
+- No concurrency cap on `/async/*` routes — body size is capped at 4 MiB but unlimited simultaneous connections are allowed
+- No persistent state across proxy restarts
+
+```bash
+curl http://localhost:8080/async/v1/messages \
+  -H "Authorization: Bearer your-proxy-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "glm-4.6",
+    "max_tokens": 1024,
+    "stream": true,
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
 
 ## Usage Examples
 

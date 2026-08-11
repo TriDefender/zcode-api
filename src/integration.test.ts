@@ -198,8 +198,10 @@ beforeAll(async () => {
 });
 
 afterAll(() => {
-  proxyServer?.stop(true);
-  mockUpstreamServer?.stop(true);
+  // Use stop(false) (not stop(true)) — stop(true) calls process.exit(0) which
+  // terminates test discovery early and masks failures in other test files.
+  proxyServer?.stop(false);
+  mockUpstreamServer?.stop(false);
 });
 
 function proxyUrl(path: string): string {

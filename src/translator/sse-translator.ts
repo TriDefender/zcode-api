@@ -7,12 +7,12 @@ import type { AnthropicStreamEvent, OpenAIStreamChunk, OpenAIStreamToolCall, Ope
 import { openaiUsageToAnthropic } from "./anthropic-to-openai.js";
 
 /** Parse a raw SSE chunk string into event type + JSON data. */
-interface ParsedSSE {
+export interface ParsedSSE {
   event: string;
   data: unknown;
 }
 
-function parseSSEChunk(raw: string): ParsedSSE[] {
+export function parseSSEChunk(raw: string): ParsedSSE[] {
   const results: ParsedSSE[] = [];
   const blocks = raw.split("\n\n");
 
@@ -43,7 +43,7 @@ function parseSSEChunk(raw: string): ParsedSSE[] {
   return results;
 }
 
-interface TranslationState {
+export interface TranslationState {
   messageId: string;
   model: string;
   roleSent: boolean;
@@ -54,7 +54,7 @@ interface TranslationState {
   finishReasonSent: boolean;
 }
 
-function initState(model: string): TranslationState {
+export function initState(model: string): TranslationState {
   return {
     messageId: "",
     model,
@@ -152,7 +152,7 @@ export function anthropicSseToOpenaiSse(
   });
 }
 
-function translateEvent(state: TranslationState, sse: ParsedSSE): string | null {
+export function translateEvent(state: TranslationState, sse: ParsedSSE): string | null {
   const data = sse.data as AnthropicStreamEvent;
 
   switch (data.type) {

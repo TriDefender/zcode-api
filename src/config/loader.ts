@@ -4,7 +4,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
-import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig } from "./types.js";
+import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig, AsyncConfig } from "./types.js";
 
 /** Environment variable keys that override YAML values. */
 const ENV = {
@@ -15,6 +15,10 @@ const ENV = {
   APP_VERSION: "ZCODE_APP_VERSION",
   SOURCE_TITLE: "ZCODE_SOURCE_TITLE",
   REFERER_ORIGIN: "ZCODE_REFERER_ORIGIN",
+  ASYNC_ENABLED: "ZCODE_ASYNC_ENABLED",
+  ASYNC_ORIGIN: "ZCODE_ASYNC_ORIGIN",
+  ASYNC_MAX_RETRIES: "ZCODE_ASYNC_MAX_RETRIES",
+  ASYNC_MAX_WAIT_MS: "ZCODE_ASYNC_MAX_WAIT_MS",
 } as const;
 
 const DEFAULTS = {
@@ -41,6 +45,15 @@ const DEFAULTS = {
   MCP_WEB_SEARCH: true,
   MCP_WEB_READER: false,
   MCP_ZREAD: false,
+  ASYNC_ENABLED: false,
+  ASYNC_ORIGIN: "https://zcode.z.ai",
+  ASYNC_POLL_INTERVAL_MS: 5000,
+  ASYNC_KEEPALIVE_INTERVAL_MS: 3000,
+  ASYNC_MAX_WAIT_MS: 0,
+  ASYNC_MAX_RETRIES: 3,
+  ASYNC_SETTLE_TIMEOUT_MS: 8000,
+  ASYNC_CONTROL_TIMEOUT_MS: 15000,
+  ASYNC_DEFAULT_MODEL: "",
 };
 
 /** Printable-ASCII gate copied from the ZCode bundle's `rYn` helper. */
@@ -104,6 +117,7 @@ export function loadConfig(path: string): ProxyConfig {
   const clientIdentity = resolveClientIdentity(parsed?.clientIdentity);
   const responses = resolveResponsesConfig(parsed?.responses);
   const mcp = resolveMcpConfig(parsed?.mcp);
+  const asyncCfg = resolveAsyncConfig(parsed?.async);
 
   const config: ProxyConfig = {
     server: { port, host },
@@ -117,6 +131,7 @@ export function loadConfig(path: string): ProxyConfig {
     clientIdentity,
     responses,
     mcp,
+    async: asyncCfg,
     logging: { level: logLevel },
   };
 
@@ -158,6 +173,61 @@ function resolveMcpConfig(raw: unknown): McpConfig {
   };
 }
 
+function resolveAsyncConfig(raw: unknown): AsyncConfig {
+  const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const enabledEnv = process.env[ENV.ASYNC_ENABLED];
+  const originEnv = process.env[ENV.ASYNC_ORIGIN];
+  const maxRetriesEnv = process.env[ENV.ASYNC_MAX_RETRIES];
+  const maxWaitMsEnv = process.env[ENV.ASYNC_MAX_WAIT_MS];
+
+  const origin = (originEnv ?? (typeof obj.origin === "string" ? obj.origin : DEFAULTS.ASYNC_ORIGIN)).trim() || DEFAULTS.ASYNC_ORIGIN;
+  validateOrigin(origin);
+
+  return {
+    enabled: enabledEnv !== undefined ? resolveBool(enabledEnv, DEFAULTS.ASYNC_ENABLED) : resolveBool(obj.enabled, DEFAULTS.ASYNC_ENABLED),
+    origin,
+    pollIntervalMs: resolvePositiveInt(obj.pollIntervalMs ?? obj.poll_interval_ms, DEFAULTS.ASYNC_POLL_INTERVAL_MS, "async.pollIntervalMs"),
+    keepAliveIntervalMs: resolvePositiveInt(obj.keepAliveIntervalMs ?? obj.keepalive_interval_ms, DEFAULTS.ASYNC_KEEPALIVE_INTERVAL_MS, "async.keepAliveIntervalMs"),
+    maxWaitMs: resolveNonNegativeInt(maxWaitMsEnv ?? obj.maxWaitMs ?? obj.max_wait_ms, DEFAULTS.ASYNC_MAX_WAIT_MS, "async.maxWaitMs"),
+    maxRetries: resolveNonNegativeInt(maxRetriesEnv ?? obj.maxRetries ?? obj.max_retries, DEFAULTS.ASYNC_MAX_RETRIES, "async.maxRetries"),
+    settleTimeoutMs: resolvePositiveInt(obj.settleTimeoutMs ?? obj.settle_timeout_ms, DEFAULTS.ASYNC_SETTLE_TIMEOUT_MS, "async.settleTimeoutMs"),
+    controlTimeoutMs: resolvePositiveInt(obj.controlTimeoutMs ?? obj.control_timeout_ms, DEFAULTS.ASYNC_CONTROL_TIMEOUT_MS, "async.controlTimeoutMs"),
+    defaultModel: typeof obj.defaultModel === "string" ? obj.defaultModel : DEFAULTS.ASYNC_DEFAULT_MODEL,
+  };
+}
+
+function validateOrigin(origin: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw new Error(`async.origin "${origin}" is not a valid URL`);
+  }
+  // Scheme allowlist: only http/https. Other schemes (ftp:, file:, etc.) rejected.
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(`async.origin must use http: or https: scheme (got ${parsed.protocol})`);
+  }
+  // Cleartext HTTP only for loopback (dev/mock mode). Real off-peak backend requires
+  // HTTPS — cleartext would leak the JWT + coding-plan API key to any network observer.
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+  const isLoopback = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+  if (parsed.protocol === "http:" && !isLoopback) {
+    throw new Error(`async.origin http:// is only allowed for loopback hosts (got ${hostname}). Use https:// for remote origins.`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error(`async.origin must not contain userinfo`);
+  }
+  if (parsed.hash) {
+    throw new Error(`async.origin must not contain a fragment`);
+  }
+  if (parsed.pathname !== "/" && parsed.pathname !== "") {
+    throw new Error(`async.origin must not contain a path (got "${parsed.pathname}"); clients append their own paths`);
+  }
+  if (parsed.search) {
+    throw new Error(`async.origin must not contain a query string`);
+  }
+}
+
 function resolveBool(raw: unknown, fallback: boolean): boolean {
   if (typeof raw === "boolean") return raw;
   if (typeof raw === "string") return raw === "true" || raw === "1";
@@ -169,6 +239,15 @@ function resolvePositiveInt(raw: unknown, fallback: number, name: string): numbe
   const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
   if (!Number.isInteger(n) || n < 1) {
     throw new Error(`${name} must be a positive integer`);
+  }
+  return n;
+}
+
+function resolveNonNegativeInt(raw: unknown, fallback: number, name: string): number {
+  if (raw === undefined || raw === null) return fallback;
+  const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`${name} must be a non-negative integer`);
   }
   return n;
 }
@@ -200,8 +279,8 @@ function resolvePlan(raw: unknown): "coding-plan" | "start-plan" {
 /** Resolve log level with fallback. */
 function resolveLogLevel(raw: unknown): "debug" | "info" | "warn" | "error" {
   const levels = ["debug", "info", "warn", "error"] as const;
-  if (typeof raw === "string" && levels.includes(raw as any)) {
-    return raw as any;
+  if (typeof raw === "string" && (levels as readonly string[]).includes(raw)) {
+    return raw as "debug" | "info" | "warn" | "error";
   }
   return DEFAULTS.LOG_LEVEL;
 }

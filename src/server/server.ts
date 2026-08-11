@@ -15,6 +15,7 @@ import type { AuthManager } from "../auth/manager.js";
 import { handleChatCompletions, handleListModels } from "./routes-openai.js";
 import { handleMessages } from "./routes-anthropic.js";
 import { handleResponsesRoute } from "./routes-responses.js";
+import { handleAsyncMessagesRoute, handleAsyncChatRoute, handleAsyncHealthRoute } from "./routes-async.js";
 import { errorResponse } from "../proxy/handler.js";
 import type { ResponseStore } from "../responses/store.js";
 
@@ -49,6 +50,12 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
     fetchImpl: opts.fetchImpl,
     debug: opts.debug === true,
     ...(opts.responseStore ? { responseStore: opts.responseStore } : {}),
+  };
+  const asyncOpts = {
+    config,
+    auth,
+    fetchImpl: opts.fetchImpl,
+    debug: opts.debug === true,
   };
 
   return async (req: Request): Promise<Response> => {
@@ -91,6 +98,18 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
       return handleMessages(req, proxyOpts);
     }
 
+    if (config.async.enabled) {
+      if (path === "/async/v1/messages" && method === "POST") {
+        return handleAsyncMessagesRoute(req, asyncOpts);
+      }
+      if (path === "/async/v1/chat/completions" && method === "POST") {
+        return handleAsyncChatRoute(req, asyncOpts);
+      }
+      if (path === "/async/v1/health" && method === "GET") {
+        return handleAsyncHealthRoute(req, asyncOpts);
+      }
+    }
+
     if (path === "/health" || path === "/") {
       return new Response(JSON.stringify({ status: "ok", provider: config.provider }), {
         status: 200,
@@ -120,6 +139,16 @@ export function startServer(opts: ServerOptions): Promise<ProxyServer> {
       if (!res.writableEnded) abortController.abort();
     };
     res.on("close", onClientClose);
+
+    // `/async/*` routes can hold the connection open for minutes-to-hours while
+    // waiting for an off-peak ticket. Lift the per-request socket timeout from
+    // the default 600s (set below via server.requestTimeout) to 24h so the long
+    // queue wait + LLM stream doesn't get killed mid-flight. Non-async routes
+    // keep the default timeout.
+    if ((req.url ?? "").startsWith("/async/")) {
+      req.setTimeout(24 * 60 * 60 * 1000);
+    }
+
     try {
       const webReq = nodeReqToWebRequest(req, abortController.signal);
       const resp = await handler(webReq).then((r) => addCorsHeaders(r));

@@ -79,6 +79,40 @@ export interface McpConfig {
   zread: boolean;
 }
 
+/**
+ * Async (off-peak / idle-plan) bridge configuration. When `enabled`, exposes
+ * `/async/v1/messages` and `/async/v1/chat/completions` that route to ZCode's
+ * off-peak ticket-queue backend. The proxy keeps the client connection alive
+ * with SSE comments during ticket-queue wait, forwards the LLM stream once
+ * the ticket is `ready`, and auto-retries on ticket-expired (up to `maxRetries`).
+ *
+ * Requires `auth.mode: oauth` (off-peak needs both `Authorization: Bearer ${jwt}`
+ * and `X-Coding-Plan-Api-Key` headers). apikey-only mode lacks the JWT and the
+ * route entry returns 400 `async_credentials_unavailable`.
+ *
+ * @see _reverse/NOTEPAD.md "Off-Peak / Idle Plan" section for full upstream protocol.
+ */
+export interface AsyncConfig {
+  /** Enable the `/async/*` routes. Default `false`. */
+  enabled: boolean;
+  /** Base origin for off-peak endpoints. Default `"https://zcode.z.ai"`. */
+  origin: string;
+  /** Ticket-status poll interval in ms. Default `5000`. */
+  pollIntervalMs: number;
+  /** SSE keepalive comment interval during ticket-queue wait, in ms. Default `3000`. */
+  keepAliveIntervalMs: number;
+  /** Maximum total wait time for a ticket to become `ready`, in ms. `0` = unlimited. Default `0`. */
+  maxWaitMs: number;
+  /** Maximum auto-retry count on `off-peak-ticket-expired`. Default `3`. */
+  maxRetries: number;
+  /** Settle call timeout in ms (best-effort close-out on completion/abort). Default `8000`. */
+  settleTimeoutMs: number;
+  /** Control-plane call (takeTicket/pollStatus) timeout in ms. Default `15000`. */
+  controlTimeoutMs: number;
+  /** Optional model override; empty string uses the request's `model`. Default `""`. */
+  defaultModel: string;
+}
+
 /** Top-level proxy configuration. */
 export interface ProxyConfig {
   server: {
@@ -110,6 +144,8 @@ export interface ProxyConfig {
   responses: ResponsesConfig;
   /** GLM MCP hosted-tool configuration. */
   mcp: McpConfig;
+  /** Async (off-peak / idle-plan) bridge configuration. */
+  async: AsyncConfig;
   logging: {
     level: "debug" | "info" | "warn" | "error";
   };
