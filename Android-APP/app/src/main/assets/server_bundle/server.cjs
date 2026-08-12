@@ -9760,7 +9760,7 @@ function canonicalize(body, format, fallbackModel) {
     format,
     model,
     system: parsed.system,
-    developer: messages.filter((m) => m?.role === "developer"),
+    developer: messages.filter((m) => typeof m === "object" && m !== null && m.role === "developer"),
     tools: parsed.tools,
     tool_choice: parsed.tool_choice,
     messages
@@ -9947,7 +9947,14 @@ async function sendOrderedUpstreamRequest(req) {
       socket.destroy();
     }
     function finish() {
-      if (chunkedDecoder && !chunkedDecoder.done) return;
+      if (chunkedDecoder && !chunkedDecoder.done) {
+        try {
+          bodyController?.error(new Error("upstream chunked body truncated"));
+        } catch {
+        }
+        socket.destroy();
+        return;
+      }
       try {
         bodyController?.close();
       } catch {
@@ -11354,7 +11361,7 @@ async function proxyRequest(clientReq, format, opts) {
       };
       upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, retryHeaders, clientSession);
       upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, retryHeaders, clientSession);
-      upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl).catch((err) => {
+      upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal).catch((err) => {
         if (debug) debugError(reqId, "upstream_unreachable", err.message);
         printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
         return errorResponse(502, "upstream_unreachable", err.message);
@@ -12333,7 +12340,7 @@ function chatChunkToResponsesEvents(chunk, state) {
 }
 function handleChoice(choice, state) {
   const events = [];
-  const delta = choice.delta;
+  const delta = choice.delta ?? {};
   if (delta.reasoning_content && delta.reasoning_content.length > 0) {
     events.push(...ensureReasoningItem(state));
     state.reasoningText += delta.reasoning_content;
@@ -12952,9 +12959,15 @@ function streamResponse(upstreamResp, context) {
         if (finalEvent && context.request.store !== false && context.options.responseStore) {
           context.options.responseStore.set(buildStoredResponse(finalEvent.response, context.input, context.request.instructions));
         }
-        controller.close();
+        try {
+          controller.close();
+        } catch {
+        }
       } catch (err) {
-        controller.error(err);
+        try {
+          controller.error(err);
+        } catch {
+        }
       }
     },
     cancel(reason) {
@@ -13792,7 +13805,11 @@ async function handleAsyncMessages(req, opts) {
   if (!bodyResult.ok) return bodyResult.response;
   let parsedBody;
   try {
-    parsedBody = JSON.parse(bodyResult.body);
+    const raw = JSON.parse(bodyResult.body);
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      return errorResponse(400, "invalid_request_error", "request body must be a JSON object");
+    }
+    parsedBody = raw;
   } catch {
     return errorResponse(400, "invalid_request_error", "request body is not valid JSON");
   }
@@ -13800,9 +13817,10 @@ async function handleAsyncMessages(req, opts) {
     return errorResponse(400, "invalid_request_error", "missing or invalid `messages` field");
   }
   const clientWantsStream = parsedBody.stream === true;
+  const modelStr = typeof parsedBody.model === "string" ? parsedBody.model : void 0;
   const upstreamBody = {
     ...parsedBody,
-    model: resolveModel(parsedBody, opts.config),
+    model: resolveModel({ model: modelStr }, opts.config),
     stream: true
   };
   const upstreamBodyText = transformRequestBody(JSON.stringify(upstreamBody), { format: "anthropic", userId: cred.cred.userId }) ?? JSON.stringify(upstreamBody);

@@ -184,9 +184,13 @@ export async function handleAsyncMessages(req: Request, opts: AsyncHandlerOption
   const bodyResult = await readBody(req);
   if (!bodyResult.ok) return bodyResult.response;
 
-  let parsedBody: { model?: string; messages?: unknown; stream?: boolean; max_tokens?: unknown };
+  let parsedBody: Record<string, unknown>;
   try {
-    parsedBody = JSON.parse(bodyResult.body);
+    const raw = JSON.parse(bodyResult.body);
+    if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+      return errorResponse(400, "invalid_request_error", "request body must be a JSON object");
+    }
+    parsedBody = raw as Record<string, unknown>;
   } catch {
     return errorResponse(400, "invalid_request_error", "request body is not valid JSON");
   }
@@ -196,12 +200,15 @@ export async function handleAsyncMessages(req: Request, opts: AsyncHandlerOption
   // Anthropic spec: omitted `stream` defaults to non-streaming (false).
   const clientWantsStream = parsedBody.stream === true;
 
-  // B5 + B13: build Anthropic upstream body, force stream:true internally, apply defaultModel
-  const upstreamBody: AnthropicMessagesRequest = {
-    ...(parsedBody as AnthropicMessagesRequest),
-    model: resolveModel(parsedBody, opts.config),
+  const modelStr = typeof parsedBody.model === "string" ? parsedBody.model : undefined;
+  // Anthropic spec: omitted `stream` defaults to non-streaming (false).
+  // Validated: parsedBody is a plain object with messages[]. Remaining fields
+  // (max_tokens, tools, etc.) are forwarded as-is — upstream rejects invalid shapes.
+  const upstreamBody = {
+    ...parsedBody,
+    model: resolveModel({ model: modelStr }, opts.config),
     stream: true,
-  };
+  } as AnthropicMessagesRequest;
   const upstreamBodyText = transformRequestBody(JSON.stringify(upstreamBody), { format: "anthropic", userId: cred.cred.userId }) ?? JSON.stringify(upstreamBody);
 
   // Now we're safe to take a ticket

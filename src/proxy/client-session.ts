@@ -180,8 +180,8 @@ function firstHeader(headers: Headers, names: string[]): string | null {
 function bodyMetadataTrace(body: string | undefined): ExplicitTraceContext {
   if (!body) return {};
   try {
-    const parsed = JSON.parse(body) as any;
-    const metadata = parsed?.metadata;
+    const parsed = JSON.parse(body) as Record<string, unknown>;
+    const metadata = parsed?.metadata as Record<string, unknown> | undefined;
     if (!metadata || typeof metadata !== "object") return {};
     return {
       requestId: stringProperty(metadata, ["requestId", "request_id"]),
@@ -204,7 +204,7 @@ function stringProperty(obj: Record<string, unknown>, names: string[]): string |
 
 function canonicalize(body: string | undefined, format: Format, fallbackModel: string): CanonicalRequest | null {
   if (!body) return null;
-  let parsed: any;
+  let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(body);
   } catch {
@@ -220,7 +220,7 @@ function canonicalize(body: string | undefined, format: Format, fallbackModel: s
     format,
     model,
     system: parsed.system,
-    developer: messages.filter((m: any) => m?.role === "developer"),
+    developer: messages.filter((m: unknown) => typeof m === "object" && m !== null && (m as Record<string, unknown>).role === "developer"),
     tools: parsed.tools,
     tool_choice: parsed.tool_choice,
     messages,

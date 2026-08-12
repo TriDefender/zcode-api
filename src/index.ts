@@ -20,8 +20,6 @@ import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 
-declare const __filename: string | undefined;
-
 const VERSION = "2.6.0";
 
 if (require.main === module) main();

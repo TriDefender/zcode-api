@@ -248,9 +248,9 @@ function streamResponse(upstreamResp: Response, context: StreamResponseContext):
         if (finalEvent && context.request.store !== false && context.options.responseStore) {
           context.options.responseStore.set(buildStoredResponse(finalEvent.response, context.input, context.request.instructions));
         }
-        controller.close();
+        try { controller.close(); } catch {}
       } catch (err) {
-        controller.error(err);
+        try { controller.error(err); } catch {}
       }
     },
     cancel(reason) {

@@ -339,7 +339,7 @@ export function chatChunkToResponsesEvents(
 
 function handleChoice(choice: OpenAIStreamChoice, state: ResponsesStreamState): ResponsesStreamEvent[] {
   const events: ResponsesStreamEvent[] = [];
-  const delta = choice.delta;
+  const delta = choice.delta ?? {};
 
   // ── reasoning ──
   if (delta.reasoning_content && delta.reasoning_content.length > 0) {

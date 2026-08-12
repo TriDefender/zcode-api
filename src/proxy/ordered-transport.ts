@@ -46,7 +46,11 @@ export async function sendOrderedUpstreamRequest(req: OrderedUpstreamRequest): P
     }
 
     function finish(): void {
-      if (chunkedDecoder && !chunkedDecoder.done) return;
+      if (chunkedDecoder && !chunkedDecoder.done) {
+        try { bodyController?.error(new Error("upstream chunked body truncated")); } catch {}
+        socket.destroy();
+        return;
+      }
       try { bodyController?.close(); } catch {}
     }
 
