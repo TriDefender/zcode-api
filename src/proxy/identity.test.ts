@@ -52,6 +52,47 @@ describe("buildIdentityHeaders", () => {
     expect(h["X-Client-Timezone"]).toBe(expectedTz);
   });
 
+  it("emits X-Device-Mid from config value when no env override is set", () => {
+    const mid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
+    const h = buildIdentityHeaders({ ...BASE, deviceMid: mid });
+    expect(h["X-Device-Mid"]).toBe(mid);
+  });
+
+  it("omits X-Device-Mid when neither env nor config provides one", () => {
+    const saved = process.env.ZCODE_IDENTITY_DEVICE_MID;
+    delete process.env.ZCODE_IDENTITY_DEVICE_MID;
+    try {
+      const h = buildIdentityHeaders(BASE);
+      expect(h["X-Device-Mid"]).toBeUndefined();
+    } finally {
+      if (saved !== undefined) process.env.ZCODE_IDENTITY_DEVICE_MID = saved;
+    }
+  });
+
+  it("ZCODE_IDENTITY_DEVICE_MID env wins over the config value", () => {
+    const saved = process.env.ZCODE_IDENTITY_DEVICE_MID;
+    process.env.ZCODE_IDENTITY_DEVICE_MID = "11111111-2222-4333-8444-555555555555";
+    try {
+      const h = buildIdentityHeaders({ ...BASE, deviceMid: "00000000-0000-4000-8000-000000000000" });
+      expect(h["X-Device-Mid"]).toBe("11111111-2222-4333-8444-555555555555");
+    } finally {
+      if (saved === undefined) delete process.env.ZCODE_IDENTITY_DEVICE_MID;
+      else process.env.ZCODE_IDENTITY_DEVICE_MID = saved;
+    }
+  });
+
+  it("drops a non-printable deviceMid instead of emitting it", () => {
+    const saved = process.env.ZCODE_IDENTITY_DEVICE_MID;
+    process.env.ZCODE_IDENTITY_DEVICE_MID = "bad\u00ffvalue";
+    try {
+      const h = buildIdentityHeaders(BASE);
+      expect(h["X-Device-Mid"]).toBeUndefined();
+    } finally {
+      if (saved === undefined) delete process.env.ZCODE_IDENTITY_DEVICE_MID;
+      else process.env.ZCODE_IDENTITY_DEVICE_MID = saved;
+    }
+  });
+
   it("honours ZCODE_IDENTITY_* env overrides for the four new headers", () => {
     const saved = {
       rc: process.env.ZCODE_IDENTITY_RELEASE_CHANNEL,

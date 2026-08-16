@@ -34616,6 +34616,7 @@ ${captureLines}` : capture.stack;
 var index_exports = {};
 __export(index_exports, {
   applyAndroidIdentityDefaults: () => applyAndroidIdentityDefaults,
+  ensureDeviceMidInConfig: () => ensureDeviceMidInConfig,
   main: () => main,
   parseServeArgs: () => parseServeArgs
 });
@@ -34705,7 +34706,8 @@ function loadConfig(path) {
     sourceTitleEnv: process.env[ENV.SOURCE_TITLE],
     sourceTitleYaml: parsed?.identity?.sourceTitle,
     refererEnv: process.env[ENV.REFERER_ORIGIN],
-    refererYaml: parsed?.identity?.refererOrigin
+    refererYaml: parsed?.identity?.refererOrigin,
+    deviceMidYaml: parsed?.identity?.deviceMid
   });
   const clientIdentity = resolveClientIdentity(parsed?.clientIdentity);
   const responses = resolveResponsesConfig(parsed?.responses);
@@ -34859,7 +34861,8 @@ function resolveIdentity(inp) {
   const appVersion = ASCII_PRINTABLE.test(rawVersion) ? rawVersion : DEFAULTS.APP_VERSION;
   const sourceTitle = (inp.sourceTitleEnv ?? inp.sourceTitleYaml ?? DEFAULTS.SOURCE_TITLE).trim() || DEFAULTS.SOURCE_TITLE;
   const refererOrigin = (inp.refererEnv ?? inp.refererYaml ?? DEFAULTS.REFERER_ORIGIN).trim() || DEFAULTS.REFERER_ORIGIN;
-  return { appVersion, sourceTitle, refererOrigin };
+  const deviceMid = typeof inp.deviceMidYaml === "string" ? inp.deviceMidYaml.trim() : "";
+  return { appVersion, sourceTitle, refererOrigin, ...deviceMid ? { deviceMid } : {} };
 }
 function validate(config) {
   if (config.server.port < 1 || config.server.port > 65535) {
@@ -34946,6 +34949,11 @@ identity:
   sourceTitle: "cli"
   # HTTP-Referer URL. Default "https://zcode.z.ai".
   refererOrigin: "https://zcode.z.ai"
+  # Device identity (X-Device-Mid) \u2014 random UUIDv4, generated ONCE and reused
+  # forever (mirrors ZCode's telemetry deviceMid; no hardware values involved).
+  # Auto-generated into this file at first \`auth login\` or config creation.
+  # Leave empty on Android \u2014 the app injects ZCODE_IDENTITY_DEVICE_MID instead.
+  deviceMid: ""
 
 # Local client-session inference for cache-affinity experiments.
 # "observe" (default) logs inferred sessions in debug mode but does not change
@@ -36525,7 +36533,7 @@ function buildIdentityHeaders(id) {
   const releaseChannel = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE_CHANNEL);
   const clientLanguage = resolveClientLanguage();
   const clientTimezone = resolveClientTimezone();
-  const deviceMid = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_DEVICE_MID);
+  const deviceMid = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_DEVICE_MID) ?? normalizePrintableHeaderValue(id.deviceMid);
   const headers = {
     "HTTP-Referer": id.refererOrigin,
     "User-Agent": `ZCode/${n ?? "unknown"}`,
@@ -41992,6 +42000,7 @@ var import_node_child_process = require("node:child_process");
 var import_node_fs4 = require("node:fs");
 var import_node_path2 = require("node:path");
 var import_node_os3 = require("node:os");
+var import_node_crypto3 = require("node:crypto");
 
 // src/runtime/node-fetch-compat.ts
 var applied = false;
@@ -42075,6 +42084,7 @@ async function serve(configPath, debug) {
   const path = configPath ?? process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
   if (!(0, import_node_fs4.existsSync)(path)) {
     (0, import_node_fs4.writeFileSync)(path, EXAMPLE_CONFIG_YAML, "utf-8");
+    ensureDeviceMidInConfig(path);
     console.log(`Created ${path} from bundled template.`);
     console.log(`Edit auth.apiKey, or run: zcode-proxy auth login <zai|bigmodel>
 `);
@@ -42267,6 +42277,7 @@ async function authLogin(args) {
     console.error("Usage: zcode-proxy auth login <zai|bigmodel> [--import]");
     process.exit(1);
   }
+  ensureConfigWithDeviceMid();
   console.log(`Logging in: ${provider}${importMode ? " (import)" : " (OAuth)"}
 `);
   let cred;
@@ -42285,6 +42296,40 @@ Logged in as ${provider}.`);
   console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);
   if (cred.userId) console.log(`  User ID: ${cred.userId}`);
   console.log(`  Stored:  ${getStorePath()}`);
+}
+function ensureConfigWithDeviceMid() {
+  const path = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
+  if (!(0, import_node_fs4.existsSync)(path)) {
+    (0, import_node_fs4.writeFileSync)(path, EXAMPLE_CONFIG_YAML, "utf-8");
+    console.log(`Created ${path} from bundled template.`);
+  }
+  return ensureDeviceMidInConfig(path);
+}
+function ensureDeviceMidInConfig(path) {
+  const deviceMidLine = /^(\s*)deviceMid:\s*(.*)$/m;
+  const identityBlockLine = /^identity:\s*$/m;
+  const raw = (0, import_node_fs4.readFileSync)(path, "utf-8");
+  const existing = deviceMidLine.exec(raw);
+  if (existing) {
+    const value = existing[2].trim().replace(/^"|"$/g, "");
+    if (value.length > 0) return value;
+  }
+  const mid = (0, import_node_crypto3.randomUUID)();
+  let updated;
+  if (existing) {
+    updated = raw.replace(deviceMidLine, `${existing[1]}deviceMid: "${mid}"`);
+  } else if (identityBlockLine.test(raw)) {
+    updated = raw.replace(identityBlockLine, `identity:
+  deviceMid: "${mid}"`);
+  } else {
+    const block = `identity:
+  deviceMid: "${mid}"
+`;
+    updated = raw.endsWith("\n") || raw.length === 0 ? raw + block : raw + "\n" + block;
+  }
+  (0, import_node_fs4.writeFileSync)(path, updated, "utf-8");
+  console.log(`Device identity generated: ${mid.slice(0, 8)}\u2026 (stored in ${path})`);
+  return mid;
 }
 function authLogout() {
   if (!(0, import_node_fs4.existsSync)(getStorePath())) {
@@ -42371,6 +42416,7 @@ function openBrowser(url) {
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   applyAndroidIdentityDefaults,
+  ensureDeviceMidInConfig,
   main,
   parseServeArgs
 });

@@ -34,6 +34,67 @@ afterEach(() => {
   rmSync(TMP, { recursive: true, force: true });
 });
 
+describe("identity.deviceMid", () => {
+  it("loads identity.deviceMid from YAML", () => {
+    const path = writeYaml(`
+server:
+  port: 9090
+  host: "127.0.0.1"
+auth:
+  mode: apikey
+  apiKey: "testkey.testsecret"
+provider: zai
+identity:
+  appVersion: "3.7.7"
+  deviceMid: "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0"
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.identity.deviceMid).toBe("0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0");
+  });
+
+  it("leaves identity.deviceMid undefined when the key is absent or empty", () => {
+    const path = writeYaml(`
+server:
+  port: 9090
+  host: "127.0.0.1"
+auth:
+  mode: apikey
+  apiKey: "testkey.testsecret"
+provider: zai
+identity:
+  appVersion: "3.7.7"
+  deviceMid: ""
+`);
+    expect(loadConfig(path).identity.deviceMid).toBeUndefined();
+
+    const path2 = writeYaml(`
+server:
+  port: 9090
+auth:
+  mode: apikey
+  apiKey: "k"
+provider: zai
+identity:
+  appVersion: "3.7.7"
+`);
+    expect(loadConfig(path2).identity.deviceMid).toBeUndefined();
+  });
+
+  it("trims whitespace around identity.deviceMid", () => {
+    const path = writeYaml(`
+server:
+  port: 9090
+auth:
+  mode: apikey
+  apiKey: "testkey.testsecret"
+provider: zai
+identity:
+  deviceMid: "  0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0  "
+`);
+    expect(loadConfig(path).identity.deviceMid).toBe("0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0");
+  });
+});
+
 describe("loadConfig", () => {
   it("loads a valid YAML config with all fields", () => {
     const path = writeYaml(`

@@ -112,6 +112,7 @@ export function loadConfig(path: string): ProxyConfig {
     sourceTitleYaml: parsed?.identity?.sourceTitle,
     refererEnv: process.env[ENV.REFERER_ORIGIN],
     refererYaml: parsed?.identity?.refererOrigin,
+    deviceMidYaml: parsed?.identity?.deviceMid,
   });
 
   const clientIdentity = resolveClientIdentity(parsed?.clientIdentity);
@@ -292,6 +293,7 @@ interface IdentityInputs {
   sourceTitleYaml?: string;
   refererEnv?: string;
   refererYaml?: string;
+  deviceMidYaml?: string;
 }
 
 /** Resolve identity fields (env > YAML > default). Non-ASCII `appVersion` silently falls back to the default. */
@@ -305,7 +307,8 @@ function resolveIdentity(inp: IdentityInputs): ProxyIdentity {
   const refererOrigin = (inp.refererEnv ?? inp.refererYaml ?? DEFAULTS.REFERER_ORIGIN).trim()
     || DEFAULTS.REFERER_ORIGIN;
 
-  return { appVersion, sourceTitle, refererOrigin };
+  const deviceMid = typeof inp.deviceMidYaml === "string" ? inp.deviceMidYaml.trim() : "";
+  return { appVersion, sourceTitle, refererOrigin, ...(deviceMid ? { deviceMid } : {}) };
 }
 
 /** Cross-field validation after all fields are resolved. */

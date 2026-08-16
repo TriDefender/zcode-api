@@ -19,6 +19,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { ensureNodeFetchNoTimeouts } from "./runtime/node-fetch-compat.js";
 
 const VERSION = "2.6.0";
@@ -111,6 +112,7 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   const path = configPath ?? process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
   if (!existsSync(path)) {
     writeFileSync(path, EXAMPLE_CONFIG_YAML, "utf-8");
+    ensureDeviceMidInConfig(path);
     console.log(`Created ${path} from bundled template.`);
     console.log(`Edit auth.apiKey, or run: zcode-proxy auth login <zai|bigmodel>\n`);
   }
@@ -340,6 +342,8 @@ async function authLogin(args: string[]): Promise<void> {
     process.exit(1);
   }
 
+  ensureConfigWithDeviceMid();
+
   console.log(`Logging in: ${provider}${importMode ? " (import)" : " (OAuth)"}\n`);
 
   let cred: Credential;
@@ -359,6 +363,57 @@ async function authLogin(args: string[]): Promise<void> {
   console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);
   if (cred.userId) console.log(`  User ID: ${cred.userId}`);
   console.log(`  Stored:  ${getStorePath()}`);
+}
+
+/**
+ * Ensure config.yaml exists and carries a stable `identity.deviceMid`.
+ * Creates the file from the bundled template when missing (desktop flow;
+ * Android's mid comes from NodeRunner env injection instead and is never
+ * written here). Returns the mid (existing or freshly generated).
+ */
+function ensureConfigWithDeviceMid(): string {
+  const path = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
+  if (!existsSync(path)) {
+    writeFileSync(path, EXAMPLE_CONFIG_YAML, "utf-8");
+    console.log(`Created ${path} from bundled template.`);
+  }
+  return ensureDeviceMidInConfig(path);
+}
+
+/**
+ * Generate-or-reuse `identity.deviceMid` in a YAML config via targeted line
+ * edit (comments preserved): fills an empty `deviceMid:` value, inserts one
+ * under a block-style `identity:` key, or appends a new `identity:` block when
+ * the key is absent entirely. Idempotent — an existing non-empty value is
+ * returned untouched. The regexes are function-local on purpose: `main()` runs
+ * synchronously at module top (before later top-level statements initialize),
+ * so any module-level const this function touches would still be undefined on
+ * the boot-time `serve` path.
+ */
+export function ensureDeviceMidInConfig(path: string): string {
+  const deviceMidLine = /^(\s*)deviceMid:\s*(.*)$/m;
+  const identityBlockLine = /^identity:\s*$/m;
+  const raw = readFileSync(path, "utf-8");
+
+  const existing = deviceMidLine.exec(raw);
+  if (existing) {
+    const value = existing[2].trim().replace(/^"|"$/g, "");
+    if (value.length > 0) return value;
+  }
+
+  const mid = randomUUID();
+  let updated: string;
+  if (existing) {
+    updated = raw.replace(deviceMidLine, `${existing[1]}deviceMid: "${mid}"`);
+  } else if (identityBlockLine.test(raw)) {
+    updated = raw.replace(identityBlockLine, `identity:\n  deviceMid: "${mid}"`);
+  } else {
+    const block = `identity:\n  deviceMid: "${mid}"\n`;
+    updated = raw.endsWith("\n") || raw.length === 0 ? raw + block : raw + "\n" + block;
+  }
+  writeFileSync(path, updated, "utf-8");
+  console.log(`Device identity generated: ${mid.slice(0, 8)}… (stored in ${path})`);
+  return mid;
 }
 
 function authLogout(): void {

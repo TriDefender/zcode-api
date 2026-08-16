@@ -114,7 +114,10 @@ export function buildIdentityHeaders(id: ProxyIdentity): Record<string, string> 
   const releaseChannel = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE_CHANNEL);
   const clientLanguage = resolveClientLanguage();
   const clientTimezone = resolveClientTimezone();
-  const deviceMid = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_DEVICE_MID);
+  // env (Android NodeRunner injection) wins over the config.yaml value (desktop
+  // persistence) — both are UUIDv4 generated once and reused forever.
+  const deviceMid = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_DEVICE_MID)
+    ?? normalizePrintableHeaderValue(id.deviceMid);
 
   const headers: Record<string, string> = {
     "HTTP-Referer": id.refererOrigin,

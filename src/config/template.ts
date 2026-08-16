@@ -73,6 +73,11 @@ identity:
   sourceTitle: "cli"
   # HTTP-Referer URL. Default "https://zcode.z.ai".
   refererOrigin: "https://zcode.z.ai"
+  # Device identity (X-Device-Mid) — random UUIDv4, generated ONCE and reused
+  # forever (mirrors ZCode's telemetry deviceMid; no hardware values involved).
+  # Auto-generated into this file at first \`auth login\` or config creation.
+  # Leave empty on Android — the app injects ZCODE_IDENTITY_DEVICE_MID instead.
+  deviceMid: ""
 
 # Local client-session inference for cache-affinity experiments.
 # "observe" (default) logs inferred sessions in debug mode but does not change

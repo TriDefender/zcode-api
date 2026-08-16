@@ -59,6 +59,7 @@ class NodeRunner(private val context: Context) {
         }
 
         val credentialSeed = CredentialStore.getOrCreateSeed(context)
+        val deviceMid = ensureDeviceMid()
 
         val pb = ProcessBuilder(
             libnode.absolutePath,
@@ -76,7 +77,8 @@ class NodeRunner(private val context: Context) {
             environment()["ZCODE_PROXY_CREDENTIAL_SECRET"] = credentialSeed
             environment()["ZCODE_IDENTITY_PLATFORM"] = "linux"
             environment()["ZCODE_IDENTITY_ARCH"] = "x64"
-            environment()["ZCODE_IDENTITY_RELEASE"] = "6.8.0"
+            environment()["ZCODE_IDENTITY_RELEASE"] = "6.8.0-49-generic"
+            environment()["ZCODE_IDENTITY_DEVICE_MID"] = deviceMid
             environment()["ZCODE_PROXY_CONFIG"] = config.absolutePath
             environment()["ZCODE_LOG_FORMAT"] = "compact"
         }
@@ -130,6 +132,23 @@ class NodeRunner(private val context: Context) {
         true
     } catch (e: Exception) {
         false
+    }
+
+    /**
+     * Stable per-install device identity (X-Device-Mid): random UUIDv4 created
+     * once in the app-private dir and reused forever — mirrors ZCode's
+     * telemetry deviceMid. Never regenerated while the file exists (fingerprint
+     * stability is required by upstream risk engines).
+     */
+    private fun ensureDeviceMid(): String {
+        val f = File(context.filesDir, "device_mid.txt")
+        if (f.exists()) {
+            val cached = f.readText().trim()
+            if (cached.isNotEmpty()) return cached
+        }
+        val mid = java.util.UUID.randomUUID().toString()
+        f.writeText(mid)
+        return mid
     }
 
     companion object {
