@@ -19,6 +19,7 @@ import { spawn } from "node:child_process";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { ensureNodeFetchNoTimeouts } from "./runtime/node-fetch-compat.js";
 
 const VERSION = "2.6.0";
 
@@ -45,6 +46,9 @@ export function parseServeArgs(args: string[]): ServeArgs {
 }
 
 export function main(): void {
+  // Fire-and-forget is race-safe: the dynamic import resolves in a microtask,
+  // before the listener's event-loop callback can admit a request.
+  void ensureNodeFetchNoTimeouts();
   try {
     runCli();
   } catch (err) {
@@ -158,11 +162,30 @@ function buildServerOptions(config: ProxyConfig, auth: AuthManager, debug: boole
 }
 
 /**
+ * Desktop-Linux identity defaults for the Android entry (anti-pattern #34).
+ * Without these, the Node process on Android reports its true host values:
+ * `X-Platform: linux-arm64` and `X-Os-Version: 6.1.xx-android14-…` — a kernel
+ * string no real ZCode desktop emits. `identity.ts` reads these env vars per
+ * request, so setting them once here retargets every upstream call. Values are
+ * deliberately CONSTANT (Ubuntu 24.04 x64 profile — the largest desktop-Linux
+ * population): kernel strings are shared by millions of real machines, and
+ * stability is required by anti-pattern #13 (never randomize fingerprints).
+ * Explicit env values (adb shell setprop / NodeRunner) still win — each is set
+ * with `??`, not unconditionally.
+ */
+export function applyAndroidIdentityDefaults(): void {
+  process.env.ZCODE_IDENTITY_PLATFORM = process.env.ZCODE_IDENTITY_PLATFORM ?? "linux";
+  process.env.ZCODE_IDENTITY_ARCH = process.env.ZCODE_IDENTITY_ARCH ?? "x64";
+  process.env.ZCODE_IDENTITY_RELEASE = process.env.ZCODE_IDENTITY_RELEASE ?? "6.8.0-49-generic";
+}
+
+/**
  * Android entry — starts the proxy plus a localhost control listener.
  * Caller (Kotlin shell) must set env: ZCODE_CONTROL_PORT (control listener),
  * ZCODE_OAUTH_CALLBACK_PORT (fixed OAuth callback port for WebView redirect).
  */
 async function runAndroid(): Promise<void> {
+  applyAndroidIdentityDefaults();
   const path = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
   if (!existsSync(path)) {
     writeFileSync(path, EXAMPLE_CONFIG_YAML, "utf-8");
