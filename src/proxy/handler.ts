@@ -79,7 +79,15 @@ export async function proxyRequest(
   const started = Date.now();
   const reqId = nextReqId();
 
-  const body = await readBody(clientReq);
+  let body: string | undefined;
+  try {
+    body = await readBody(clientReq);
+  } catch (err) {
+    if (err instanceof InflatedBodyTooLargeError) {
+      return errorResponse(413, "request_too_large", err.message);
+    }
+    return errorResponse(400, "invalid_request_error", (err as Error).message);
+  }
 
   const meta = peekBody(body);
 
@@ -172,7 +180,7 @@ export async function proxyRequest(
 
   let upstreamResp: Response;
   try {
-    upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal);
+    upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal, hasCustomFetchImpl);
   } catch (err) {
     if (debug) debugError(reqId, "upstream_unreachable", (err as Error).message);
     printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
@@ -219,7 +227,7 @@ export async function proxyRequest(
       };
       upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, retryHeaders, clientSession);
       upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, retryHeaders, clientSession);
-      upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal).catch((err: Error) => {
+      upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal, hasCustomFetchImpl).catch((err: Error) => {
         if (debug) debugError(reqId, "upstream_unreachable", err.message);
         printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
         return errorResponse(502, "upstream_unreachable", err.message);
@@ -279,6 +287,43 @@ export function shouldUseOrderedTransport(config: ProxyConfig, clientSession: Cl
   return clientSession?.action === "enforce" || clientSession?.source === "explicit";
 }
 
+/**
+ * True on runtimes whose fetch ignores Bun's `decompress: false` extension and
+ * transparently inflates compressed response bodies while KEEPING the
+ * `content-encoding`/`content-length` headers (verified empirically against
+ * Node 22/26 undici and Bun 1.3: gzip, deflate and br are all decoded, headers
+ * unchanged). Bun honors `decompress: false` (raw bytes + truthful header), so
+ * no normalization is needed there.
+ */
+const FETCH_AUTO_DECOMPRESSES = typeof Bun === "undefined";
+
+/** Content codings a `FETCH_AUTO_DECOMPRESSES` runtime inflates transparently. */
+const AUTO_DECODED_ENCODINGS = new Set(["gzip", "x-gzip", "deflate", "br"]);
+
+/**
+ * Strip `content-encoding`/`content-length` from a Response whose body the
+ * runtime fetch has ALREADY inflated. Without this, passthrough on Node would
+ * forward a decoded body still labeled `content-encoding: gzip` — clients that
+ * advertise gzip then fail to decompress it, and the `passthroughResponse`
+ * safety net would double-decompress an already-inflated stream for clients
+ * that don't. No-op for encodings the runtime leaves untouched. Returns a new
+ * Response because a fetch Response's headers can be immutable.
+ */
+export function stripAutoDecodedEncoding(resp: Response): Response {
+  const encoding = resp.headers.get("content-encoding")?.toLowerCase().trim() ?? "";
+  if (!encoding) return resp;
+  const codings = encoding.split(",").map((c) => c.trim());
+  if (!codings.every((c) => AUTO_DECODED_ENCODINGS.has(c))) return resp;
+  const headers = new Headers(resp.headers);
+  headers.delete("content-encoding");
+  headers.delete("content-length");
+  return new Response(resp.body, {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers,
+  });
+}
+
 async function sendUpstreamRequest(
   upstreamReq: Request,
   headerPairs: UpstreamHeaderPair[],
@@ -287,6 +332,7 @@ async function sendUpstreamRequest(
   useOrderedTransport: boolean,
   fetchImpl: typeof fetch,
   abortSignal?: AbortSignal,
+  hasCustomFetchImpl = false,
 ): Promise<Response> {
   if (useOrderedTransport) {
     return sendOrderedUpstreamRequest({
@@ -299,15 +345,82 @@ async function sendUpstreamRequest(
   }
   const fetchOpts: RequestInit & { decompress?: boolean } = translateMode ? {} : { decompress: false };
   if (abortSignal) fetchOpts.signal = abortSignal;
-  return fetchImpl(upstreamReq, fetchOpts);
+  const resp = await fetchImpl(upstreamReq, fetchOpts);
+  // Passthrough on a runtime whose fetch auto-decompresses (Node/undici in the
+  // Android bundle): the body arrives inflated while its headers still claim
+  // compression. Drop the stale labels so the body/header pairing downstream
+  // stays truthful. Skipped for injected fetch impls (tests) — their bodies are
+  // genuinely compressed and their decompression semantics are their own.
+  if (!translateMode && FETCH_AUTO_DECOMPRESSES && !hasCustomFetchImpl) {
+    return stripAutoDecodedEncoding(resp);
+  }
+  return resp;
 }
 
-/** Read the request body as a string, returning undefined for empty bodies. */
-async function readBody(req: Request): Promise<string | undefined> {
+/**
+ * Read the request body as a string, returning undefined for empty bodies.
+ * Transparently inflates `content-encoding: gzip` request bodies (the OpenAI /
+ * Anthropic upstreams accept gzipped request bodies; without this, clients
+ * that send them got a misleading "body is not valid JSON" 400). Corrupt gzip
+ * throws a descriptive Error; inflation past `MAX_INFLATED_BODY_BYTES` throws
+ * `InflatedBodyTooLargeError` (streamed + aborted early, so a small wire
+ * payload cannot expand into unbounded proxy memory).
+ */
+export async function readBody(req: Request): Promise<string | undefined> {
   if (req.method === "GET" || req.method === "HEAD") return undefined;
-  const text = await req.text();
-  if (text.length === 0) return undefined;
-  return text;
+  const bytes = new Uint8Array(await req.arrayBuffer());
+  if (bytes.byteLength === 0) return undefined;
+  const encoding = req.headers.get("content-encoding")?.toLowerCase().trim() ?? "";
+  if (encoding === "gzip" || encoding === "x-gzip") {
+    return new TextDecoder().decode(await inflateGzipBody(bytes));
+  }
+  return new TextDecoder().decode(bytes);
+}
+
+/**
+ * Decompressed-size ceiling for gzip request bodies. Generous by design:
+ * plain bodies on `/v1/*` routes are intentionally uncapped (long-context LLM
+ * requests reach several MB), so this only rejects pathological amplification.
+ */
+const MAX_INFLATED_BODY_BYTES = 64 * 1024 * 1024;
+
+/** Thrown when a gzip request body expands past MAX_INFLATED_BODY_BYTES. */
+export class InflatedBodyTooLargeError extends Error {
+  constructor(limit: number) {
+    super(`gzip request body exceeds ${limit} bytes after decompression`);
+    this.name = "InflatedBodyTooLargeError";
+  }
+}
+
+async function inflateGzipBody(bytes: Uint8Array): Promise<Uint8Array> {
+  const gunzip = new DecompressionStream("gzip") as unknown as ReadableWritablePair<Uint8Array, Uint8Array>;
+  const source = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+  const reader = source.pipeThrough(gunzip).getReader();
+  const parts: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_INFLATED_BODY_BYTES) {
+        await reader.cancel().catch(() => {});
+        throw new InflatedBodyTooLargeError(MAX_INFLATED_BODY_BYTES);
+      }
+      parts.push(value);
+    }
+  } catch (err) {
+    if (err instanceof InflatedBodyTooLargeError) throw err;
+    throw new Error(`request body is marked content-encoding: gzip but failed to decompress: ${(err as Error).message}`);
+  } finally {
+    reader.releaseLock?.();
+  }
+  return Buffer.concat(parts);
 }
 
 /**

@@ -56,6 +56,7 @@ models:
   - glm-5v-turbo
   - glm-5.1
   - glm-5.2
+  - glm-5.3
 
 # Configurable identity headers injected on every upstream request to mimic the
 # ZCode desktop client (User-Agent, X-ZCode-App-Version, X-Title,
@@ -66,8 +67,8 @@ models:
 identity:
   # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
   # Must be printable ASCII; non-conforming values fall back to the default.
-  # Default: "3.3.3" (current ZCode release). Override to match your real client.
-  appVersion: "3.3.3"
+  # Default: "3.7.7" (current ZCode release). Override to match your real client.
+  appVersion: "3.7.7"
   # X-Title suffix → "Z Code@{sourceTitle}". Default "cli".
   sourceTitle: "cli"
   # HTTP-Referer URL. Default "https://zcode.z.ai".

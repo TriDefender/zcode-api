@@ -37,12 +37,12 @@ describe("providers", () => {
 });
 
 describe("models", () => {
-  it("MODELS contains exactly the 9 pinned coding-plan models", () => {
-    expect(MODELS).toHaveLength(9);
+  it("MODELS contains exactly the 10 pinned coding-plan models", () => {
+    expect(MODELS).toHaveLength(10);
     const ids = MODELS.map((m) => m.id);
     expect(ids).toEqual([
       "glm-4.5-air", "glm-4.6", "glm-4.6v", "glm-4.7",
-      "glm-5", "glm-5-turbo", "glm-5v-turbo", "glm-5.1", "glm-5.2",
+      "glm-5", "glm-5-turbo", "glm-5v-turbo", "glm-5.1", "glm-5.2", "glm-5.3",
     ]);
   });
 
@@ -55,23 +55,27 @@ describe("models", () => {
     }
   });
 
-  it("all models except glm-5.2 have 200k context", () => {
+  it("all models except glm-5.2/glm-5.3 have 200k context", () => {
     for (const m of MODELS) {
-      if (m.id === "glm-5.2") continue;
+      if (m.id === "glm-5.2" || m.id === "glm-5.3") continue;
       expect(m.contextWindow).toBe(200_000);
     }
   });
 
-  it("glm-5.2 has 1M context", () => {
+  it("glm-5.2 and glm-5.3 have 1M context", () => {
     const glm52 = MODELS.find((m) => m.id === "glm-5.2");
     expect(glm52).toBeDefined();
     expect(glm52!.contextWindow).toBe(1_000_000);
+    const glm53 = MODELS.find((m) => m.id === "glm-5.3");
+    expect(glm53).toBeDefined();
+    expect(glm53!.contextWindow).toBe(1_000_000);
   });
 
   it("includes key GLM models", () => {
     const ids = MODELS.map((m) => m.id);
     expect(ids).toContain("glm-4.6");
     expect(ids).toContain("glm-5.2");
+    expect(ids).toContain("glm-5.3");
     expect(ids).toContain("glm-5v-turbo");
   });
 });

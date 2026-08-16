@@ -8,7 +8,7 @@ import { createServer } from "node:net";
 import { buildUpstreamRequest, buildUpstreamHeaderPairs, buildUpstreamURL, buildAuthHeaders } from "./upstream.js";
 import { sendOrderedUpstreamRequest } from "./ordered-transport.js";
 import { buildZcodeTraceHeaders } from "./trace-headers.js";
-import { proxyRequest, errorResponse, shouldUseOrderedTransport } from "./handler.js";
+import { proxyRequest, errorResponse, shouldUseOrderedTransport, stripAutoDecodedEncoding } from "./handler.js";
 import { ZAI_PROVIDER, BIGMODEL_PROVIDER } from "../provider/providers.js";
 import type { Credential } from "../auth/types.js";
 import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
@@ -799,6 +799,138 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     expect(resp.status).toBe(400);
     const body = await resp.json();
     expect(body.error).toBe("bad request");
+  });
+});
+
+describe("client gzip handling", () => {
+  const OPENAI_RESPONSE = '{"id":"chatcmpl_1","object":"chat.completion","created":1,"model":"glm-4.6","choices":[{"index":0,"message":{"role":"assistant","content":"OpenAI hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":5,"total_tokens":13}}';
+
+  const testConfig: ProxyConfig = {
+    server: { port: 8080, host: "0.0.0.0" },
+    auth: { mode: "apikey", apiKey: "testkey.testsecret" },
+    provider: "zai",
+    plan: "coding-plan",
+    providers: {
+      zai: { anthropicBase: "https://api.z.ai/api/anthropic", openaiBase: "https://api.z.ai/api/coding/paas/v4" },
+      bigmodel: { anthropicBase: "https://open.bigmodel.cn/api/anthropic", openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4" },
+    },
+    defaultModel: "glm-4.6",
+    models: ["glm-4.6"],
+    identity: IDENTITY,
+    clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
+    responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+    mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+    async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
+    logging: { level: "info" },
+  };
+
+  const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+
+  it("stripAutoDecodedEncoding drops gzip/br labels and stale content-length", () => {
+    const upstream = new Response('{"ok":true}', {
+      status: 200,
+      headers: { "content-type": "application/json", "content-encoding": "gzip", "content-length": "49" },
+    });
+    const normalized = stripAutoDecodedEncoding(upstream);
+    expect(normalized).not.toBe(upstream);
+    expect(normalized.status).toBe(200);
+    expect(normalized.headers.get("content-encoding")).toBeNull();
+    expect(normalized.headers.get("content-length")).toBeNull();
+    expect(normalized.headers.get("content-type")).toBe("application/json");
+  });
+
+  it("stripAutoDecodedEncoding handles br and comma-separated coding lists", () => {
+    const br = new Response("x", { status: 200, headers: { "content-encoding": "br" } });
+    expect(stripAutoDecodedEncoding(br).headers.get("content-encoding")).toBeNull();
+
+    const multi = new Response("x", { status: 201, headers: { "content-encoding": "gzip, br" } });
+    const normalized = stripAutoDecodedEncoding(multi);
+    expect(normalized.headers.get("content-encoding")).toBeNull();
+    expect(normalized.status).toBe(201);
+  });
+
+  it("stripAutoDecodedEncoding leaves unsupported or absent encodings untouched", () => {
+    const zstd = new Response("x", { status: 200, headers: { "content-encoding": "zstd" } });
+    expect(stripAutoDecodedEncoding(zstd)).toBe(zstd);
+
+    const plain = new Response("x", { status: 200 });
+    expect(stripAutoDecodedEncoding(plain)).toBe(plain);
+  });
+
+  it("inflates gzip request bodies before forwarding upstream", async () => {
+    const payload = '{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}';
+    const fetchMock = mock(async (req: Request): Promise<Response> => {
+      const parsed = JSON.parse(await req.text());
+      expect(parsed.model).toBe("glm-4.6");
+      expect(parsed.messages[0].content).toBe("Hi");
+      return new Response(OPENAI_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-encoding": "gzip" },
+      body: gzipSync(new TextEncoder().encode(payload)),
+    });
+
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    expect(resp.status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = await resp.json();
+    expect(body.object).toBe("chat.completion");
+  });
+
+  it("returns 400 for a corrupt gzip request body without calling upstream", async () => {
+    const fetchMock = mock(async (): Promise<Response> => new Response("{}"));
+
+    const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-encoding": "gzip" },
+      body: new Uint8Array([1, 2, 3, 4]),
+    });
+
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    expect(resp.status).toBe(400);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+    const body = await resp.json();
+    expect(body.error.type).toBe("invalid_request_error");
+    expect(body.error.message).toContain("gzip");
+  });
+
+  it("returns 413 when a gzip request body inflates past the ceiling", async () => {
+    const fetchMock = mock(async (): Promise<Response> => new Response("{}"));
+
+    // 65 MiB of zeros — tiny on the wire, 1 MiB past the 64 MiB inflated cap.
+    const bomb = gzipSync(Buffer.alloc(65 * 1024 * 1024));
+    const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-encoding": "gzip" },
+      body: bomb,
+    });
+
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    expect(resp.status).toBe(413);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+    const body = await resp.json();
+    expect(body.error.type).toBe("request_too_large");
+  });
+
+  it("forwards plain (uncompressed) request bodies unchanged", async () => {
+    const payload = '{"model":"glm-4.6","messages":[]}';
+    const fetchMock = mock(async (req: Request): Promise<Response> => {
+      const parsed = JSON.parse(await req.text());
+      expect(parsed.model).toBe("glm-4.6");
+      expect(parsed.messages).toEqual([]);
+      return new Response(OPENAI_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
+    });
+
+    const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: payload,
+    });
+
+    const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
+    expect(resp.status).toBe(200);
   });
 });
 

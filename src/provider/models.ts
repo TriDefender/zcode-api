@@ -21,4 +21,5 @@ export const MODELS: ModelDef[] = [
   { id: "glm-5v-turbo", name: "GLM 5V Turbo", contextWindow: 200_000, maxOutputTokens: 128_000 },
   { id: "glm-5.1", name: "GLM 5.1", contextWindow: 200_000, maxOutputTokens: 128_000, reasoning: true },
   { id: "glm-5.2", name: "GLM 5.2", contextWindow: 1_000_000, maxOutputTokens: 128_000, reasoning: true },
+  { id: "glm-5.3", name: "GLM 5.3", contextWindow: 1_000_000, maxOutputTokens: 128_000, reasoning: true },
 ];

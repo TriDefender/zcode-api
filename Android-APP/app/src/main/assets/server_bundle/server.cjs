@@ -7691,7 +7691,7 @@ var DEFAULTS = {
   ZAI_OPENAI_BASE: "https://api.z.ai/api/coding/paas/v4",
   BIGMODEL_ANTHROPIC_BASE: "https://open.bigmodel.cn/api/anthropic",
   BIGMODEL_OPENAI_BASE: "https://open.bigmodel.cn/api/coding/paas/v4",
-  APP_VERSION: "3.3.3",
+  APP_VERSION: "3.7.7",
   SOURCE_TITLE: "cli",
   REFERER_ORIGIN: "https://zcode.z.ai",
   CLIENT_IDENTITY_MODE: "observe",
@@ -7972,6 +7972,7 @@ models:
   - glm-5v-turbo
   - glm-5.1
   - glm-5.2
+  - glm-5.3
 
 # Configurable identity headers injected on every upstream request to mimic the
 # ZCode desktop client (User-Agent, X-ZCode-App-Version, X-Title,
@@ -7982,8 +7983,8 @@ models:
 identity:
   # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
   # Must be printable ASCII; non-conforming values fall back to the default.
-  # Default: "3.3.3" (current ZCode release). Override to match your real client.
-  appVersion: "3.3.3"
+  # Default: "3.7.7" (current ZCode release). Override to match your real client.
+  appVersion: "3.7.7"
   # X-Title suffix \u2192 "Z Code@{sourceTitle}". Default "cli".
   sourceTitle: "cli"
   # HTTP-Referer URL. Default "https://zcode.z.ai".
@@ -10144,7 +10145,7 @@ var zcode_system_default = [
   },
   {
     type: "text",
-    text: "\nYou are an interactive ZCode agent that helps users with software engineering tasks.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n- Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n- Tools run behind a user-selected permission mode; a denied call means the user declined it \u2014 adjust, don't retry verbatim.\n- `<system-reminder>` tags in messages and tool results are injected by the harness, not the user. Hooks may intercept tool calls; treat hook output as user feedback.\n- Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n- Reference code as `file_path:line_number` \u2014 it's clickable.",
+    text: "\nYou are an interactive ZCode agent that helps users with software engineering tasks.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n- Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n- Tools run behind a user-selected permission mode; a denied call means the user declined it \u2014 adjust, don't retry verbatim.\n- The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n- Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n- Reference code as `file_path:line_number` \u2014 it's clickable.",
     cache_control: {
       type: "ephemeral"
     }
@@ -10303,7 +10304,8 @@ var MODELS = [
   { id: "glm-5-turbo", name: "GLM 5 Turbo", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
   { id: "glm-5v-turbo", name: "GLM 5V Turbo", contextWindow: 2e5, maxOutputTokens: 128e3 },
   { id: "glm-5.1", name: "GLM 5.1", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
-  { id: "glm-5.2", name: "GLM 5.2", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true }
+  { id: "glm-5.2", name: "GLM 5.2", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true },
+  { id: "glm-5.3", name: "GLM 5.3", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true }
 ];
 
 // src/translator/openai-to-anthropic.ts
@@ -11237,7 +11239,15 @@ async function proxyRequest(clientReq, format, opts) {
   const debug = opts.debug === true;
   const started = Date.now();
   const reqId = nextReqId();
-  const body = await readBody(clientReq);
+  let body;
+  try {
+    body = await readBody(clientReq);
+  } catch (err) {
+    if (err instanceof InflatedBodyTooLargeError) {
+      return errorResponse(413, "request_too_large", err.message);
+    }
+    return errorResponse(400, "invalid_request_error", err.message);
+  }
   const meta = peekBody(body);
   if (dumpEnabled()) {
     dumpPhase(reqId, "client_in", {
@@ -11317,7 +11327,7 @@ async function proxyRequest(clientReq, format, opts) {
   }
   let upstreamResp;
   try {
-    upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal);
+    upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal, hasCustomFetchImpl);
   } catch (err) {
     if (debug) debugError(reqId, "upstream_unreachable", err.message);
     printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
@@ -11361,7 +11371,7 @@ async function proxyRequest(clientReq, format, opts) {
       };
       upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, retryHeaders, clientSession);
       upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, retryHeaders, clientSession);
-      upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal).catch((err) => {
+      upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal, hasCustomFetchImpl).catch((err) => {
         if (debug) debugError(reqId, "upstream_unreachable", err.message);
         printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
         return errorResponse(502, "upstream_unreachable", err.message);
@@ -11414,7 +11424,23 @@ function shouldUseOrderedTransport(config, clientSession, hasCustomFetchImpl) {
   if (hasCustomFetchImpl) return false;
   return clientSession?.action === "enforce" || clientSession?.source === "explicit";
 }
-async function sendUpstreamRequest(upstreamReq, headerPairs, body, translateMode, useOrderedTransport, fetchImpl, abortSignal) {
+var FETCH_AUTO_DECOMPRESSES = typeof Bun === "undefined";
+var AUTO_DECODED_ENCODINGS = /* @__PURE__ */ new Set(["gzip", "x-gzip", "deflate", "br"]);
+function stripAutoDecodedEncoding(resp) {
+  const encoding = resp.headers.get("content-encoding")?.toLowerCase().trim() ?? "";
+  if (!encoding) return resp;
+  const codings = encoding.split(",").map((c) => c.trim());
+  if (!codings.every((c) => AUTO_DECODED_ENCODINGS.has(c))) return resp;
+  const headers = new Headers(resp.headers);
+  headers.delete("content-encoding");
+  headers.delete("content-length");
+  return new Response(resp.body, {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers
+  });
+}
+async function sendUpstreamRequest(upstreamReq, headerPairs, body, translateMode, useOrderedTransport, fetchImpl, abortSignal, hasCustomFetchImpl = false) {
   if (useOrderedTransport) {
     return sendOrderedUpstreamRequest({
       url: upstreamReq.url,
@@ -11426,13 +11452,59 @@ async function sendUpstreamRequest(upstreamReq, headerPairs, body, translateMode
   }
   const fetchOpts = translateMode ? {} : { decompress: false };
   if (abortSignal) fetchOpts.signal = abortSignal;
-  return fetchImpl(upstreamReq, fetchOpts);
+  const resp = await fetchImpl(upstreamReq, fetchOpts);
+  if (!translateMode && FETCH_AUTO_DECOMPRESSES && !hasCustomFetchImpl) {
+    return stripAutoDecodedEncoding(resp);
+  }
+  return resp;
 }
 async function readBody(req) {
   if (req.method === "GET" || req.method === "HEAD") return void 0;
-  const text = await req.text();
-  if (text.length === 0) return void 0;
-  return text;
+  const bytes = new Uint8Array(await req.arrayBuffer());
+  if (bytes.byteLength === 0) return void 0;
+  const encoding = req.headers.get("content-encoding")?.toLowerCase().trim() ?? "";
+  if (encoding === "gzip" || encoding === "x-gzip") {
+    return new TextDecoder().decode(await inflateGzipBody(bytes));
+  }
+  return new TextDecoder().decode(bytes);
+}
+var MAX_INFLATED_BODY_BYTES = 64 * 1024 * 1024;
+var InflatedBodyTooLargeError = class extends Error {
+  constructor(limit) {
+    super(`gzip request body exceeds ${limit} bytes after decompression`);
+    this.name = "InflatedBodyTooLargeError";
+  }
+};
+async function inflateGzipBody(bytes) {
+  const gunzip = new DecompressionStream("gzip");
+  const source = new ReadableStream({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    }
+  });
+  const reader = source.pipeThrough(gunzip).getReader();
+  const parts = [];
+  let total = 0;
+  try {
+    for (; ; ) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_INFLATED_BODY_BYTES) {
+        await reader.cancel().catch(() => {
+        });
+        throw new InflatedBodyTooLargeError(MAX_INFLATED_BODY_BYTES);
+      }
+      parts.push(value);
+    }
+  } catch (err) {
+    if (err instanceof InflatedBodyTooLargeError) throw err;
+    throw new Error(`request body is marked content-encoding: gzip but failed to decompress: ${err.message}`);
+  } finally {
+    reader.releaseLock?.();
+  }
+  return Buffer.concat(parts);
 }
 function passthroughResponse(upstream, clientAcceptsGzip2, body) {
   const headers = new Headers();
@@ -12818,8 +12890,11 @@ async function handleResponses(clientReq, opts) {
   const start = Date.now();
   let rawBody;
   try {
-    rawBody = await clientReq.text();
+    rawBody = await readBody(clientReq) ?? "";
   } catch (err) {
+    if (err instanceof InflatedBodyTooLargeError) {
+      return errorResponse(413, "request_too_large", err.message);
+    }
     return errorResponse(400, "invalid_request", `could not read request body: ${err.message}`);
   }
   let req;
@@ -13729,7 +13804,39 @@ async function readBody2(req) {
   } finally {
     reader.releaseLock?.();
   }
-  const body = new TextDecoder().decode(Buffer.concat(chunks));
+  const encoding = req.headers.get("content-encoding")?.toLowerCase().trim() ?? "";
+  let bytes = Buffer.concat(chunks);
+  if (encoding === "gzip" || encoding === "x-gzip") {
+    const gunzip = new DecompressionStream("gzip");
+    const source = new ReadableStream({
+      start(controller) {
+        controller.enqueue(bytes);
+        controller.close();
+      }
+    });
+    const inflateReader = source.pipeThrough(gunzip).getReader();
+    const inflated = [];
+    let inflatedTotal = 0;
+    try {
+      for (; ; ) {
+        const { done, value } = await inflateReader.read();
+        if (done) break;
+        inflatedTotal += value.byteLength;
+        if (inflatedTotal > MAX_REQUEST_BODY_BYTES) {
+          await inflateReader.cancel().catch(() => {
+          });
+          return { ok: false, response: errorResponse(413, "request_too_large", `decompressed body exceeds ${MAX_REQUEST_BODY_BYTES} byte cap`) };
+        }
+        inflated.push(value);
+      }
+      bytes = Buffer.concat(inflated);
+    } catch {
+      return { ok: false, response: errorResponse(400, "invalid_request_error", "could not decompress gzip request body") };
+    } finally {
+      inflateReader.releaseLock?.();
+    }
+  }
+  const body = new TextDecoder().decode(bytes);
   if (!body || body.length === 0) {
     return { ok: false, response: errorResponse(400, "invalid_request_error", "empty request body") };
   }

@@ -43,7 +43,7 @@ import {
   type ResponsesOutputItem,
 } from "../translator/responses-types.js";
 import { ResponseStore, type StoredResponse } from "../responses/store.js";
-import { errorResponse } from "./handler.js";
+import { errorResponse, readBody, InflatedBodyTooLargeError } from "./handler.js";
 
 export interface ResponsesHandlerOptions {
   config: ProxyConfig;
@@ -68,8 +68,11 @@ export async function handleResponses(
   // ── 1. parse body ──
   let rawBody: string;
   try {
-    rawBody = await clientReq.text();
+    rawBody = (await readBody(clientReq)) ?? "";
   } catch (err) {
+    if (err instanceof InflatedBodyTooLargeError) {
+      return errorResponse(413, "request_too_large", err.message);
+    }
     return errorResponse(400, "invalid_request", `could not read request body: ${(err as Error).message}`);
   }
   let req: ResponsesRequest;

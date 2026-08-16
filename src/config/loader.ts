@@ -32,7 +32,7 @@ const DEFAULTS = {
   ZAI_OPENAI_BASE: "https://api.z.ai/api/coding/paas/v4",
   BIGMODEL_ANTHROPIC_BASE: "https://open.bigmodel.cn/api/anthropic",
   BIGMODEL_OPENAI_BASE: "https://open.bigmodel.cn/api/coding/paas/v4",
-  APP_VERSION: "3.3.3",
+  APP_VERSION: "3.7.7",
   SOURCE_TITLE: "cli",
   REFERER_ORIGIN: "https://zcode.z.ai",
   CLIENT_IDENTITY_MODE: "observe" as const,
