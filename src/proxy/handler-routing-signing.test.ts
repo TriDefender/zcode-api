@@ -39,8 +39,8 @@ const TEST_CONFIG: ProxyConfig = {
 };
 
 const CRED = "testkey.testsecret";
-const LLM_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions";
-const ULTRA_URL = "https://zcode.z.ai/api/v1/ultra-zai/coding/paas/v4/chat/completions";
+const LLM_URL = "https://api.z.ai/api/anthropic/v1/messages";
+const ULTRA_URL = "https://zcode.z.ai/api/v1/ultra-zai/anthropic/v1/messages";
 
 function anthropicClientReq(extraHeaders?: Record<string, string>): Request {
   return new Request("http://localhost:8080/v1/messages", {
@@ -50,14 +50,17 @@ function anthropicClientReq(extraHeaders?: Record<string, string>): Request {
   });
 }
 
-function openaiOk(): Response {
+function anthropicOk(): Response {
   return new Response(
     JSON.stringify({
-      id: "chatcmpl_wire",
-      object: "chat.completion",
+      id: "msg_wire",
+      type: "message",
+      role: "assistant",
       model: "glm-4.6",
-      choices: [{ index: 0, message: { role: "assistant", content: "Hi" }, finish_reason: "stop" }],
-      usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      content: [{ type: "text", text: "Hi" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 1, output_tokens: 1 },
     }),
     { status: 200, headers: { "content-type": "application/json" } },
   );
@@ -125,7 +128,7 @@ describe("proxyRequest endpoint-routing + client-signing wiring", () => {
       fetchImpl: Object.assign(async (input: RequestInfo | URL) => {
         capturedUrl = String(input instanceof Request ? input.url : input);
         capturedHeaders = input instanceof Request ? input.headers : new Headers();
-        return openaiOk();
+        return anthropicOk();
       }, { preconnect: () => {} }) as typeof fetch,
       endpointRouting: routingMock(),
       clientSigning: manager,
@@ -158,7 +161,7 @@ describe("proxyRequest endpoint-routing + client-signing wiring", () => {
       fetchImpl: Object.assign(async (input: RequestInfo | URL) => {
         capturedUrl = String(input instanceof Request ? input.url : input);
         capturedHeaders = input instanceof Request ? input.headers : new Headers();
-        return openaiOk();
+        return anthropicOk();
       }, { preconnect: () => {} }) as typeof fetch,
       endpointRouting: null,
       clientSigning: null,

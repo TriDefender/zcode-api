@@ -37031,9 +37031,12 @@ var EndpointRoutingService = class {
     return promise;
   }
   async refresh(credential) {
+    const identityHeaders = Object.fromEntries(
+      Object.entries(buildIdentityHeaders(this.identity)).filter(([name]) => name !== "X-ZCode-Agent")
+    );
     const headers = {
-      accept: "application/json",
-      ...buildIdentityHeaders(this.identity)
+      ...identityHeaders,
+      Accept: "application/json"
     };
     const key = credential ?? this.credential?.();
     if (key) headers["x-api-key"] = key;
@@ -37347,12 +37350,18 @@ ${nonce}`
       }
       return null;
     }
-    const cleaned = pairs.filter(([k]) => !SIGNING_HEADER_NAMES.has(k.toLowerCase()));
+    const cleaned = pairs.filter(([k]) => {
+      const lower = k.toLowerCase();
+      return !SIGNING_HEADER_NAMES.has(lower) && lower !== "x-session-id";
+    });
     return [
       ...cleaned,
       ["X-Client-Ts", ts],
       ["X-Client-Version", appVersion],
       ["X-Client-Sig", sig],
+      // canonical case replaces the lowercase trace copy in this append position
+      // (mirrors the client's i.set("X-Session-Id") Headers.set semantics)
+      ["X-Session-Id", sessionId],
       ["X-Client-Nonce", nonce],
       ["X-App-Id", APP_ID],
       ["X-Client-Pow", pow]
@@ -37443,12 +37452,15 @@ ${credential}`;
     return state.gateEnabled;
   }
   async fetchGate(cred) {
+    const identityHeaders = Object.fromEntries(
+      Object.entries(buildIdentityHeaders(this.identity)).filter(([name]) => name !== "X-ZCode-Agent" && name !== "X-Device-Mid")
+    );
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GATE_TIMEOUT_MS);
     try {
       const resp = await this.fetchImpl(this.gateUrl, {
         method: "GET",
-        headers: { accept: "application/json", ...buildIdentityHeaders(this.identity), "x-api-key": cred.credential },
+        headers: { ...identityHeaders, "x-api-key": cred.credential },
         redirect: "manual",
         signal: controller.signal
       });
@@ -38905,9 +38917,9 @@ async function proxyRequest(clientReq, format, opts) {
     return errorResponse(503, "credential_unavailable", err.message);
   }
   const startPlan = config.plan === "start-plan";
-  const translateAnthropicToOpenAI = format === "anthropic";
-  const translateOpenAIToAnthropic = false;
-  const upstreamFormat = "openai";
+  const translateAnthropicToOpenAI = format === "anthropic" && startPlan;
+  const translateOpenAIToAnthropic = format === "openai" && !startPlan;
+  const upstreamFormat = startPlan ? "openai" : "anthropic";
   const clientSession = resolveSessionContext({ clientReq, body, upstreamFormat, model: meta.model, config });
   if (debug && clientSession) {
     const shortSession = clientSession.sessionId ? clientSession.sessionId.slice(0, 10) : "-";
@@ -38954,7 +38966,7 @@ async function proxyRequest(clientReq, format, opts) {
       }
     }
     return sendWithClientSigning(signer, {
-      url: sendUrl,
+      url: req.url,
       headerPairs: pairs,
       credential: credentialString(cred),
       appVersion: config.identity.appVersion,
@@ -40607,14 +40619,30 @@ async function handleResponses(clientReq, opts) {
   }
   const providerDef = resolveProviderDef(opts.config);
   const startPlan = opts.config.plan === "start-plan";
-  const chatBodyStr = JSON.stringify(chatRequest);
-  const transformedBody = transformRequestBody(chatBodyStr, {
-    format: "openai",
-    userId: startPlan ? void 0 : cred.userId,
-    startPlan
-  });
-  const upstreamHeaders = buildUpstreamHeaderPairs(clientReq, "openai", cred, opts.config.identity, opts.config.plan, void 0, void 0);
-  const upstreamReq = buildUpstreamRequest(clientReq, "openai", providerDef, cred, transformedBody, opts.config.identity, opts.config.plan, void 0, void 0);
+  const upstreamFormat = startPlan ? "openai" : "anthropic";
+  let upstreamRequestBody;
+  if (upstreamFormat === "anthropic") {
+    let anthropicReq;
+    try {
+      anthropicReq = translateRequestOpenAIToAnthropic(chatRequest);
+    } catch (err) {
+      return errorResponse(400, "translation_failed", `Chat\u2192Anthropic translation failed: ${err.message}`);
+    }
+    upstreamRequestBody = transformRequestBody(JSON.stringify(anthropicReq), {
+      format: "anthropic",
+      userId: cred.userId,
+      startPlan: false
+    }) ?? JSON.stringify(anthropicReq);
+  } else {
+    upstreamRequestBody = transformRequestBody(JSON.stringify(chatRequest), {
+      format: "openai",
+      userId: void 0,
+      startPlan
+    }) ?? JSON.stringify(chatRequest);
+  }
+  const transformedBody = upstreamRequestBody;
+  const upstreamHeaders = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, void 0, void 0);
+  const upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, providerDef, cred, transformedBody, opts.config.identity, opts.config.plan, void 0, void 0);
   if (debug) console.log(`[responses] \u2192 POST ${upstreamReq.url}`);
   let upstreamResp;
   try {
@@ -40624,7 +40652,7 @@ async function handleResponses(clientReq, opts) {
     if (debug && routed?.routed) console.log(`[responses] endpoint routing: ${upstreamReq.url} -> ${sendUrl}`);
     const signer = opts.clientSigning !== void 0 ? opts.clientSigning : getDefaultClientSigning(opts.config);
     upstreamResp = await sendWithClientSigning(signer, {
-      url: sendUrl,
+      url: upstreamReq.url,
       headerPairs: upstreamHeaders,
       credential: credentialString(cred),
       appVersion: opts.config.identity.appVersion,
@@ -40644,6 +40672,30 @@ async function handleResponses(clientReq, opts) {
   if (!upstreamResp.ok) {
     const errText = await upstreamResp.text().catch(() => "");
     return errorResponse(upstreamResp.status, "upstream_error", errText.slice(0, 500) || `upstream returned ${upstreamResp.status}`);
+  }
+  if (upstreamFormat === "anthropic") {
+    if (stream) {
+      if (!upstreamResp.body) {
+        return errorResponse(502, "translation_failed", "upstream returned no body for stream");
+      }
+      upstreamResp = new Response(anthropicSseToOpenaiSse(upstreamResp.body, req.model), {
+        status: upstreamResp.status,
+        headers: { "content-type": "text/event-stream" }
+      });
+    } else {
+      const rawAnthropic = await upstreamResp.text();
+      let parsedAnthropic;
+      try {
+        parsedAnthropic = JSON.parse(rawAnthropic);
+      } catch (err) {
+        return errorResponse(502, "translation_failed", `upstream returned non-JSON body: ${err.message}`);
+      }
+      const openaiResp = translateResponseAnthropicToOpenAI(parsedAnthropic, req.model);
+      upstreamResp = new Response(JSON.stringify(openaiResp), {
+        status: upstreamResp.status,
+        headers: { "content-type": "application/json" }
+      });
+    }
   }
   const responseId = generateResponsesId();
   const meta = { customToolNames, namespaceMap, hasToolSearch };

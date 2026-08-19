@@ -25,6 +25,9 @@ import { buildUpstreamRequest, buildUpstreamHeaderPairs } from "./upstream.js";
 import { getDefaultEndpointRouting, type EndpointRoutingService } from "./endpoint-routing.js";
 import { getDefaultClientSigning, sendWithClientSigning, type ClientSigningManager } from "./client-signing.js";
 import { credentialString } from "../auth/types.js";
+import { translateRequestOpenAIToAnthropic, translateResponseAnthropicToOpenAI } from "../translator/openai-to-anthropic.js";
+import { anthropicSseToOpenaiSse } from "../translator/sse-translator.js";
+import type { AnthropicMessagesRequest, AnthropicMessagesResponse } from "../translator/types.js";
 import type { ProviderDef } from "../provider/types.js";
 import {
   responsesToChatCompletions,
@@ -140,18 +143,37 @@ export async function handleResponses(
   }
   const providerDef = resolveProviderDef(opts.config);
 
-  // ── 5. body transform (stream_options, user_id, start-plan system) ──
+  // ── 5. body transform (start-plan system / anthropic cache_control + user_id) ──
   const startPlan = opts.config.plan === "start-plan";
-  const chatBodyStr = JSON.stringify(chatRequest);
-  const transformedBody = transformRequestBody(chatBodyStr, {
-    format: "openai",
-    userId: startPlan ? undefined : cred.userId,
-    startPlan,
-  });
+  const upstreamFormat: "openai" | "anthropic" = startPlan ? "openai" : "anthropic";
+  let upstreamRequestBody: string;
+  if (upstreamFormat === "anthropic") {
+    // v2.3: coding-plan upstream is Anthropic (mirrors the real client).
+    // Chain the existing translators: Responses → Chat → Anthropic request;
+    // Anthropic → Chat → Responses on the way back.
+    let anthropicReq: AnthropicMessagesRequest;
+    try {
+      anthropicReq = translateRequestOpenAIToAnthropic(chatRequest);
+    } catch (err) {
+      return errorResponse(400, "translation_failed", `Chat→Anthropic translation failed: ${(err as Error).message}`);
+    }
+    upstreamRequestBody = transformRequestBody(JSON.stringify(anthropicReq), {
+      format: "anthropic",
+      userId: cred.userId,
+      startPlan: false,
+    }) ?? JSON.stringify(anthropicReq);
+  } else {
+    upstreamRequestBody = transformRequestBody(JSON.stringify(chatRequest), {
+      format: "openai",
+      userId: undefined,
+      startPlan,
+    }) ?? JSON.stringify(chatRequest);
+  }
+  const transformedBody = upstreamRequestBody;
 
   // ── 6. POST upstream ──
-  const upstreamHeaders = buildUpstreamHeaderPairs(clientReq, "openai", cred, opts.config.identity, opts.config.plan, undefined, undefined);
-  const upstreamReq = buildUpstreamRequest(clientReq, "openai", providerDef, cred, transformedBody, opts.config.identity, opts.config.plan, undefined, undefined);
+  const upstreamHeaders = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, undefined, undefined);
+  const upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, providerDef, cred, transformedBody, opts.config.identity, opts.config.plan, undefined, undefined);
   if (debug) console.log(`[responses] → POST ${upstreamReq.url}`);
 
   let upstreamResp: Response;
@@ -161,8 +183,10 @@ export async function handleResponses(
     const sendUrl = routed?.routed ? routed.url : upstreamReq.url;
     if (debug && routed?.routed) console.log(`[responses] endpoint routing: ${upstreamReq.url} -> ${sendUrl}`);
     const signer = opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(opts.config);
+    // signing decisions run against the PRE-routing provider URL (mirrors the
+    // client, whose signer wraps the routing transport)
     upstreamResp = await sendWithClientSigning(signer, {
-      url: sendUrl,
+      url: upstreamReq.url,
       headerPairs: upstreamHeaders,
       credential: credentialString(cred),
       appVersion: opts.config.identity.appVersion,
@@ -183,6 +207,33 @@ export async function handleResponses(
   if (!upstreamResp.ok) {
     const errText = await upstreamResp.text().catch(() => "");
     return errorResponse(upstreamResp.status, "upstream_error", errText.slice(0, 500) || `upstream returned ${upstreamResp.status}`);
+  }
+
+  if (upstreamFormat === "anthropic") {
+    // normalize the Anthropic upstream response into the OpenAI Chat shape the
+    // downstream Responses translators already consume (SSE + batch)
+    if (stream) {
+      if (!upstreamResp.body) {
+        return errorResponse(502, "translation_failed", "upstream returned no body for stream");
+      }
+      upstreamResp = new Response(anthropicSseToOpenaiSse(upstreamResp.body, req.model), {
+        status: upstreamResp.status,
+        headers: { "content-type": "text/event-stream" },
+      });
+    } else {
+      const rawAnthropic = await upstreamResp.text();
+      let parsedAnthropic: AnthropicMessagesResponse;
+      try {
+        parsedAnthropic = JSON.parse(rawAnthropic) as AnthropicMessagesResponse;
+      } catch (err) {
+        return errorResponse(502, "translation_failed", `upstream returned non-JSON body: ${(err as Error).message}`);
+      }
+      const openaiResp = translateResponseAnthropicToOpenAI(parsedAnthropic, req.model);
+      upstreamResp = new Response(JSON.stringify(openaiResp), {
+        status: upstreamResp.status,
+        headers: { "content-type": "application/json" },
+      });
+    }
   }
 
   // ── 8. translate Chat → Responses ──

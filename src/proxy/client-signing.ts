@@ -7,9 +7,11 @@
  * rejections → permanent bypass for that (origin, credential) pair.
  *
  * Start-plan gateway and off-peak LLM paths are permanently exempt (the
- * client's `isUnsignedModelRequestPath` set). Bigmodel single-part keys cannot
- * sign (no `{apiKeyId}.{apiKeySecret}` separator) and are silently skipped —
- * a deliberate deviation from the client, which throws.
+ * client's `isUnsignedModelRequestPath` set). Credentials without the
+ * `{apiKeyId}.{apiKeySecret}` separator (legacy bigmodel keys issued before
+ * the copy endpoint returned secretKeys) are silently skipped — the client
+ * hard-throws there; skipping is a deliberate fail-open deviation. Both
+ * providers now issue two-part keys, which sign normally.
  *
  * Full protocol: `_reverse/NOTEPAD.md` "Client Request Signing V4".
  */
@@ -332,12 +334,18 @@ export class ClientSigningManager {
       }
       return null;
     }
-    const cleaned = pairs.filter(([k]) => !SIGNING_HEADER_NAMES.has(k.toLowerCase()));
+    const cleaned = pairs.filter(([k]) => {
+      const lower = k.toLowerCase();
+      return !SIGNING_HEADER_NAMES.has(lower) && lower !== "x-session-id";
+    });
     return [
       ...cleaned,
       ["X-Client-Ts", ts],
       ["X-Client-Version", appVersion],
       ["X-Client-Sig", sig],
+      // canonical case replaces the lowercase trace copy in this append position
+      // (mirrors the client's i.set("X-Session-Id") Headers.set semantics)
+      ["X-Session-Id", sessionId],
       ["X-Client-Nonce", nonce],
       ["X-App-Id", APP_ID],
       ["X-Client-Pow", pow],
@@ -439,12 +447,18 @@ export class ClientSigningManager {
   }
 
   private async fetchGate(cred: SigningCredential): Promise<"enabled" | "disabled" | "unavailable"> {
+    // sYr (bundle) builds the gate-fetch identity set WITHOUT X-ZCode-Agent and
+    // X-Device-Mid; Bxi appends x-api-key only — this fetch carries no Accept header.
+    const identityHeaders = Object.fromEntries(
+      Object.entries(buildIdentityHeaders(this.identity))
+        .filter(([name]) => name !== "X-ZCode-Agent" && name !== "X-Device-Mid"),
+    );
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GATE_TIMEOUT_MS);
     try {
       const resp = await this.fetchImpl(this.gateUrl, {
         method: "GET",
-        headers: { accept: "application/json", ...buildIdentityHeaders(this.identity), "x-api-key": cred.credential },
+        headers: { ...identityHeaders, "x-api-key": cred.credential },
         redirect: "manual",
         signal: controller.signal,
       });

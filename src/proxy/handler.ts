@@ -123,10 +123,13 @@ export async function proxyRequest(
     return errorResponse(503, "credential_unavailable", (err as Error).message);
   }
 
+  // v2.3 shape alignment: coding-plan mirrors the real ZCode client — Anthropic
+  // upstream (api.z.ai/api/anthropic → ultra via endpoint routing). start-plan
+  // stays on the zcode.z.ai OpenAI gateway.
   const startPlan = config.plan === "start-plan";
-  const translateAnthropicToOpenAI = format === "anthropic";
-  const translateOpenAIToAnthropic = false;
-  const upstreamFormat: Format = "openai";
+  const translateAnthropicToOpenAI = format === "anthropic" && startPlan;
+  const translateOpenAIToAnthropic = format === "openai" && !startPlan;
+  const upstreamFormat: Format = startPlan ? "openai" : "anthropic";
   const clientSession = resolveSessionContext({ clientReq, body, upstreamFormat, model: meta.model, config });
   if (debug && clientSession) {
     const shortSession = clientSession.sessionId ? clientSession.sessionId.slice(0, 10) : "-";
@@ -178,8 +181,11 @@ export async function proxyRequest(
         if (debug) debugLine(reqId, `endpoint routing: ${req.url} -> ${routed.url}`);
       }
     }
+    // Signing decisions (exempt-path, handshake origin, bypass keying) run
+    // against the PRE-routing provider URL — the client's signer wraps the
+    // routing transport, so its checks see the original URL too.
     return sendWithClientSigning(signer, {
-      url: sendUrl,
+      url: req.url,
       headerPairs: pairs,
       credential: credentialString(cred),
       appVersion: config.identity.appVersion,

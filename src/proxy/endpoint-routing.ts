@@ -137,9 +137,14 @@ export class EndpointRoutingService {
   }
 
   private async refresh(credential?: string): Promise<void> {
+    // QSt (bundle) builds the config-fetch identity set WITHOUT X-ZCode-Agent;
+    // Pvo appends x-api-key + Accept. Mirror that set exactly.
+    const identityHeaders = Object.fromEntries(
+      Object.entries(buildIdentityHeaders(this.identity)).filter(([name]) => name !== "X-ZCode-Agent"),
+    );
     const headers: Record<string, string> = {
-      accept: "application/json",
-      ...buildIdentityHeaders(this.identity),
+      ...identityHeaders,
+      Accept: "application/json",
     };
     const key = credential ?? this.credential?.();
     if (key) headers["x-api-key"] = key;

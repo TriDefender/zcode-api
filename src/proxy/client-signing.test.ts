@@ -136,6 +136,46 @@ describe("ClientSigningManager.sign", () => {
     expect(powDigest[0]).toBe(0);
   });
 
+  it("attaches the sYr gate header set (no X-ZCode-Agent, no X-Device-Mid, no Accept) on the gate fetch", async () => {
+    const fixture = await buildHandshakeFixture();
+    let gateHeaders: Headers | undefined;
+    const manager = new ClientSigningManager({
+      identity: { ...identity, deviceMid: "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0" },
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (url === GATE_URL) {
+          gateHeaders = new Headers(init?.headers);
+          return new Response(JSON.stringify({ code: 0, data: {} }), { status: 200 });
+        }
+        if (url === HANDSHAKE_URL) {
+          return new Response(JSON.stringify({ code: 200, data: { privateCipher: fixture.cipherB64 } }), { status: 200 });
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      }) as unknown as typeof fetch,
+    });
+    await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
+    expect(gateHeaders).toBeDefined();
+    expect(gateHeaders!.get("x-api-key")).toBe(CRED);
+    expect(gateHeaders!.get("x-zcode-agent")).toBeNull();
+    expect(gateHeaders!.get("x-device-mid")).toBeNull();
+    expect(gateHeaders!.get("accept")).toBeNull();
+    expect(gateHeaders!.get("user-agent")).toBe("ZCode/3.8.1");
+  });
+
+  it("re-emits the session id in canonical X-Session-Id form after X-Client-Sig on signed requests", async () => {
+    const fixture = await buildHandshakeFixture();
+    const calls: MockCalls = { gate: 0, handshakes: [] };
+    const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });
+    const signed = await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
+
+    const canonical = signed.filter(([k]) => k === "X-Session-Id");
+    expect(canonical).toEqual([["X-Session-Id", "sess-123"]]);
+    expect(signed.some(([k]) => k === "x-session-id")).toBeFalse();
+    const sigIndex = signed.findIndex(([k]) => k === "X-Client-Sig");
+    const sessionIndex = signed.findIndex(([k]) => k === "X-Session-Id");
+    expect(sessionIndex).toBe(sigIndex + 1);
+  });
+
   it("reuses the handshake key across sign() calls (one handshake, cached gate)", async () => {
     const fixture = await buildHandshakeFixture();
     const calls: MockCalls = { gate: 0, handshakes: [] };
@@ -168,7 +208,7 @@ describe("ClientSigningManager.sign", () => {
     expect(calls.handshakes.length).toBe(0);
   });
 
-  it("skips signing for single-part credentials (bigmodel keys) without probing the gate", async () => {
+  it("skips signing for legacy separator-less credentials without probing the gate", async () => {
     const fixture = await buildHandshakeFixture();
     const calls: MockCalls = { gate: 0, handshakes: [] };
     const manager = new ClientSigningManager({ identity, fetchImpl: signingFetchFixture(fixture, calls) });

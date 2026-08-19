@@ -135,7 +135,7 @@ describe("EndpointRoutingService", () => {
     expect(a.routed && b.routed && c.routed).toBeTrue();
   });
 
-  it("attaches identity headers and x-api-key on the config fetch", async () => {
+  it("attaches the QSt header set (identity minus X-ZCode-Agent) + x-api-key + Accept on the config fetch", async () => {
     let seen: Headers | undefined;
     const svc = new EndpointRoutingService({
       identity,
@@ -148,6 +148,8 @@ describe("EndpointRoutingService", () => {
     expect(seen!.get("x-api-key")).toBe("keyid.keysecret");
     expect(seen!.get("user-agent")).toBe("ZCode/3.8.1");
     expect(seen!.get("x-zcode-app-version")).toBe("3.8.1");
+    expect(seen!.get("x-zcode-agent")).toBeNull();
+    expect(seen!.get("accept")).toBe("application/json");
   });
 
   it("rejects non-https mapping entries and keeps routing off for that snapshot", async () => {
