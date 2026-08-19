@@ -84,7 +84,7 @@ describe("applyAndroidIdentityDefaults", () => {
   it("produces headers free of any Android telltales", () => {
     snapshotEnv();
     applyAndroidIdentityDefaults();
-    const h = buildIdentityHeaders({ appVersion: "3.7.7", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai" });
+    const h = buildIdentityHeaders({ appVersion: "3.8.1", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai" });
     const blob = JSON.stringify(h).toLowerCase();
     expect(h["X-Platform"]).toBe("linux-x64");
     expect(h["X-Os-Category"]).toBe("linux");
@@ -112,7 +112,7 @@ describe("ensureDeviceMidInConfig", () => {
 
   it("fills an empty deviceMid in place and preserves surrounding comments", () => {
     const p = writeConfig(`identity:
-  appVersion: "3.7.7"  # keep me
+  appVersion: "3.8.1"  # keep me
   deviceMid: ""
 other: 1
 `);
@@ -126,13 +126,13 @@ other: 1
 
   it("inserts deviceMid under an existing identity: block", () => {
     const p = writeConfig(`identity:
-  appVersion: "3.7.7"
+  appVersion: "3.8.1"
 `);
     const mid = ensureDeviceMidInConfig(p);
     const after = readFileSync(p, "utf-8");
     expect(after).toContain(`identity:
   deviceMid: "${mid}"
-  appVersion: "3.7.7"`);
+  appVersion: "3.8.1"`);
   });
 
   it("appends an identity: block when the key is absent entirely", () => {
@@ -158,10 +158,10 @@ other: 1
 
   it("produces a mid that buildIdentityHeaders emits as X-Device-Mid", () => {
     const p = writeConfig(`identity:
-  appVersion: "3.7.7"
+  appVersion: "3.8.1"
 `);
     const mid = ensureDeviceMidInConfig(p);
-    const h = buildIdentityHeaders({ appVersion: "3.7.7", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai", deviceMid: mid });
+    const h = buildIdentityHeaders({ appVersion: "3.8.1", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai", deviceMid: mid });
     expect(h["X-Device-Mid"]).toBe(mid);
   });
 });

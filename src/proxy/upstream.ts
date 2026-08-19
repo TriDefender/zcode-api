@@ -48,6 +48,16 @@ const STRIP_HEADERS = new Set([
   "x-zcode-trace-id",
   "x-query-id",
   "x-session-id",
+  // V4 signing headers are proxy-generated only; inbound copies must never
+  // reach the upstream (spoofed values would either fail verification or
+  // silently disable proxy signing via the existing-header guard).
+  "x-client-ts",
+  "x-client-version",
+  "x-client-sig",
+  "x-client-nonce",
+  "x-app-id",
+  "x-client-pow",
+  "x-client-sign-verified",
 ]);
 
 /**

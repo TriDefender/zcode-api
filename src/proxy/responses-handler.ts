@@ -22,6 +22,9 @@ import { getProvider } from "../provider/providers.js";
 import type { ProxyConfig } from "../config/types.js";
 import type { AuthManager } from "../auth/manager.js";
 import { buildUpstreamRequest, buildUpstreamHeaderPairs } from "./upstream.js";
+import { getDefaultEndpointRouting, type EndpointRoutingService } from "./endpoint-routing.js";
+import { getDefaultClientSigning, sendWithClientSigning, type ClientSigningManager } from "./client-signing.js";
+import { credentialString } from "../auth/types.js";
 import type { ProviderDef } from "../provider/types.js";
 import {
   responsesToChatCompletions,
@@ -54,6 +57,10 @@ export interface ResponsesHandlerOptions {
   fetchImpl?: typeof fetch;
   /** Verbose per-request diagnostics. */
   debug?: boolean;
+  /** Override the process-wide endpoint routing service (for testing). `null` disables. */
+  endpointRouting?: EndpointRoutingService | null;
+  /** Override the process-wide client signing manager (for testing). `null` disables. */
+  clientSigning?: ClientSigningManager | null;
 }
 
 /** Handle POST /v1/responses. */
@@ -149,7 +156,26 @@ export async function handleResponses(
 
   let upstreamResp: Response;
   try {
-    upstreamResp = await fetchImpl(upstreamReq, { method: "POST", headers: Object.fromEntries(upstreamHeaders), body: transformedBody ?? undefined, signal: clientReq.signal });
+    const routing = opts.endpointRouting !== undefined ? opts.endpointRouting : getDefaultEndpointRouting(opts.config);
+    const routed = routing ? await routing.resolve(upstreamReq.url, credentialString(cred)) : null;
+    const sendUrl = routed?.routed ? routed.url : upstreamReq.url;
+    if (debug && routed?.routed) console.log(`[responses] endpoint routing: ${upstreamReq.url} -> ${sendUrl}`);
+    const signer = opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(opts.config);
+    upstreamResp = await sendWithClientSigning(signer, {
+      url: sendUrl,
+      headerPairs: upstreamHeaders,
+      credential: credentialString(cred),
+      appVersion: opts.config.identity.appVersion,
+      debug: debug ? (message) => console.log(`[responses] ${message}`) : undefined,
+      send: (finalPairs) => {
+        const req = new Request(sendUrl, {
+          method: "POST",
+          headers: Object.fromEntries(finalPairs),
+          body: transformedBody ?? undefined,
+        });
+        return fetchImpl(req, { method: "POST", headers: Object.fromEntries(finalPairs), body: transformedBody ?? undefined, signal: clientReq.signal });
+      },
+    });
   } catch (err) {
     return errorResponse(502, "upstream_unreachable", (err as Error).message);
   }
