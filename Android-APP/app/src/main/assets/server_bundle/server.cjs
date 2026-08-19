@@ -36581,7 +36581,7 @@ function buildIdentityHeaders(id) {
   const arch = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH ?? import_node_os.default.arch());
   const release = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE ?? import_node_os.default.release());
   const platformForCategory = process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform;
-  const releaseChannel = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE_CHANNEL);
+  const releaseChannel = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE_CHANNEL) ?? (process.env.ZCODE_ENV?.trim().toLowerCase() === "test" ? "test" : "production");
   const clientLanguage = resolveClientLanguage();
   const clientTimezone = resolveClientTimezone();
   const deviceMid = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_DEVICE_MID) ?? normalizePrintableHeaderValue(id.deviceMid);

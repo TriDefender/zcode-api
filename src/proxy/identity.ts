@@ -12,7 +12,7 @@
  *   X-ZCode-App-Version     n                                // ONLY when appVersion resolves (ASCII gate)
  *   X-Title                 `Z Code@${sourceTitle}`
  *   X-Platform              `${platform}-${arch}`            // when both resolve
- *   X-Release-Channel       c                                // when releaseChannel resolves
+ *   X-Release-Channel       "production" (or "test" via ZCODE_ENV; override ZCODE_IDENTITY_RELEASE_CHANNEL)
  *   X-Client-Language       lsa() = Intl locale              // when Intl resolves
  *   X-Client-Timezone       csa() = Intl timezone            // when Intl resolves
  *   X-Os-Category           Nno(platform)                    // when platform resolves
@@ -111,7 +111,10 @@ export function buildIdentityHeaders(id: ProxyIdentity): Record<string, string> 
   const arch = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH ?? os.arch());
   const release = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE ?? os.release());
   const platformForCategory = (process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform) as NodeJS.Platform;
-  const releaseChannel = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE_CHANNEL);
+  // bundle IL(): ZCODE_ENV==="test" ? "test" : "production" — always resolves.
+  // Mirror that default; ZCODE_IDENTITY_RELEASE_CHANNEL stays an explicit override.
+  const releaseChannel = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE_CHANNEL)
+    ?? (process.env.ZCODE_ENV?.trim().toLowerCase() === "test" ? "test" : "production");
   const clientLanguage = resolveClientLanguage();
   const clientTimezone = resolveClientTimezone();
   // env (Android NodeRunner injection) wins over the config.yaml value (desktop

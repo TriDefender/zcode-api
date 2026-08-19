@@ -210,6 +210,7 @@ describe("buildAuthHeaders", () => {
       "X-Title",
       "X-ZCode-Agent",
       "X-Platform",
+      "X-Release-Channel",
       "X-Client-Language",
       "X-Client-Timezone",
       "X-Os-Category",
