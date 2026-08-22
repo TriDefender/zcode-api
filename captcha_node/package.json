@@ -1,0 +1,20 @@
+{
+  "name": "zcode-proxy-captcha-solver",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Headless Aliyun traceless captcha solver (Playwright + Chromium)",
+  "type": "commonjs",
+  "main": "solver.js",
+  "dependencies": {
+    "canvas": "^3.2.3",
+    "jsdom": "^29.1.1",
+    "playwright": "^1.61.0",
+    "happy-dom": "^20.11.2",
+    "undici": "^8.10.0"
+  },
+  "allowScripts": {
+    "canvas@3.2.3": true,
+    "happy-dom": true,
+    "undici": true
+  }
+}

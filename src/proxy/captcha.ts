@@ -54,6 +54,8 @@ export function detectCaptchaChallenge(resp: Response): string | null {
 
 export function invalidateCaptchaToken(): void { cachedToken = null; }
 
+
+
 async function fetchCaptchaConfig(appVersion: string): Promise<FetchedCaptchaConfig | null> {
   if (cachedConfig.value && cachedConfig.expiresAt > Date.now()) return cachedConfig.value;
   try {
@@ -65,13 +67,55 @@ async function fetchCaptchaConfig(appVersion: string): Promise<FetchedCaptchaCon
   } catch { return null; }
 }
 
+/**
+ * Solve backend selection (ZCODE_CAPTCHA_BACKEND env):
+ *   - "jsdom"     (default) — the original in-process jsdom path below.
+ *   - "happy"     — happy-dom backend in captcha_node/, run by a dedicated
+ *                   Node daemon (captcha_node/daemon.js). Production-proven:
+ *                   ~815ms CPU/solve (~260-330ms with CAPTCHA_WINDOW_REUSE=1),
+ *                   more IP-tolerant than jsdom, no browser install needed.
+ *   - "playwright" — Chromium backend in captcha_node/ (heaviest, last resort).
+ *   - "native"    — pure-HTTP solver (captcha_node/native_solve2.js). ~600ms,
+ *                   no DOM at all, but the Aliyun risk engine currently rejects
+ *                   its tokens with F001 from most IPs — protocol reference.
+ *
+ * The daemon backend keeps Chromium-class work out of the Bun event loop and
+ * bounds memory by recycling workers (see captcha_node/README.md).
+ */
+import { runCaptchaSolve, shutdownCaptchaSolver } from "./captcha-solver.js";
+
+const CAPTCHA_BACKEND = process.env.ZCODE_CAPTCHA_BACKEND?.trim().toLowerCase() || "jsdom";
+const DAEMON_BACKENDS = new Set(["happy", "playwright"]);
+
 export async function getCaptchaToken(appVersion: string): Promise<{ verifyParam: string; region: string }> {
   if (cachedToken && cachedToken.expiresAt > Date.now()) return { verifyParam: cachedToken.verifyParam, region: cachedToken.region };
   const cfg = await fetchCaptchaConfig(appVersion);
   if (!cfg || !cfg.enabled || !cfg.prefix || !cfg.sceneId) throw new Error("Captcha config unavailable");
-  const verifyParam = await solveInJsdomWithRetry(cfg);
+  const verifyParam = await solveCaptchaWithRetry(cfg);
   cachedToken = { verifyParam, region: cfg.region, expiresAt: Date.now() + TOKEN_TTL_MS };
   return { verifyParam, region: cfg.region };
+}
+
+async function solveCaptchaWithRetry(cfg: FetchedCaptchaConfig): Promise<string> {
+  if (DAEMON_BACKENDS.has(CAPTCHA_BACKEND)) {
+    // The worker process retries internally (ZCODE_CAPTCHA_RETRIES attempts);
+    // this outer loop is a thin respawn guard for daemon-level failures.
+    let lastErr: Error | null = null;
+    for (let attempt = 1; attempt <= SOLVE_RETRIES; attempt++) {
+      try {
+        return await runCaptchaSolve(cfg.sceneId, cfg.region, cfg.prefix);
+      } catch (err) {
+        lastErr = err as Error;
+        console.error(`[captcha:${CAPTCHA_BACKEND}] solve attempt ${attempt}/${SOLVE_RETRIES} failed: ${lastErr.message}`);
+      }
+    }
+    throw new Error(`captcha solve failed after ${SOLVE_RETRIES} attempts: ${lastErr?.message ?? "unknown"}`);
+  }
+  return solveInJsdomWithRetry(cfg);
+}
+
+export function shutdownCaptcha(): void {
+  try { shutdownCaptchaSolver(); } catch {}
 }
 
 async function solveInJsdomWithRetry(cfg: FetchedCaptchaConfig): Promise<string> {
