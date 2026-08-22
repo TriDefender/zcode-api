@@ -83,15 +83,31 @@ async function fetchCaptchaConfig(appVersion: string): Promise<FetchedCaptchaCon
  * bounds memory by recycling workers (see captcha_node/README.md).
  */
 import { runCaptchaSolve, shutdownCaptchaSolver } from "./captcha-solver.js";
+import {
+  configureCaptchaPool,
+  getCaptchaPoolStats,
+  prefillCaptchaPool,
+  solveCaptchaJsdom,
+  startCaptchaPoolRefill,
+  stopCaptchaPool,
+  urgentCaptchaRefill,
+  type CaptchaConfig,
+} from "./captcha-jsdom.js";
 
 const CAPTCHA_BACKEND = process.env.ZCODE_CAPTCHA_BACKEND?.trim().toLowerCase() || "jsdom";
 const DAEMON_BACKENDS = new Set(["happy", "playwright"]);
 
 export async function getCaptchaToken(appVersion: string): Promise<{ verifyParam: string; region: string }> {
-  if (cachedToken && cachedToken.expiresAt > Date.now()) return { verifyParam: cachedToken.verifyParam, region: cachedToken.region };
   const cfg = await fetchCaptchaConfig(appVersion);
   if (!cfg || !cfg.enabled || !cfg.prefix || !cfg.sceneId) throw new Error("Captcha config unavailable");
-  const verifyParam = await solveCaptchaWithRetry(cfg);
+  if (DAEMON_BACKENDS.has(CAPTCHA_BACKEND)) {
+    // Pre-solved token pool: requests take an already-minted token (sub-ms)
+    // while background workers refill — the hot path never waits on a solve.
+    const verifyParam = await solveCaptchaJsdom(cfg);
+    return { verifyParam, region: cfg.region };
+  }
+  if (cachedToken && cachedToken.expiresAt > Date.now()) return { verifyParam: cachedToken.verifyParam, region: cachedToken.region };
+  const verifyParam = await solveInJsdomWithRetry(cfg);
   cachedToken = { verifyParam, region: cfg.region, expiresAt: Date.now() + TOKEN_TTL_MS };
   return { verifyParam, region: cfg.region };
 }
@@ -116,6 +132,37 @@ async function solveCaptchaWithRetry(cfg: FetchedCaptchaConfig): Promise<string>
 
 export function shutdownCaptcha(): void {
   try { shutdownCaptchaSolver(); } catch {}
+  try { stopCaptchaPool(); } catch {}
+}
+
+/**
+ * Start background pre-solving of the token pool (daemon backends only).
+ * Warms only the idle minimum; the pool grows on demand with traffic.
+ */
+export async function startCaptchaPool(appVersion: string): Promise<void> {
+  const cfg = await fetchCaptchaConfig(appVersion);
+  if (!cfg || !cfg.enabled) return;
+  // Size the pool before prefill: the module-level pool defers sizing to the
+  // first configure() so a cold boot doesn't mint a storm of soon-expired
+  // tokens. CAPTCHA_POOL_MIN/CAPTCHA_POOL_MAX env vars override the defaults.
+  const min = Number(process.env.CAPTCHA_POOL_MIN || 20);
+  const max = Number(process.env.CAPTCHA_POOL_MAX || Math.max(min * 6, 120));
+  configureCaptchaPool({ poolSizeMin: min, poolSizeMax: max });
+  startCaptchaPoolRefill(cfg as CaptchaConfig);
+  await prefillCaptchaPool(cfg as CaptchaConfig, min);
+}
+
+/** Request an urgent refill burst (e.g. after a challenge/retry). */
+export function urgentCaptcha(): void {
+  if (DAEMON_BACKENDS.has(CAPTCHA_BACKEND)) urgentCaptchaRefill();
+}
+
+export function captchaPoolStats(): { ready: number; target: number; activeSolves: number } {
+  return getCaptchaPoolStats();
+}
+
+export function configureCaptchaSolving(opts: Parameters<typeof configureCaptchaPool>[0]): void {
+  configureCaptchaPool(opts);
 }
 
 async function solveInJsdomWithRetry(cfg: FetchedCaptchaConfig): Promise<string> {
