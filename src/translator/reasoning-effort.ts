@@ -2,9 +2,13 @@ import { MODELS } from "../provider/models.js";
 import type { CanonicalReasoningEffort, ModelDef, ModelReasoningEffort } from "../provider/types.js";
 import type { AnthropicMessagesRequest } from "./types.js";
 
+/** Catalog aliases like `glm-5.3[1m]` are listing-only; upstream modelCode is the base id. */
+export function upstreamModelId(model: string): string {
+  return model.replace(/\[1m\]$/, "");
+}
+
 export function reasoningModel(model: string): ModelDef | undefined {
-  const baseModel = model.replace(/\[1m\]$/, "");
-  return MODELS.find((entry) => entry.id === baseModel);
+  return MODELS.find((entry) => entry.id === upstreamModelId(model));
 }
 
 export function normalizeReasoningEffort(

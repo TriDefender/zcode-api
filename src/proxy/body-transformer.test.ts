@@ -345,3 +345,25 @@ describe("transformRequestBody — metadata.user_id (Anthropic)", () => {
     expect(parsed.metadata).toBeUndefined();
   });
 });
+
+describe("transformRequestBody — catalog [1m] aliases", () => {
+  it("strips glm-5.3[1m] to glm-5.3 for OpenAI upstream bodies", () => {
+    const body = JSON.stringify({ model: "glm-5.3[1m]", messages: [], stream: false });
+    const parsed = JSON.parse(transformRequestBody(body, { format: "openai" }) as string);
+    expect(parsed.model).toBe("glm-5.3");
+  });
+
+  it("strips glm-5.2[1m] to glm-5.2 for Anthropic upstream bodies", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2[1m]",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const parsed = JSON.parse(transformRequestBody(body, { format: "anthropic" }) as string);
+    expect(parsed.model).toBe("glm-5.2");
+  });
+
+  it("leaves base model ids unchanged", () => {
+    const body = JSON.stringify({ model: "glm-5.3", messages: [], stream: false });
+    expect(transformRequestBody(body, { format: "openai" })).toBe(body);
+  });
+});

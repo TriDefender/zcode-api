@@ -16,10 +16,13 @@
  *      is safe and matches ZCode's `applyCacheControl: true` default.
  *   4. Anthropic format + `ctx.userId` set → inject `metadata: { user_id }`.
  *      Mirrors `user_id: B.metadata.userId` at bundle offset ~4760586.
+ *   5. Catalog aliases like `glm-5.3[1m]` → strip to the upstream modelCode.
+ *      Listing keeps the alias; the provider rejects `[1m]` as modelCode (1214).
  *
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import type { Format } from "../translator/types.js";
+import { upstreamModelId } from "../translator/reasoning-effort.js";
 import { buildStartPlanSystem } from "./system-prompt.js";
 
 interface TransformContext {
@@ -28,6 +31,14 @@ interface TransformContext {
   userId?: string;
   /** When true (start-plan), prepend ZCode gateway system blocks. */
   startPlan?: boolean;
+}
+
+function applyUpstreamModel(body: Record<string, unknown>): boolean {
+  if (typeof body.model !== "string") return false;
+  const upstream = upstreamModelId(body.model);
+  if (upstream === body.model) return false;
+  body.model = upstream;
+  return true;
 }
 
 /**
@@ -45,7 +56,7 @@ export function transformRequestBody(body: string | undefined, ctx: TransformCon
   }
   if (typeof parsed !== "object" || parsed === null) return body;
 
-  let modified = false;
+  let modified = applyUpstreamModel(parsed as Record<string, unknown>);
 
   if (ctx.format === "openai") {
     if (ctx.startPlan) {
