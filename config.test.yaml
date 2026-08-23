@@ -1,0 +1,13 @@
+server:
+  port: 19090
+  host: "127.0.0.1"
+auth:
+  mode: apikey
+  apiKey: "fakekey.fakesecret"
+  proxyApiKey: "test-proxy-key"
+provider: zai
+defaultModel: glm-4.6
+models:
+  - glm-4.6
+logging:
+  level: info
