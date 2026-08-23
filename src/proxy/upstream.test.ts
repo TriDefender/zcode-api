@@ -105,8 +105,9 @@ describe("buildZcodeTraceHeaders", () => {
       sessionId: "sess_thread_1",
     });
 
-    expect(Object.keys(h)).toEqual(["x-request-id", "x-zcode-trace-id", "x-query-id", "x-session-id"]);
+    expect(Object.keys(h)).toEqual(["x-request-id", "x-zcode-session-type", "x-zcode-trace-id", "x-query-id", "x-session-id"]);
     expect(h["x-request-id"]).toBe("req_1");
+    expect(h["x-zcode-session-type"]).toBe("main");
     expect(h["x-zcode-trace-id"]).toBe("trace_1");
     expect(h["x-query-id"]).toBe("turn_1");
     expect(h["x-session-id"]).toBe("thread_1");
@@ -119,16 +120,23 @@ describe("buildZcodeTraceHeaders", () => {
       sessionId: "subagent_agent_worker_1",
     });
 
-    expect(Object.keys(h)).toEqual(["x-request-id", "x-zcode-trace-id", "x-session-id"]);
+    expect(Object.keys(h)).toEqual(["x-request-id", "x-zcode-session-type", "x-zcode-trace-id", "x-session-id"]);
+    expect(h["x-zcode-session-type"]).toBe("subagent");
     expect(h["x-session-id"]).toBe("worker_1");
   });
 
   it("omits query and session headers when no IDs exist", () => {
     const h = buildZcodeTraceHeaders({ requestId: "req_1", traceId: "trace_1" });
 
-    expect(Object.keys(h)).toEqual(["x-request-id", "x-zcode-trace-id"]);
+    expect(Object.keys(h)).toEqual(["x-request-id", "x-zcode-session-type", "x-zcode-trace-id"]);
+    expect(h["x-zcode-session-type"]).toBe("main");
     expect(h["x-query-id"]).toBeUndefined();
     expect(h["x-session-id"]).toBeUndefined();
+  });
+
+  it("honors an explicit sessionType override", () => {
+    const h = buildZcodeTraceHeaders({ requestId: "req_1", traceId: "trace_1", sessionType: "other" });
+    expect(h["x-zcode-session-type"]).toBe("other");
   });
 });
 describe("buildAuthHeaders", () => {
@@ -216,6 +224,7 @@ describe("buildAuthHeaders", () => {
       "X-Os-Category",
       "X-Os-Version",
       "x-request-id",
+      "x-zcode-session-type",
       "x-zcode-trace-id",
       "x-query-id",
       "x-session-id",
@@ -223,6 +232,7 @@ describe("buildAuthHeaders", () => {
       "anthropic-version",
     ]);
     expect(h["x-request-id"]).toBe("req_1");
+    expect(h["x-zcode-session-type"]).toBe("main");
     expect(h["x-zcode-trace-id"]).toBe("trace_1");
     expect(h["x-query-id"]).toBe("turn_1");
     expect(h["x-session-id"]).toBe("thread_1");

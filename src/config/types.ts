@@ -140,7 +140,7 @@ export interface EndpointRoutingConfig {
 }
 
 /**
- * Client request signing V4 — mirrors the ZCode 3.8.1
+ * Client request signing V4 — mirrors the ZCode 3.9.1
  * `ClientRequestSigningV4Signer`. When enabled, the proxy probes the same
  * feature gate the client uses (`GET {origin}/api/v1/agent/configs` →
  * `data.codingPlanSignature.enable`) and, only if the server turns the feature

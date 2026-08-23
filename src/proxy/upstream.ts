@@ -46,6 +46,7 @@ const STRIP_HEADERS = new Set([
   "transfer-encoding",
   "x-request-id",
   "x-zcode-trace-id",
+  "x-zcode-session-type",
   "x-query-id",
   "x-session-id",
   // V4 signing headers are proxy-generated only; inbound copies must never
@@ -129,6 +130,8 @@ function buildTraceHeaders(plan: "coding-plan" | "start-plan", clientSession?: U
 
   const headers: Record<string, string> = {
     "x-request-id": crypto.randomUUID(),
+    // ZCode 3.9.1 attributes every model request; a forwarded conversation turn is the main-agent loop.
+    "x-zcode-session-type": "main",
     "x-zcode-trace-id": crypto.randomUUID(),
   };
   if (plan !== "start-plan") {
