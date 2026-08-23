@@ -37,6 +37,7 @@ async function loadCaptcha(): Promise<CaptchaModule> {
 }
 import { translateRequestOpenAIToAnthropic, translateResponseAnthropicToOpenAI } from "../translator/openai-to-anthropic.js";
 import { translateRequestAnthropicToOpenAI, translateResponseOpenAIToAnthropic } from "../translator/anthropic-to-openai.js";
+import { normalizeAnthropicReasoning } from "../translator/reasoning-effort.js";
 import { anthropicSseToOpenaiSse, openaiSseToAnthropicSse } from "../translator/sse-translator.js";
 import type { OpenAIChatRequest, OpenAIChatResponse, AnthropicMessagesRequest, AnthropicMessagesResponse } from "../translator/types.js";
 import { dumpPhase, dumpHeaders, dumpBody, dumpEnabled } from "./dump.js";
@@ -147,6 +148,10 @@ export async function proxyRequest(
     if (translated instanceof Response) return translated;
     upstreamBody = translated;
     if (debug) debugLine(reqId, `translated Anthropic→OpenAI (bytes=${upstreamBody?.length ?? 0})`);
+  } else if (format === "anthropic") {
+    const normalized = normalizeNativeAnthropicBody(body);
+    if (normalized instanceof Response) return normalized;
+    upstreamBody = normalized;
   }
 
   const transformedBody = transformRequestBody(upstreamBody, { format: upstreamFormat, userId: startPlan ? undefined : cred.userId, startPlan });
@@ -669,6 +674,17 @@ function translateAnthropicBody(body: string | undefined): Response | string | u
     return JSON.stringify(translated);
   } catch (err) {
     return errorResponse(400, "translation_failed", `Anthropic→OpenAI translation failed: ${(err as Error).message}`);
+  }
+}
+
+function normalizeNativeAnthropicBody(body: string | undefined): Response | string | undefined {
+  if (body === undefined || body.length === 0) return body;
+  try {
+    const parsed = JSON.parse(body) as AnthropicMessagesRequest;
+    const normalized = normalizeAnthropicReasoning(parsed);
+    return normalized === parsed ? body : JSON.stringify(normalized);
+  } catch (err) {
+    return errorResponse(400, "translation_failed", `Anthropic request body is not valid JSON: ${(err as Error).message}`);
   }
 }
 

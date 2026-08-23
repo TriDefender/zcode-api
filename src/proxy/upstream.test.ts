@@ -1644,6 +1644,37 @@ describe("proxyRequest — thinking endpoint matrix", () => {
       .filter((event): event is { event: string; data: any } => event !== null);
   }
 
+  it("coding-plan OpenAI endpoint forwards GLM-5.3 effort to Anthropic upstream", async () => {
+    let upstreamBody: any;
+    const fetchMock = mock(async (req: Request): Promise<Response> => {
+      upstreamBody = await req.json();
+      return new Response(anthropicThinkingResponse(), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const req = new Request("http://localhost:8080/v1/chat/completions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "think then answer" }],
+        reasoning_effort: "high",
+      }),
+    });
+
+    const resp = await proxyRequest(req, "openai", {
+      config: testConfig,
+      auth: codingPlanAuth(),
+      fetchImpl: fetchMock as any,
+    });
+
+    expect(resp.status).toBe(200);
+    expect(upstreamBody.thinking).toEqual({ type: "enabled" });
+    expect(upstreamBody.output_config).toEqual({ effort: "high" });
+    expect(upstreamBody.reasoning_effort).toBeUndefined();
+  });
+
   it("coding-plan Anthropic upstream non-streaming surfaces thinking as OpenAI reasoning_content", async () => {
     let upstreamUrl = "";
     const fetchMock = mock(async (req: Request): Promise<Response> => {
@@ -1688,6 +1719,37 @@ describe("proxyRequest — thinking endpoint matrix", () => {
     const text = await resp.text();
     expect(openAIReasoningDeltas(text)).toEqual(["First step. ", "Second step."]);
     expect(text).toContain('"content":"Final answer."');
+  });
+
+  it("coding-plan Anthropic client normalizes GLM-5.3 disabled thinking to low", async () => {
+    let upstreamBody: any;
+    const fetchMock = mock(async (req: Request): Promise<Response> => {
+      upstreamBody = await req.json();
+      return new Response(anthropicThinkingResponse(), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const req = new Request("http://localhost:8080/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "glm-5.3",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: "think then answer" }],
+        thinking: { type: "disabled" },
+      }),
+    });
+
+    const resp = await proxyRequest(req, "anthropic", {
+      config: testConfig,
+      auth: codingPlanAuth(),
+      fetchImpl: fetchMock as any,
+    });
+
+    expect(resp.status).toBe(200);
+    expect(upstreamBody.thinking).toEqual({ type: "enabled" });
+    expect(upstreamBody.output_config).toEqual({ effort: "low" });
   });
 
   it("coding-plan Anthropic client non-streaming passes thinking blocks through natively", async () => {
@@ -1778,6 +1840,41 @@ describe("proxyRequest — thinking endpoint matrix", () => {
 
       expect(resp.status).toBe(200);
       expect(openAIReasoningDeltas(await resp.text())).toEqual(["First step. ", "Second step."]);
+    });
+  });
+
+  it("start-plan Anthropic endpoint maps Claude effort to OpenAI upstream", async () => {
+    await withDisabledCaptcha(async () => {
+      let upstreamBody: any;
+      const fetchMock = mock(async (req: Request): Promise<Response> => {
+        upstreamBody = await req.json();
+        return new Response(openAIThinkingResponse(), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      });
+      const req = new Request("http://localhost:8080/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          model: "glm-5.3",
+          max_tokens: 1024,
+          messages: [{ role: "user", content: "think then answer" }],
+          thinking: { type: "enabled" },
+          output_config: { effort: "medium" },
+        }),
+      });
+
+      const resp = await proxyRequest(req, "anthropic", {
+        config: { ...testConfig, plan: "start-plan" },
+        auth: startPlanAuth(),
+        fetchImpl: fetchMock as any,
+      });
+
+      expect(resp.status).toBe(200);
+      expect(upstreamBody.reasoning_effort).toBe("high");
+      expect(upstreamBody.thinking).toEqual({ type: "enabled" });
+      expect(upstreamBody.output_config).toBeUndefined();
     });
   });
 

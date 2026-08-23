@@ -71,17 +71,101 @@ function mockUpstream(): typeof fetch {
 }
 
 describe("server routing", () => {
-  it("GET /v1/models returns model list", async () => {
-    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test" } });
+  it("GET /v1/models returns the configured OpenAI model list", async () => {
+    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test" }, models: ["glm-5.3"] });
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
     const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
 
     const resp = await handler(new Request("http://localhost/v1/models", { method: "GET" }));
     expect(resp.status).toBe(200);
     const body = await resp.json();
-    expect(body.object).toBe("list");
-    expect(body.data.length).toBeGreaterThan(0);
-    expect(body.data[0].object).toBe("model");
+    expect(body).toEqual({
+      object: "list",
+      data: [{ id: "glm-5.3", object: "model", owned_by: "zcode-proxy" }],
+    });
+  });
+
+  it("GET /v1/models?client_version returns Codex reasoning metadata", async () => {
+    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test" }, models: ["glm-5.2", "glm-5.3[1m]", "vendor-custom"] });
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
+
+    const resp = await handler(new Request("http://localhost/v1/models?client_version=1.2.3", { method: "GET" }));
+    const body = await resp.json();
+
+    expect(body.models.map((model: any) => model.slug)).toEqual(["glm-5.2", "glm-5.3[1m]"]);
+    expect(body.models[0].supported_reasoning_levels.map((level: any) => level.effort)).toEqual(["high", "max"]);
+    expect(body.models[1].supported_reasoning_levels.map((level: any) => level.effort)).toEqual(["low", "high", "max"]);
+    expect(body.models[1].default_reasoning_level).toBe("max");
+    expect(body.models[1].context_window).toBe(1_048_576);
+  });
+
+  it("GET /v1/models with anthropic-version returns Anthropic capabilities", async () => {
+    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test" }, models: ["glm-5.2", "glm-5.3"] });
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
+
+    const resp = await handler(new Request("http://localhost/v1/models", {
+      method: "GET",
+      headers: { "anthropic-version": "2023-06-01" },
+    }));
+    const body = await resp.json();
+
+    expect(body.data[0]).toMatchObject({
+      id: "glm-5.2",
+      type: "model",
+      display_name: "GLM 5.2",
+      max_input_tokens: 1_048_576,
+      max_tokens: 131_072,
+      capabilities: {
+        effort: {
+          supported: true,
+          low: { supported: true },
+          medium: { supported: true },
+          high: { supported: true },
+          max: { supported: true },
+        },
+        thinking: {
+          supported: true,
+          types: { enabled: { supported: true }, adaptive: { supported: false } },
+        },
+      },
+    });
+    expect(body.data[1].capabilities.effort.low.supported).toBe(true);
+    expect(body.first_id).toBe("glm-5.2");
+    expect(body.last_id).toBe("glm-5.3");
+    expect(body.has_more).toBe(false);
+  });
+
+  it("paginates Anthropic models", async () => {
+    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test" }, models: ["glm-5.1", "glm-5.2", "glm-5.3"] });
+    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
+
+    const first = await handler(new Request("http://localhost/v1/models?limit=1", {
+      headers: { "anthropic-version": "2023-06-01" },
+    }));
+    const firstBody = await first.json();
+    expect(firstBody.data.map((model: any) => model.id)).toEqual(["glm-5.1"]);
+    expect(firstBody.has_more).toBe(true);
+
+    const next = await handler(new Request("http://localhost/v1/models?limit=1&after_id=glm-5.1", {
+      headers: { "anthropic-version": "2023-06-01" },
+    }));
+    const nextBody = await next.json();
+    expect(nextBody.data.map((model: any) => model.id)).toEqual(["glm-5.2"]);
+
+    const previous = await handler(new Request("http://localhost/v1/models?limit=1&before_id=glm-5.3", {
+      headers: { "anthropic-version": "2023-06-01" },
+    }));
+    const previousBody = await previous.json();
+    expect(previousBody.data.map((model: any) => model.id)).toEqual(["glm-5.2"]);
+    expect(previousBody.has_more).toBe(true);
+
+    const invalid = await handler(new Request("http://localhost/v1/models?limit=0", {
+      headers: { "anthropic-version": "2023-06-01" },
+    }));
+    expect(invalid.status).toBe(400);
   });
 
   it("POST /v1/chat/completions forwards to upstream", async () => {
@@ -255,7 +339,7 @@ describe("web UI", () => {
 
 describe("route handler exports", () => {
   it("handleListModels returns model list", () => {
-    const resp = handleListModels();
+    const resp = handleListModels(new Request("http://localhost/v1/models"), makeConfig());
     expect(resp.status).toBe(200);
   });
 

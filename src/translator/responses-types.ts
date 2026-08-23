@@ -1,3 +1,5 @@
+import type { ReasoningEffort } from "./types.js";
+
 /**
  * Type definitions for the OpenAI Responses API (`/v1/responses`).
  *
@@ -20,7 +22,7 @@
 
 /** Reasoning configuration on a Responses request. */
 export interface ResponsesReasoning {
-  effort?: "minimal" | "low" | "medium" | "high";
+  effort?: ReasoningEffort;
   summary?: "auto" | "concise" | "detailed" | "none";
 }
 

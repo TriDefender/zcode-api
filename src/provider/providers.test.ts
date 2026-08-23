@@ -51,7 +51,7 @@ describe("models", () => {
       expect(typeof m.id).toBe("string");
       expect(m.id.length).toBeGreaterThan(0);
       expect(m.contextWindow).toBeGreaterThan(0);
-      expect(m.maxOutputTokens).toBe(128_000);
+      expect(m.maxOutputTokens).toBe(m.id === "glm-5.2" || m.id === "glm-5.3" ? 131_072 : 128_000);
     }
   });
 
@@ -65,10 +65,10 @@ describe("models", () => {
   it("glm-5.2 and glm-5.3 have 1M context", () => {
     const glm52 = MODELS.find((m) => m.id === "glm-5.2");
     expect(glm52).toBeDefined();
-    expect(glm52!.contextWindow).toBe(1_000_000);
+    expect(glm52!.contextWindow).toBe(1_048_576);
     const glm53 = MODELS.find((m) => m.id === "glm-5.3");
     expect(glm53).toBeDefined();
-    expect(glm53!.contextWindow).toBe(1_000_000);
+    expect(glm53!.contextWindow).toBe(1_048_576);
   });
 
   it("includes key GLM models", () => {

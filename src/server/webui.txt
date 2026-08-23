@@ -438,12 +438,7 @@
     (function () {
       "use strict";
       var STORE = "zcode_webui_state_v1";
-      // Known model catalog (used as a fallback when /v1/models is unreachable,
-      // e.g. before the proxy key has been entered).
-      var KNOWN_MODELS = [
-        "glm-4.5-air", "glm-4.6", "glm-4.6v", "glm-4.7", "glm-5",
-        "glm-5-turbo", "glm-5v-turbo", "glm-5.1", "glm-5.2"
-      ];
+      var modelCatalog = {};
 
       var DEFAULT_SETTINGS = {
         apiKey: "",
@@ -719,7 +714,7 @@
       // =========================================================
       function populateModels(list) {
         modelSel.innerHTML = "";
-        (list.length ? list : KNOWN_MODELS).forEach(function (id) {
+        (list.length ? list : [state.settings.model || DEFAULT_SETTINGS.model]).forEach(function (id) {
           var o = document.createElement("option"); o.value = id; o.textContent = id;
           modelSel.appendChild(o);
         });
@@ -732,25 +727,31 @@
       function fetchModels() {
         var headers = {};
         if (state.settings.apiKey) headers["authorization"] = "Bearer " + state.settings.apiKey;
-        fetch("/v1/models", { method: "GET", headers: headers })
-          .then(function (r) {
-            if (!r.ok) throw new Error("HTTP " + r.status);
-            return r.json();
-          })
-          .then(function (j) {
-            var ids = (j.data || []).map(function (m) { return m.id; });
-            populateModels(ids); setStatus("ok");
-          })
-          .catch(function () {
-            populateModels(KNOWN_MODELS);
-            setStatus(state.settings.apiKey ? "err" : "idle");
-          });
+        Promise.all([
+          fetch("/v1/models", { method: "GET", headers: headers }),
+          fetch("/v1/models?client_version=webui", { method: "GET", headers: headers })
+        ]).then(function (responses) {
+          if (!responses[0].ok || !responses[1].ok) throw new Error("model discovery failed");
+          return Promise.all([responses[0].json(), responses[1].json()]);
+        }).then(function (payloads) {
+          modelCatalog = {};
+          (payloads[1].models || []).forEach(function (model) { modelCatalog[model.slug] = model; });
+          var ids = (payloads[0].data || []).map(function (model) { return model.id; });
+          populateModels(ids); setStatus("ok");
+        }).catch(function () {
+          modelCatalog = {};
+          populateModels([]);
+          setStatus(state.settings.apiKey ? "err" : "idle");
+        });
       }
       function setStatus(s) {
         statusDot.className = "status-dot" + (s === "ok" ? " ok" : s === "err" ? " err" : "");
         statusDot.title = s === "ok" ? "Connected" : s === "err" ? "Request failed (check key / proxy)" : "Set proxy API key in settings";
       }
-      function isVisionModel(id) { return /v/i.test(id || ""); }
+      function isVisionModel(id) {
+        var model = modelCatalog[id];
+        return !!model && (model.input_modalities || []).indexOf("image") >= 0;
+      }
       function syncAttachVisibility() { attachBtn.hidden = !isVisionModel(modelSel.value); }
 
       // =========================================================
@@ -806,8 +807,8 @@
         return body;
       }
       function isReasoningModel(id) {
-        // reasoning_effort is only honored by GLM-5.2 and above per BigModel docs.
-        return /glm-5\.[2-9]|glm-[6-9]/i.test(id || "");
+        var model = modelCatalog[id];
+        return !!model && (model.supported_reasoning_levels || []).length > 0;
       }
       // =========================================================
       // MCP — client-managed (browser-direct, optional CORS proxy).
@@ -1312,7 +1313,7 @@
         if (!confirm("Delete ALL conversations and reset settings? This cannot be undone.")) return;
         localStorage.removeItem(STORE);
         state = loadState(); saveState(); applyTheme(); renderSidebar(); renderMessages();
-        syncSettingsForm(); populateModels(KNOWN_MODELS); toast("Reset complete.");
+        syncSettingsForm(); populateModels([]); toast("Reset complete.");
       };
       $("btn-theme").onclick = function () {
         var cur = document.documentElement.getAttribute("data-theme");
@@ -1341,20 +1342,19 @@
         }
         saveState(); syncAttachVisibility(); populateEffort();
       };
-      // GLM-5.2 only has two distinct reasoning-effort levels (low/medium map
-      // to high, xhigh maps to max), so expose just high and max. Other models
-      // get a disabled placeholder (reasoning_effort is GLM-5.2+ only).
       function populateEffort() {
-        var model = modelSel.value;
+        var model = modelCatalog[modelSel.value];
+        var levels = model ? (model.supported_reasoning_levels || []).map(function (level) { return level.effort; }) : [];
         effortSel.innerHTML = "";
-        if (isReasoningModel(model)) {
-          ["max", "high"].forEach(function (v) {
+        if (levels.length) {
+          levels.forEach(function (v) {
             var o = document.createElement("option");
             o.value = v; o.textContent = v;
             effortSel.appendChild(o);
           });
           var cur = state.settings.reasoningEffort;
-          effortSel.value = (cur === "high") ? "high" : "max";
+          effortSel.value = levels.indexOf(cur) >= 0 ? cur : (model.default_reasoning_level || levels[0]);
+          state.settings.reasoningEffort = effortSel.value;
           effortSel.disabled = !state.settings.thinkingEnabled;
         } else {
           var o = document.createElement("option");
@@ -1407,7 +1407,7 @@
       // boot
       // =========================================================
       applyTheme();
-      populateModels(KNOWN_MODELS);
+      populateModels([]);
       renderSidebar(); renderMessages();
       populateEffort(); syncThinkButton();
       fetchModels();

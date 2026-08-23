@@ -80,6 +80,9 @@ export interface OpenAIToolDefinition {
   };
 }
 
+export type ReasoningEffort = "none" | "minimal" | "light" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+export type AnthropicEffort = "low" | "medium" | "high" | "max";
+
 /** POST /v1/chat/completions request body. */
 export interface OpenAIChatRequest {
   model: string;
@@ -99,8 +102,11 @@ export interface OpenAIChatRequest {
   parallel_tool_calls?: boolean;
   response_format?: { type: "text" | "json_object" };
   seed?: number;
-  reasoning_effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
-  thinking?: AnthropicThinkingConfig & { budgetTokens?: number };
+  reasoning_effort?: ReasoningEffort;
+  thinking?: Omit<AnthropicThinkingConfig, "type"> & {
+    type: AnthropicThinkingConfig["type"] | "none" | "off" | boolean;
+    budgetTokens?: number;
+  };
 }
 
 /** Non-streaming response. */
@@ -193,6 +199,7 @@ export interface AnthropicMessagesRequest {
   tools?: AnthropicToolDefinition[];
   tool_choice?: { type: "auto" | "any" | "tool"; name?: string };
   thinking?: AnthropicThinkingConfig;
+  output_config?: { effort?: AnthropicEffort; [key: string]: unknown };
 }
 
 /** Anthropic thinking/reasoning control. */

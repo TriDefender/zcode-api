@@ -173,8 +173,11 @@ describe("responsesToChatCompletions", () => {
     expect(assistant.reasoning_content).toBe("thinking...");
   });
 
-  it("forwards reasoning.effort to reasoning_effort on the chat request", () => {
-    const r = responsesToChatCompletions(baseReq({ reasoning: { effort: "high" } }));
-    expect(r.chatRequest.reasoning_effort).toBe("high");
-  });
+  it.each(["none", "minimal", "light", "low", "medium", "high", "xhigh", "max", "ultra"] as const)(
+    "forwards reasoning.effort=%s to reasoning_effort",
+    (effort) => {
+      const r = responsesToChatCompletions(baseReq({ reasoning: { effort } }));
+      expect(r.chatRequest.reasoning_effort).toBe(effort);
+    },
+  );
 });

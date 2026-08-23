@@ -14,7 +14,7 @@ import type {
   AnthropicToolDefinition,
   AnthropicThinkingConfig,
 } from "./types.js";
-import { MODELS } from "../provider/models.js";
+import { isForcedReasoning, isThinkingDisabled, normalizeReasoningEffort, reasoningModel } from "./reasoning-effort.js";
 
 /** Default max_tokens if the OpenAI request doesn't specify one. */
 const DEFAULT_MAX_TOKENS = 4096;
@@ -41,8 +41,9 @@ export function translateRequestOpenAIToAnthropic(req: OpenAIChatRequest): Anthr
   if (req.top_p !== undefined) result.top_p = req.top_p;
   if (req.stream !== undefined) result.stream = req.stream;
   if (req.stop) result.stop_sequences = Array.isArray(req.stop) ? req.stop : [req.stop];
-  const thinking = translateThinking(req);
-  if (thinking) result.thinking = thinking;
+  const reasoning = translateReasoning(req);
+  if (reasoning.thinking) result.thinking = reasoning.thinking;
+  if (reasoning.effort) result.output_config = { effort: reasoning.effort };
   if (req.tools?.length && req.tool_choice !== "none") {
     result.tools = req.tools.map(translateToolOpenAIToAnthropic);
   }
@@ -54,30 +55,40 @@ export function translateRequestOpenAIToAnthropic(req: OpenAIChatRequest): Anthr
   return result;
 }
 
-function translateThinking(req: OpenAIChatRequest): AnthropicThinkingConfig | undefined {
+function translateReasoning(req: OpenAIChatRequest): {
+  thinking?: AnthropicThinkingConfig;
+  effort?: "low" | "high" | "max";
+} {
+  const effort = normalizeReasoningEffort(req.model, req.reasoning_effort);
+  if (effort) {
+    if (effort === "none") return { thinking: { type: "disabled" } };
+    return { thinking: { type: "enabled" }, effort };
+  }
+
   const explicit = req.thinking;
   if (explicit && typeof explicit === "object") {
-    if (explicit.type === "disabled") return { type: "disabled" };
+    if (isThinkingDisabled(explicit.type)) {
+      return isForcedReasoning(req.model)
+        ? { thinking: { type: "enabled" }, effort: "low" }
+        : { thinking: { type: "disabled" } };
+    }
     if (explicit.type === "enabled" || explicit.type === "adaptive") {
       const budget = explicit.budget_tokens ?? explicit.budgetTokens;
       return {
-        type: explicit.type,
-        ...(typeof budget === "number" && Number.isFinite(budget) && budget > 0
-          ? { budget_tokens: Math.floor(budget) }
-          : {}),
-        ...(explicit.type === "adaptive" && typeof explicit.display === "boolean"
-          ? { display: explicit.display }
-          : {}),
+        thinking: {
+          type: explicit.type,
+          ...(typeof budget === "number" && Number.isFinite(budget) && budget > 0
+            ? { budget_tokens: Math.floor(budget) }
+            : {}),
+          ...(explicit.type === "adaptive" && typeof explicit.display === "boolean"
+            ? { display: explicit.display }
+            : {}),
+        },
       };
     }
   }
-  if (req.reasoning_effort === "none") return { type: "disabled" };
-  if (isReasoningModel(req.model)) return { type: "enabled" };
-  return undefined;
-}
 
-function isReasoningModel(model: string): boolean {
-  return MODELS.some((m) => m.id === model && m.reasoning === true);
+  return reasoningModel(req.model)?.reasoning === true ? { thinking: { type: "enabled" } } : {};
 }
 
 function translateToolChoice(

@@ -26,6 +26,7 @@ import { credentialString } from "../auth/types.js";
 import { errorResponse } from "../proxy/handler.js";
 import { transformRequestBody } from "../proxy/body-transformer.js";
 import { translateRequestOpenAIToAnthropic, translateResponseAnthropicToOpenAI } from "../translator/openai-to-anthropic.js";
+import { normalizeAnthropicReasoning } from "../translator/reasoning-effort.js";
 import { anthropicSseToOpenaiSseWithKeepalive } from "./openai-stream-adapter.js";
 import type { AnthropicMessagesRequest, OpenAIChatRequest, AnthropicMessagesResponse } from "../translator/types.js";
 import { createOffPeakClient, type OffPeakClient } from "./client.js";
@@ -237,11 +238,11 @@ export async function handleAsyncMessages(req: Request, opts: AsyncHandlerOption
   // Anthropic spec: omitted `stream` defaults to non-streaming (false).
   // Validated: parsedBody is a plain object with messages[]. Remaining fields
   // (max_tokens, tools, etc.) are forwarded as-is — upstream rejects invalid shapes.
-  const upstreamBody = {
+  const upstreamBody = normalizeAnthropicReasoning({
     ...parsedBody,
     model: resolveModel({ model: modelStr }, opts.config),
     stream: true,
-  } as AnthropicMessagesRequest;
+  } as AnthropicMessagesRequest);
   const upstreamBodyText = transformRequestBody(JSON.stringify(upstreamBody), { format: "anthropic", userId: cred.cred.userId }) ?? JSON.stringify(upstreamBody);
 
   // Now we're safe to take a ticket

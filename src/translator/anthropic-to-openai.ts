@@ -2,6 +2,7 @@
  * Anthropic → OpenAI request translator and OpenAI → Anthropic response translator.
  * @see .omo/plans/zcode-proxy.md Task 11
  */
+import { normalizeAnthropicReasoning } from "./reasoning-effort.js";
 import type {
   OpenAIChatRequest,
   OpenAIChatResponse,
@@ -18,6 +19,7 @@ import type {
 
 /** Translate an Anthropic messages request into an OpenAI chat request. */
 export function translateRequestAnthropicToOpenAI(req: AnthropicMessagesRequest): OpenAIChatRequest {
+  req = normalizeAnthropicReasoning(req);
   const messages: OpenAIMessage[] = [];
 
   if (req.system) {
@@ -44,9 +46,8 @@ export function translateRequestAnthropicToOpenAI(req: AnthropicMessagesRequest)
     result.stop = req.stop_sequences.length === 1 ? req.stop_sequences[0] : req.stop_sequences;
   }
 
-  if (req.thinking) {
-    result.thinking = req.thinking;
-  }
+  if (req.output_config?.effort) result.reasoning_effort = req.output_config.effort;
+  if (req.thinking) result.thinking = req.thinking;
 
   if (req.tools?.length) {
     result.tools = req.tools.map((t) => ({

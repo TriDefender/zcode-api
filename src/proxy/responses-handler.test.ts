@@ -63,6 +63,24 @@ function makeReq(body: unknown): Request {
 }
 
 describe("handleResponses", () => {
+  it("forwards Responses effort to the coding-plan Anthropic upstream", async () => {
+    let upstreamBody: any;
+    const fetchImpl = (async (request: Request): Promise<Response> => {
+      upstreamBody = await request.json();
+      return new Response(anthropicMsg("ok"), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+
+    const resp = await handleResponses(makeReq({
+      model: "glm-5.3",
+      input: "hello",
+      reasoning: { effort: "xhigh" },
+    }), { config: CONFIG, auth, fetchImpl });
+
+    expect(resp.status).toBe(200);
+    expect(upstreamBody.thinking).toEqual({ type: "enabled" });
+    expect(upstreamBody.output_config).toEqual({ effort: "max" });
+  });
+
   it("returns a ResponsesResponse with message output for a basic text request", async () => {
     const fetchImpl = chatUpstream(anthropicMsg("hi back"));
     const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hello" }), { config: CONFIG, auth, fetchImpl });

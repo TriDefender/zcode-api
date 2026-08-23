@@ -2,7 +2,7 @@
  * Tests for OpenAI ↔ Anthropic translators.
  * @see .omo/plans/zcode-proxy.md Task 11
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import {
   translateRequestOpenAIToAnthropic,
   translateResponseAnthropicToOpenAI,
@@ -414,6 +414,78 @@ describe("translateRequestOpenAIToAnthropic", () => {
 
     expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
   });
+
+  it.each([
+    ["none", "low"],
+    ["minimal", "low"],
+    ["light", "low"],
+    ["low", "low"],
+    ["medium", "high"],
+    ["high", "high"],
+    ["xhigh", "max"],
+    ["max", "max"],
+    ["ultra", "max"],
+  ] as const)("maps GLM-5.3 Coding Plan effort %s to %s", (input, expected) => {
+    const result = translateRequestOpenAIToAnthropic({
+      model: "glm-5.3",
+      messages: [{ role: "user", content: "Think" }],
+      reasoning_effort: input,
+    });
+
+    expect(result.thinking).toEqual({ type: "enabled" });
+    expect(result.output_config).toEqual({ effort: expected });
+  });
+
+  it.each([
+    ["none", "disabled", undefined],
+    ["minimal", "disabled", undefined],
+    ["light", "enabled", "high"],
+    ["low", "enabled", "high"],
+    ["medium", "enabled", "high"],
+    ["high", "enabled", "high"],
+    ["xhigh", "enabled", "max"],
+    ["max", "enabled", "max"],
+    ["ultra", "enabled", "max"],
+  ] as const)("maps GLM-5.2 Coding Plan effort %s", (input, thinking, effort) => {
+    const result = translateRequestOpenAIToAnthropic({
+      model: "glm-5.2",
+      messages: [{ role: "user", content: "Think" }],
+      reasoning_effort: input,
+    });
+
+    expect(result.thinking).toEqual({ type: thinking });
+    expect(result.output_config?.effort).toBe(effort);
+  });
+
+  it.each([false, "disabled", "none", "off"] as const)(
+    "converts GLM-5.3 thinking toggle %s to low effort",
+    (type) => {
+      const result = translateRequestOpenAIToAnthropic({
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Think" }],
+        thinking: { type },
+      });
+
+      expect(result.thinking).toEqual({ type: "enabled" });
+      expect(result.output_config).toEqual({ effort: "low" });
+    },
+  );
+
+  it.each(["unexpected", "constructor", "toString", "__proto__"])(
+    "falls back unknown effort %s to the model default",
+    (effort) => {
+      const warn = spyOn(console, "warn").mockImplementation(() => {});
+      const result = translateRequestOpenAIToAnthropic({
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Think" }],
+        reasoning_effort: effort as any,
+      });
+
+      expect(result.output_config).toEqual({ effort: "max" });
+      expect(warn).toHaveBeenCalledWith(`[reasoning] unknown effort ${JSON.stringify(effort)} for glm-5.3; using max`);
+      warn.mockRestore();
+    },
+  );
 });
 
 describe("translateResponseAnthropicToOpenAI", () => {
@@ -555,6 +627,39 @@ describe("translateRequestAnthropicToOpenAI", () => {
     const result = translateRequestAnthropicToOpenAI(req);
 
     expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 2048 });
+  });
+
+  it.each([
+    ["glm-5.3", "low", "low"],
+    ["glm-5.3", "medium", "high"],
+    ["glm-5.3", "high", "high"],
+    ["glm-5.3", "max", "max"],
+    ["glm-5.2", "low", "high"],
+    ["glm-5.2", "medium", "high"],
+    ["glm-5.2", "high", "high"],
+    ["glm-5.2", "max", "max"],
+  ] as const)("maps Anthropic %s effort %s to OpenAI %s", (model, input, expected) => {
+    const result = translateRequestAnthropicToOpenAI({
+      model,
+      messages: [{ role: "user", content: "Think" }],
+      max_tokens: 100,
+      thinking: { type: "enabled" },
+      output_config: { effort: input },
+    });
+
+    expect(result.reasoning_effort).toBe(expected);
+  });
+
+  it("maps a disabled GLM-5.3 Anthropic request to enabled low effort", () => {
+    const result = translateRequestAnthropicToOpenAI({
+      model: "glm-5.3",
+      messages: [{ role: "user", content: "Think" }],
+      max_tokens: 100,
+      thinking: { type: "disabled" },
+    });
+
+    expect(result.thinking).toEqual({ type: "enabled" });
+    expect(result.reasoning_effort).toBe("low");
   });
 
   it("preserves assistant thinking blocks as OpenAI reasoning_content", () => {
