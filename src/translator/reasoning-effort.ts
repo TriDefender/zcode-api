@@ -7,6 +7,13 @@ export function upstreamModelId(model: string): string {
   return model.replace(/\[1m\]$/, "");
 }
 
+/** Official Coding Plan 1M window is opt-in via a trailing `[1m]` alias. */
+export const CONTEXT_WINDOW_1M = 1_048_576;
+
+export function catalogContextWindow(modelId: string, definition: ModelDef): number {
+  return /\[1m\]$/.test(modelId) ? CONTEXT_WINDOW_1M : definition.contextWindow;
+}
+
 export function reasoningModel(model: string): ModelDef | undefined {
   return MODELS.find((entry) => entry.id === upstreamModelId(model));
 }

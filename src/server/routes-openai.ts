@@ -4,7 +4,7 @@
  */
 import { proxyRequest, type ProxyHandlerOptions } from "../proxy/handler.js";
 import type { ModelDef } from "../provider/types.js";
-import { reasoningModel } from "../translator/reasoning-effort.js";
+import { catalogContextWindow, reasoningModel } from "../translator/reasoning-effort.js";
 import type { ProxyConfig } from "../config/types.js";
 import type { OpenAIModelList } from "../translator/types.js";
 
@@ -55,8 +55,8 @@ function codexModel(id: string, model: ModelDef): Record<string, unknown> {
     support_verbosity: false,
     apply_patch_tool_type: "freeform",
     truncation_policy: { mode: "bytes", limit: 10_000 },
-    context_window: model.contextWindow,
-    max_context_window: model.contextWindow,
+    context_window: catalogContextWindow(id, model),
+    max_context_window: catalogContextWindow(id, model),
     effective_context_window_percent: 95,
     supports_parallel_tool_calls: true,
     experimental_supported_tools: [],
@@ -74,8 +74,8 @@ function anthropicModel(id: string, model: ModelDef): Record<string, unknown> {
     type: "model",
     display_name: model.name,
     created_at: "1970-01-01T00:00:00Z",
-    max_input_tokens: model.contextWindow,
-    max_tokens: model.maxOutputTokens ?? model.contextWindow,
+    max_input_tokens: catalogContextWindow(id, model),
+    max_tokens: model.maxOutputTokens ?? catalogContextWindow(id, model),
     capabilities: {
       batch: { supported: false },
       citations: { supported: false },

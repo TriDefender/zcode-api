@@ -97,6 +97,7 @@ describe("server routing", () => {
     expect(body.models[0].supported_reasoning_levels.map((level: any) => level.effort)).toEqual(["high", "max"]);
     expect(body.models[1].supported_reasoning_levels.map((level: any) => level.effort)).toEqual(["low", "high", "max"]);
     expect(body.models[1].default_reasoning_level).toBe("max");
+    expect(body.models[0].context_window).toBe(200_000);
     expect(body.models[1].context_window).toBe(1_048_576);
   });
 
@@ -115,7 +116,7 @@ describe("server routing", () => {
       id: "glm-5.2",
       type: "model",
       display_name: "GLM 5.2",
-      max_input_tokens: 1_048_576,
+      max_input_tokens: 200_000,
       max_tokens: 131_072,
       capabilities: {
         effort: {

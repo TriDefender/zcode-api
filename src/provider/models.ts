@@ -26,7 +26,7 @@ export const MODELS: ModelDef[] = [
   {
     id: "glm-5.2",
     name: "GLM 5.2",
-    contextWindow: 1_048_576,
+    contextWindow: 200_000,
     maxOutputTokens: 131_072,
     reasoning: true,
     reasoningEfforts: ["none", "high", "max"],
@@ -37,7 +37,7 @@ export const MODELS: ModelDef[] = [
   {
     id: "glm-5.3",
     name: "GLM 5.3",
-    contextWindow: 1_048_576,
+    contextWindow: 200_000,
     maxOutputTokens: 131_072,
     reasoning: true,
     reasoningEfforts: ["low", "high", "max"],

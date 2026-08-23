@@ -5,6 +5,7 @@
 import { describe, it, expect } from "bun:test";
 import { getProvider, ZAI_PROVIDER, BIGMODEL_PROVIDER } from "./providers.js";
 import { MODELS } from "./models.js";
+import { catalogContextWindow, CONTEXT_WINDOW_1M, reasoningModel } from "../translator/reasoning-effort.js";
 
 describe("providers", () => {
   it("getProvider returns Z.AI definition", () => {
@@ -51,24 +52,17 @@ describe("models", () => {
       expect(typeof m.id).toBe("string");
       expect(m.id.length).toBeGreaterThan(0);
       expect(m.contextWindow).toBeGreaterThan(0);
+      expect(m.contextWindow).toBe(200_000);
       expect(m.maxOutputTokens).toBe(m.id === "glm-5.2" || m.id === "glm-5.3" ? 131_072 : 128_000);
     }
   });
 
-  it("all models except glm-5.2/glm-5.3 have 200k context", () => {
-    for (const m of MODELS) {
-      if (m.id === "glm-5.2" || m.id === "glm-5.3") continue;
-      expect(m.contextWindow).toBe(200_000);
-    }
-  });
-
-  it("glm-5.2 and glm-5.3 have 1M context", () => {
-    const glm52 = MODELS.find((m) => m.id === "glm-5.2");
-    expect(glm52).toBeDefined();
-    expect(glm52!.contextWindow).toBe(1_048_576);
-    const glm53 = MODELS.find((m) => m.id === "glm-5.3");
-    expect(glm53).toBeDefined();
-    expect(glm53!.contextWindow).toBe(1_048_576);
+  it("glm-5.2 and glm-5.3 default to 200k; [1m] aliases are listing-only 1M", () => {
+    expect(reasoningModel("glm-5.2")!.contextWindow).toBe(200_000);
+    expect(reasoningModel("glm-5.3")!.contextWindow).toBe(200_000);
+    expect(catalogContextWindow("glm-5.3", reasoningModel("glm-5.3")!)).toBe(200_000);
+    expect(catalogContextWindow("glm-5.3[1m]", reasoningModel("glm-5.3[1m]")!)).toBe(CONTEXT_WINDOW_1M);
+    expect(catalogContextWindow("glm-5.2[1m]", reasoningModel("glm-5.2[1m]")!)).toBe(CONTEXT_WINDOW_1M);
   });
 
   it("includes key GLM models", () => {
