@@ -58,8 +58,8 @@ models:
 identity:
   # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
   # Must be printable ASCII; non-conforming values fall back to the default.
-  # Default: "3.8.1" (current ZCode release). Override to match your real client.
-  appVersion: "3.8.1"
+  # Default: "3.9.1" (current ZCode release). Override to match your real client.
+  appVersion: "3.9.1"
   # X-Title suffix → "Z Code@{sourceTitle}". Default "cli".
   sourceTitle: "cli"
   # HTTP-Referer URL. Default "https://zcode.z.ai".
@@ -138,7 +138,7 @@ endpointRouting:
   enabled: true
   origin: "https://zcode.z.ai"
 
-# Client request signing V4 (mirrors the ZCode 3.8.1 ClientRequestSigningV4Signer).
+# Client request signing V4 (mirrors the ZCode 3.9.1 ClientRequestSigningV4Signer).
 # When enabled, the proxy probes {origin}/api/v1/agent/configs (cached 1h) and,
 # only if the server sets data.codingPlanSignature.enable=true, signs coding-plan
 # requests: handshake against {provider}/api/paas/c1f3a7e2/v2/client, Ed25519

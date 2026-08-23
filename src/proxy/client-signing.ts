@@ -1,5 +1,5 @@
 /**
- * Client Request Signing V4 — mirrors the ZCode 3.8.1 `ClientRequestSigningV4Signer`.
+ * Client Request Signing V4 — mirrors the ZCode 3.9.1 `ClientRequestSigningV4Signer`.
  *
  * Per-request Ed25519 signatures + proof-of-work over coding-plan traffic.
  * Everything here is fail-open, matching the client: gate disabled/unreachable

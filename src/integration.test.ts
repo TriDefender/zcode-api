@@ -3,6 +3,9 @@
  * @see .omo/plans/zcode-proxy.md Task 13
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadConfig } from "./config/loader.js";
 import { AuthManager } from "./auth/manager.js";
 import { startServer, type ProxyServer } from "./server/server.js";
@@ -15,6 +18,33 @@ let capturedUpstreamBodies: string[] = [];
 
 function findFreePort(): number {
   return 18000 + Math.floor(Math.random() * 1000);
+}
+
+// The former config.test.yaml fixture (removed in f6aa147) inlined as a temp
+// file so the suite stays self-contained.
+let configDir: string;
+
+function writeTestConfig(): string {
+  configDir = mkdtempSync(join(tmpdir(), "zcode-int-"));
+  const yaml = [
+    "server:",
+    '  port: 19090',
+    '  host: "127.0.0.1"',
+    "auth:",
+    "  mode: apikey",
+    '  apiKey: "fakekey.fakesecret"',
+    '  proxyApiKey: "test-proxy-key"',
+    "provider: zai",
+    "defaultModel: glm-4.6",
+    "models:",
+    "  - glm-4.6",
+    "logging:",
+    "  level: info",
+    "",
+  ].join("\n");
+  const path = join(configDir, "config.test.yaml");
+  writeFileSync(path, yaml);
+  return path;
 }
 
 beforeAll(async () => {
@@ -180,7 +210,7 @@ beforeAll(async () => {
     },
   });
 
-  const config = loadConfig("config.test.yaml");
+  const config = loadConfig(writeTestConfig());
   config.server.port = proxyPort;
   config.server.host = "127.0.0.1";
   config.auth.proxyApiKey = "integration-test-key";
@@ -202,6 +232,7 @@ afterAll(() => {
   // terminates test discovery early and masks failures in other test files.
   proxyServer?.stop(false);
   mockUpstreamServer?.stop(false);
+  if (configDir) rmSync(configDir, { recursive: true, force: true });
 });
 
 function proxyUrl(path: string): string {
