@@ -17,6 +17,8 @@ const CONFIG: ProxyConfig = {
   identity: { appVersion: "test-1.0.0", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai" },
   clientIdentity: { mode: "off", ttlSeconds: 900, maxSessions: 1024 },
   responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
+  clientSigning: { enabled: false, origin: "https://zcode.z.ai" },
   mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   logging: { level: "info" },
@@ -26,6 +28,30 @@ const auth = { getCredential: async () => ({ apiKey: "testkey.testsecret", userI
 
 function chatUpstream(body: string, status = 200): typeof fetch {
   return (async (): Promise<Response> => new Response(body, { status, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+}
+
+function anthropicMsg(text: string, id = "msg_1"): string {
+  return JSON.stringify({
+    id,
+    type: "message",
+    role: "assistant",
+    model: "glm-5.2",
+    content: [{ type: "text", text }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 3, output_tokens: 2 },
+  });
+}
+
+function anthropicSse(text: string): string {
+  return [
+    `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: "msg_s", type: "message", role: "assistant", model: "glm-5.2", content: [], usage: { input_tokens: 3, output_tokens: 0 } } })}\n\n`,
+    `event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })}\n\n`,
+    `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text } })}\n\n`,
+    `event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`,
+    `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 2 } })}\n\n`,
+    `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`,
+  ].join("");
 }
 
 function makeReq(body: unknown): Request {
@@ -38,13 +64,7 @@ function makeReq(body: unknown): Request {
 
 describe("handleResponses", () => {
   it("returns a ResponsesResponse with message output for a basic text request", async () => {
-    const fetchImpl = chatUpstream(JSON.stringify({
-      id: "cc-1",
-      object: "chat.completion",
-      created: 1,
-      model: "glm-5.2",
-      choices: [{ index: 0, message: { role: "assistant", content: "hi back" }, finish_reason: "stop" }],
-    }));
+    const fetchImpl = chatUpstream(anthropicMsg("hi back"));
     const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hello" }), { config: CONFIG, auth, fetchImpl });
     expect(resp.status).toBe(200);
     const body = await resp.json();
@@ -55,10 +75,7 @@ describe("handleResponses", () => {
 
   it("stores the response and resolves previous_response_id from the store", async () => {
     const store = new ResponseStore();
-    const fetchImpl = chatUpstream(JSON.stringify({
-      id: "cc-1", object: "chat.completion", created: 1, model: "glm-5.2",
-      choices: [{ index: 0, message: { role: "assistant", content: "turn1" }, finish_reason: "stop" }],
-    }));
+    const fetchImpl = chatUpstream(anthropicMsg("turn1"));
     const r1 = await handleResponses(makeReq({ model: "glm-5.2", input: "first turn" }), { config: CONFIG, auth, fetchImpl, responseStore: store });
     const body1 = await r1.json();
     expect(store.size()).toBe(1);
@@ -67,10 +84,7 @@ describe("handleResponses", () => {
     let secondUpstreamBody = "";
     const fetchImpl2 = (async (request: Request): Promise<Response> => {
       secondUpstreamBody = await request.text();
-      return new Response(JSON.stringify({
-        id: "cc-2", object: "chat.completion", created: 1, model: "glm-5.2",
-        choices: [{ index: 0, message: { role: "assistant", content: "turn2" }, finish_reason: "stop" }],
-      }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(anthropicMsg("turn2", "msg_2"), { status: 200, headers: { "content-type": "application/json" } });
     }) as unknown as typeof fetch;
     const r2 = await handleResponses(makeReq({ model: "glm-5.2", input: "second turn", previous_response_id: body1.id }), { config: CONFIG, auth, fetchImpl: fetchImpl2, responseStore: store });
     expect(r2.status).toBe(200);
@@ -81,7 +95,7 @@ describe("handleResponses", () => {
 
   it("returns 404 when previous_response_id is not in the store", async () => {
     const store = new ResponseStore();
-    const fetchImpl = chatUpstream(JSON.stringify({ id: "x", object: "chat.completion", created: 1, model: "glm-5.2", choices: [{ index: 0, message: { role: "assistant", content: "x" }, finish_reason: "stop" }] }));
+    const fetchImpl = chatUpstream(anthropicMsg("x"));
     const r = await handleResponses(makeReq({ model: "glm-5.2", input: "x", previous_response_id: "resp_missing" }), { config: CONFIG, auth, fetchImpl, responseStore: store });
     expect(r.status).toBe(404);
     const body = await r.json();
@@ -90,7 +104,7 @@ describe("handleResponses", () => {
 
   it("does not store the response when store:false", async () => {
     const store = new ResponseStore();
-    const fetchImpl = chatUpstream(JSON.stringify({ id: "x", object: "chat.completion", created: 1, model: "glm-5.2", choices: [{ index: 0, message: { role: "assistant", content: "x" }, finish_reason: "stop" }] }));
+    const fetchImpl = chatUpstream(anthropicMsg("x"));
     await handleResponses(makeReq({ model: "glm-5.2", input: "x", store: false }), { config: CONFIG, auth, fetchImpl, responseStore: store });
     expect(store.size()).toBe(0);
   });
@@ -99,7 +113,7 @@ describe("handleResponses", () => {
     let upstreamCalls = 0;
     const fetchImpl = (async (): Promise<Response> => {
       upstreamCalls++;
-      return new Response(JSON.stringify({ id: "x", object: "chat.completion", created: 1, model: "glm-5.2", choices: [{ index: 0, message: { role: "assistant", content: "no search needed" }, finish_reason: "stop" }] }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(anthropicMsg("no search needed"), { status: 200, headers: { "content-type": "application/json" } });
     }) as unknown as typeof fetch;
     const r = await handleResponses(makeReq({ model: "glm-5.2", input: "search the web", tools: [{ type: "web_search_preview" }] }), { config: CONFIG, auth, fetchImpl });
     expect(r.status).toBe(200);
@@ -111,13 +125,7 @@ describe("handleResponses", () => {
   });
 
   it("returns a text/event-stream response for stream:true", async () => {
-    const sseBody = [
-      `data:${JSON.stringify({ id: "1", object: "chat.completion.chunk", created: 1, model: "glm-5.2", choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] })}\n\n`,
-      `data:${JSON.stringify({ id: "1", object: "chat.completion.chunk", created: 1, model: "glm-5.2", choices: [{ index: 0, delta: { content: "hi" }, finish_reason: null }] })}\n\n`,
-      `data:${JSON.stringify({ id: "1", object: "chat.completion.chunk", created: 1, model: "glm-5.2", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`,
-      `data:[DONE]\n\n`,
-    ].join("");
-    const fetchImpl = (async (): Promise<Response> => new Response(sseBody, { status: 200, headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch;
+    const fetchImpl = (async (): Promise<Response> => new Response(anthropicSse("hi"), { status: 200, headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch;
     const r = await handleResponses(makeReq({ model: "glm-5.2", input: "hi", stream: true }), { config: CONFIG, auth, fetchImpl });
     expect(r.status).toBe(200);
     expect(r.headers.get("content-type")).toBe("text/event-stream");
@@ -129,12 +137,7 @@ describe("handleResponses", () => {
 
   it("stores a completed stream for previous_response_id continuation", async () => {
     const store = new ResponseStore();
-    const sseBody = [
-      `data:${JSON.stringify({ id: "chatcmpl-stream", object: "chat.completion.chunk", created: 1, model: "glm-5.2", choices: [{ index: 0, delta: { content: "turn1" }, finish_reason: null }] })}\n\n`,
-      `data:${JSON.stringify({ id: "chatcmpl-stream", object: "chat.completion.chunk", created: 1, model: "glm-5.2", choices: [{ index: 0, delta: {}, finish_reason: "stop" }] })}\n\n`,
-      "data:[DONE]\n\n",
-    ].join("");
-    const streamFetch = (async (): Promise<Response> => new Response(sseBody, { status: 200, headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch;
+    const streamFetch = (async (): Promise<Response> => new Response(anthropicSse("turn1"), { status: 200, headers: { "content-type": "text/event-stream" } })) as unknown as typeof fetch;
     const streamed = await handleResponses(makeReq({ model: "glm-5.2", input: "first turn", stream: true }), { config: CONFIG, auth, fetchImpl: streamFetch, responseStore: store });
     const streamText = await streamed.text();
     const responseId = streamText.match(/event: response\.completed\ndata: .*?"id":"([^"]+)"/)?.[1];
@@ -143,10 +146,7 @@ describe("handleResponses", () => {
     let continuationUpstreamBody = "";
     const continuationFetch = (async (request: Request): Promise<Response> => {
       continuationUpstreamBody = await request.text();
-      return new Response(JSON.stringify({
-        id: "cc-2", object: "chat.completion", created: 1, model: "glm-5.2",
-        choices: [{ index: 0, message: { role: "assistant", content: "turn2" }, finish_reason: "stop" }],
-      }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(anthropicMsg("turn2", "msg_c2"), { status: 200, headers: { "content-type": "application/json" } });
     }) as unknown as typeof fetch;
     const continuation = await handleResponses(makeReq({ model: "glm-5.2", input: "second turn", previous_response_id: responseId }), { config: CONFIG, auth, fetchImpl: continuationFetch, responseStore: store });
     expect(continuation.status).toBe(200);

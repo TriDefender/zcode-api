@@ -123,6 +123,38 @@ export interface AsyncConfig {
   defaultModel: string;
 }
 
+/**
+ * Provider endpoint routing — mirrors the ZCode client's
+ * `ProviderEndpointRoutingService`: periodically fetch
+ * `GET {configUrl}/api/v1/agent/configs` and rewrite matching upstream URLs
+ * per the server-controlled `data.proxyEndpoint.mapping` table. As of
+ * 2026-08-19 only the coding-plan Anthropic endpoints are mapped (to
+ * `zcode.z.ai/api/v1/ultra[-zai]/...`); resolution is generic so future
+ * entries apply automatically. Always fail-open.
+ */
+export interface EndpointRoutingConfig {
+  /** Enable URL remapping. Default `true`. */
+  enabled: boolean;
+  /** Base origin of the agent-configs endpoint. Default `"https://zcode.z.ai"`. */
+  origin: string;
+}
+
+/**
+ * Client request signing V4 — mirrors the ZCode 3.8.1
+ * `ClientRequestSigningV4Signer`. When enabled, the proxy probes the same
+ * feature gate the client uses (`GET {origin}/api/v1/agent/configs` →
+ * `data.codingPlanSignature.enable`) and, only if the server turns the feature
+ * on, signs coding-plan upstream requests (handshake + Ed25519 + proof-of-work,
+ * with the client's fail-open retry ladder). Start-plan and off-peak paths are
+ * permanently exempt.
+ */
+export interface ClientSigningConfig {
+  /** Enable gate probing + signing. Default `true`. */
+  enabled: boolean;
+  /** Base origin of the feature-gate endpoint. Default `"https://zcode.z.ai"`. */
+  origin: string;
+}
+
 /** Top-level proxy configuration. */
 export interface ProxyConfig {
   server: {
@@ -152,6 +184,10 @@ export interface ProxyConfig {
   clientIdentity: ClientIdentityConfig;
   /** Responses-API (`/v1/responses`) configuration. */
   responses: ResponsesConfig;
+  /** Server-controlled upstream URL remapping (ultra endpoints). */
+  endpointRouting: EndpointRoutingConfig;
+  /** Client request signing V4 (Ed25519 + PoW, gate-driven). */
+  clientSigning: ClientSigningConfig;
   /** GLM MCP hosted-tool configuration. */
   mcp: McpConfig;
   /** Async (off-peak / idle-plan) bridge configuration. */

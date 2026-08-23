@@ -4,7 +4,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
-import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig, AsyncConfig } from "./types.js";
+import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig, AsyncConfig, EndpointRoutingConfig, ClientSigningConfig } from "./types.js";
 
 /** Environment variable keys that override YAML values. */
 const ENV = {
@@ -19,6 +19,8 @@ const ENV = {
   ASYNC_ORIGIN: "ZCODE_ASYNC_ORIGIN",
   ASYNC_MAX_RETRIES: "ZCODE_ASYNC_MAX_RETRIES",
   ASYNC_MAX_WAIT_MS: "ZCODE_ASYNC_MAX_WAIT_MS",
+  ENDPOINT_ROUTING_ENABLED: "ZCODE_ENDPOINT_ROUTING",
+  CLIENT_SIGNING_ENABLED: "ZCODE_CLIENT_SIGNING",
 } as const;
 
 const DEFAULTS = {
@@ -32,7 +34,7 @@ const DEFAULTS = {
   ZAI_OPENAI_BASE: "https://api.z.ai/api/coding/paas/v4",
   BIGMODEL_ANTHROPIC_BASE: "https://open.bigmodel.cn/api/anthropic",
   BIGMODEL_OPENAI_BASE: "https://open.bigmodel.cn/api/coding/paas/v4",
-  APP_VERSION: "3.7.7",
+  APP_VERSION: "3.8.1",
   SOURCE_TITLE: "cli",
   REFERER_ORIGIN: "https://zcode.z.ai",
   CLIENT_IDENTITY_MODE: "observe" as const,
@@ -54,6 +56,10 @@ const DEFAULTS = {
   ASYNC_SETTLE_TIMEOUT_MS: 8000,
   ASYNC_CONTROL_TIMEOUT_MS: 15000,
   ASYNC_DEFAULT_MODEL: "",
+  ENDPOINT_ROUTING_ENABLED: true,
+  ENDPOINT_ROUTING_ORIGIN: "https://zcode.z.ai",
+  CLIENT_SIGNING_ENABLED: true,
+  CLIENT_SIGNING_ORIGIN: "https://zcode.z.ai",
 };
 
 /** Printable-ASCII gate copied from the ZCode bundle's `rYn` helper. */
@@ -119,6 +125,8 @@ export function loadConfig(path: string): ProxyConfig {
   const responses = resolveResponsesConfig(parsed?.responses);
   const mcp = resolveMcpConfig(parsed?.mcp);
   const asyncCfg = resolveAsyncConfig(parsed?.async);
+  const endpointRouting = resolveEndpointRoutingConfig(parsed?.endpointRouting);
+  const clientSigning = resolveClientSigningConfig(parsed?.clientSigning);
 
   const config: ProxyConfig = {
     server: { port, host },
@@ -131,6 +139,8 @@ export function loadConfig(path: string): ProxyConfig {
     identity,
     clientIdentity,
     responses,
+    endpointRouting,
+    clientSigning,
     mcp,
     async: asyncCfg,
     logging: { level: logLevel },
@@ -182,7 +192,7 @@ function resolveAsyncConfig(raw: unknown): AsyncConfig {
   const maxWaitMsEnv = process.env[ENV.ASYNC_MAX_WAIT_MS];
 
   const origin = (originEnv ?? (typeof obj.origin === "string" ? obj.origin : DEFAULTS.ASYNC_ORIGIN)).trim() || DEFAULTS.ASYNC_ORIGIN;
-  validateOrigin(origin);
+  validateOrigin(origin, "async.origin");
 
   return {
     enabled: enabledEnv !== undefined ? resolveBool(enabledEnv, DEFAULTS.ASYNC_ENABLED) : resolveBool(obj.enabled, DEFAULTS.ASYNC_ENABLED),
@@ -197,36 +207,60 @@ function resolveAsyncConfig(raw: unknown): AsyncConfig {
   };
 }
 
-function validateOrigin(origin: string): void {
+function validateOrigin(origin: string, name: string): void {
   let parsed: URL;
   try {
     parsed = new URL(origin);
   } catch {
-    throw new Error(`async.origin "${origin}" is not a valid URL`);
+    throw new Error(`${name} "${origin}" is not a valid URL`);
   }
   // Scheme allowlist: only http/https. Other schemes (ftp:, file:, etc.) rejected.
   if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error(`async.origin must use http: or https: scheme (got ${parsed.protocol})`);
+    throw new Error(`${name} must use http: or https: scheme (got ${parsed.protocol})`);
   }
   // Cleartext HTTP only for loopback (dev/mock mode). Real off-peak backend requires
   // HTTPS — cleartext would leak the JWT + coding-plan API key to any network observer.
   const hostname = parsed.hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
   const isLoopback = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
   if (parsed.protocol === "http:" && !isLoopback) {
-    throw new Error(`async.origin http:// is only allowed for loopback hosts (got ${hostname}). Use https:// for remote origins.`);
+    throw new Error(`${name} http:// is only allowed for loopback hosts (got ${hostname}). Use https:// for remote origins.`);
   }
   if (parsed.username || parsed.password) {
-    throw new Error(`async.origin must not contain userinfo`);
+    throw new Error(`${name} must not contain userinfo`);
   }
   if (parsed.hash) {
-    throw new Error(`async.origin must not contain a fragment`);
+    throw new Error(`${name} must not contain a fragment`);
   }
   if (parsed.pathname !== "/" && parsed.pathname !== "") {
-    throw new Error(`async.origin must not contain a path (got "${parsed.pathname}"); clients append their own paths`);
+    throw new Error(`${name} must not contain a path (got "${parsed.pathname}"); clients append their own paths`);
   }
   if (parsed.search) {
-    throw new Error(`async.origin must not contain a query string`);
+    throw new Error(`${name} must not contain a query string`);
   }
+}
+
+function resolveEndpointRoutingConfig(raw: unknown): EndpointRoutingConfig {
+  const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const enabledEnv = process.env[ENV.ENDPOINT_ROUTING_ENABLED];
+  const origin = (typeof obj.origin === "string" ? obj.origin : DEFAULTS.ENDPOINT_ROUTING_ORIGIN).trim()
+    || DEFAULTS.ENDPOINT_ROUTING_ORIGIN;
+  validateOrigin(origin, "endpointRouting.origin");
+  return {
+    enabled: enabledEnv !== undefined ? resolveBool(enabledEnv, DEFAULTS.ENDPOINT_ROUTING_ENABLED) : resolveBool(obj.enabled, DEFAULTS.ENDPOINT_ROUTING_ENABLED),
+    origin,
+  };
+}
+
+function resolveClientSigningConfig(raw: unknown): ClientSigningConfig {
+  const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const enabledEnv = process.env[ENV.CLIENT_SIGNING_ENABLED];
+  const origin = (typeof obj.origin === "string" ? obj.origin : DEFAULTS.CLIENT_SIGNING_ORIGIN).trim()
+    || DEFAULTS.CLIENT_SIGNING_ORIGIN;
+  validateOrigin(origin, "clientSigning.origin");
+  return {
+    enabled: enabledEnv !== undefined ? resolveBool(enabledEnv, DEFAULTS.CLIENT_SIGNING_ENABLED) : resolveBool(obj.enabled, DEFAULTS.CLIENT_SIGNING_ENABLED),
+    origin,
+  };
 }
 
 function resolveBool(raw: unknown, fallback: boolean): boolean {

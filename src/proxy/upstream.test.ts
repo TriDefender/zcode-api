@@ -210,6 +210,7 @@ describe("buildAuthHeaders", () => {
       "X-Title",
       "X-ZCode-Agent",
       "X-Platform",
+      "X-Release-Channel",
       "X-Client-Language",
       "X-Client-Timezone",
       "X-Os-Category",
@@ -399,6 +400,8 @@ describe("proxyRequest", () => {
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
+  clientSigning: { enabled: false, origin: "https://zcode.z.ai" },
   mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   logging: { level: "info" },
@@ -433,12 +436,21 @@ describe("proxyRequest", () => {
     }, true)).toBe(false);
   });
 
-  it("forwards request to upstream with injected auth", async () => {
+  it("forwards request to the Anthropic upstream with injected auth (native passthrough)", async () => {
     const fetchMock = mock(async (req: Request): Promise<Response> => {
-      expect(req.url).toBe("https://api.z.ai/api/coding/paas/v4/chat/completions");
-      expect(req.headers.get("authorization")).toBe("Bearer testkey.testsecret");
-      expect(req.headers.get("anthropic-version")).toBeNull();
-      return new Response('{"id":"chatcmpl_1","object":"chat.completion","created":1,"model":"glm-4.6","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}', {
+      expect(req.url).toBe("https://api.z.ai/api/anthropic/v1/messages");
+      expect(req.headers.get("x-api-key")).toBe("testkey.testsecret");
+      expect(req.headers.get("anthropic-version")).toBe("2023-06-01");
+      return new Response(JSON.stringify({
+        id: "msg_fwd",
+        type: "message",
+        role: "assistant",
+        model: "glm-4.6",
+        content: [{ type: "text", text: "Hello" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -455,15 +467,19 @@ describe("proxyRequest", () => {
     expect(body.content[0].text).toBe("Hello");
   });
 
-  it("translates OpenAI-compatible streaming response to Anthropic SSE", async () => {
+  it("passes the Anthropic SSE stream through natively for Anthropic clients", async () => {
     const sseBody = [
-      'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"glm-4.6","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}',
       '',
-      'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Hi"},"finish_reason":null}]}',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
       '',
-      'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}',
       '',
-      'data: [DONE]',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+      '',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}',
+      '',
+      'event: message_stop\ndata: {"type":"message_stop"}',
       '',
     ].join("\n");
 
@@ -489,10 +505,19 @@ describe("proxyRequest", () => {
     expect(text).toContain("message_stop");
   });
 
-  it("translates OpenAI-compatible batch response instead of compressed passthrough for Anthropic clients", async () => {
+  it("passes the Anthropic batch response through with raw-decompress transport", async () => {
     const fetchMock = mock(async (_req: Request, init?: RequestInit & { decompress?: boolean }): Promise<Response> => {
-      expect(init?.decompress).toBeUndefined();
-      return new Response('{"id":"chatcmpl_1","object":"chat.completion","created":1,"model":"glm-4.6","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}', {
+      expect(init?.decompress).toBe(false);
+      return new Response(JSON.stringify({
+        id: "msg_fwd2",
+        type: "message",
+        role: "assistant",
+        model: "glm-4.6",
+        content: [{ type: "text", text: "Hello" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }), {
         status: 200,
         headers: {
           "content-type": "application/json",
@@ -542,9 +567,9 @@ describe("proxyRequest", () => {
     expect(body.error.type).toBe("credential_unavailable");
   });
 
-  it("forwards upstream error status codes", async () => {
+  it("forwards upstream error status codes through verbatim for native Anthropic clients", async () => {
     const fetchMock = mock(async (): Promise<Response> => {
-      return new Response('{"error":{"type":"invalid_request_error","message":"bad model"}}', {
+      return new Response('{"type":"error","error":{"type":"invalid_request_error","message":"bad model"}}', {
         status: 400,
         headers: { "content-type": "application/json" },
       });
@@ -555,13 +580,13 @@ describe("proxyRequest", () => {
 
     const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
 
-    expect(resp.status).toBe(502);
+    expect(resp.status).toBe(400);
     const body = await resp.json();
-    expect(body.error.type).toBe("translation_failed");
+    expect(body.error.type).toBe("invalid_request_error");
   });
 });
 
-describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
+describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic upstream)", () => {
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
     auth: { mode: "apikey", apiKey: "testkey.testsecret" },
@@ -576,6 +601,8 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
+  clientSigning: { enabled: false, origin: "https://zcode.z.ai" },
   mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   logging: { level: "info" },
@@ -589,23 +616,21 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     });
   }
 
-  const OPENAI_RESPONSE = JSON.stringify({
-    id: "chatcmpl_1",
-    object: "chat.completion",
-    created: 1,
+  const ANTHROPIC_RESPONSE = JSON.stringify({
+    id: "msg_1",
+    type: "message",
+    role: "assistant",
     model: "glm-4.6",
-    choices: [{
-      index: 0,
-      message: { role: "assistant", content: "OpenAI hello" },
-      finish_reason: "stop",
-    }],
-    usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 },
+    content: [{ type: "text", text: "Anthropic hello" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 10, output_tokens: 3 },
   });
 
-  it("routes OpenAI request to OpenAI-compatible upstream endpoint", async () => {
+  it("routes OpenAI client request to the Anthropic upstream endpoint", async () => {
     const fetchMock = mock(async (req: Request): Promise<Response> => {
-      expect(req.url).toBe("https://api.z.ai/api/coding/paas/v4/chat/completions");
-      return new Response(OPENAI_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
+      expect(req.url).toBe("https://api.z.ai/api/anthropic/v1/messages");
+      return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
@@ -615,12 +640,12 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
-  it("uses Authorization Bearer on OpenAI-compatible upstream request", async () => {
+  it("uses x-api-key + anthropic-version on the Anthropic upstream request", async () => {
     const fetchMock = mock(async (req: Request): Promise<Response> => {
-      expect(req.headers.get("authorization")).toBe("Bearer testkey.testsecret");
-      expect(req.headers.get("x-api-key")).toBeNull();
-      expect(req.headers.get("anthropic-version")).toBeNull();
-      return new Response(OPENAI_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
+      expect(req.headers.get("x-api-key")).toBe("testkey.testsecret");
+      expect(req.headers.get("authorization")).toBeNull();
+      expect(req.headers.get("anthropic-version")).toBe("2023-06-01");
+      return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
@@ -629,16 +654,17 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
   });
 
-  it("sends OpenAI body upstream and injects include_usage for streaming", async () => {
+  it("sends a translated Anthropic body upstream (no stream_options concept)", async () => {
     const fetchMock = mock(async (req: Request): Promise<Response> => {
       const body = await req.text();
       const parsed = JSON.parse(body);
       expect(parsed.model).toBe("glm-4.6");
       expect(parsed.messages[0].role).toBe("user");
-      expect(parsed.messages[0].content).toBe("Hi");
-      expect(parsed.max_tokens).toBeUndefined();
-      expect(parsed.stream_options).toEqual({ include_usage: true });
-      return new Response(OPENAI_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
+      expect(parsed.messages[0].content[0].type).toBe("text");
+      expect(parsed.messages[0].content[0].text).toBe("Hi");
+      expect(parsed.stream_options).toBeUndefined();
+      expect(parsed.system).toBeUndefined();
+      return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
@@ -647,9 +673,9 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
   });
 
-  it("passes batch OpenAI-compatible response through", async () => {
+  it("translates the Anthropic batch response back to OpenAI shape", async () => {
     const fetchMock = mock(async (): Promise<Response> => {
-      return new Response(OPENAI_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
@@ -658,21 +684,20 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
     expect(resp.status).toBe(200);
     expect(resp.headers.get("content-type")).toBe("application/json");
-    expect(resp.headers.get("content-encoding")).toBeNull();
     const body = await resp.json();
     expect(body.object).toBe("chat.completion");
-    expect(body.choices[0].message.content).toBe("OpenAI hello");
+    expect(body.choices[0].message.content).toBe("Anthropic hello");
     expect(body.choices[0].finish_reason).toBe("stop");
     expect(body.usage.total_tokens).toBe(13);
   });
 
-  it("does not synthesize gzip for OpenAI passthrough", async () => {
+  it("does not synthesize gzip when the client does not accept it", async () => {
     const fetchMock = mock(async (): Promise<Response> => {
-      return new Response(OPENAI_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
-    const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}', { "accept-encoding": "gzip" });
+    const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
     expect(resp.headers.get("content-encoding")).toBeNull();
@@ -680,15 +705,19 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     expect(body.object).toBe("chat.completion");
   });
 
-  it("passes OpenAI-compatible SSE stream through", async () => {
+  it("translates the Anthropic SSE stream to OpenAI chunks", async () => {
     const sseBody = [
-      'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
+      'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","model":"glm-4.6","content":[],"usage":{"input_tokens":10,"output_tokens":1}}}',
       '',
-      'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}',
+      'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
       '',
-      'data: {"id":"chatcmpl_1","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
+      'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}',
       '',
-      'data: [DONE]',
+      'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}',
+      '',
+      'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":3}}',
+      '',
+      'event: message_stop\ndata: {"type":"message_stop"}',
       '',
     ].join("\n");
 
@@ -710,9 +739,9 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     expect(text).toContain("data: [DONE]");
   });
 
-  it("forwards selected upstream headers in passthrough batch response", async () => {
+  it("forwards selected upstream headers in the translated batch response", async () => {
     const fetchMock = mock(async (): Promise<Response> => {
-      return new Response(OPENAI_RESPONSE, {
+      return new Response(ANTHROPIC_RESPONSE, {
         status: 200,
         headers: {
           "content-type": "application/json",
@@ -732,11 +761,11 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     expect(resp.headers.get("anthropic-ratelimit-tokens-reset")).toBe("2025-01-01T00:00:00Z");
   });
 
-  it("preserves upstream content-encoding when the client advertises gzip", async () => {
+  it("gzips the translated body when the client advertises gzip", async () => {
     const fetchMock = mock(async (): Promise<Response> => {
-      return new Response(OPENAI_RESPONSE, {
+      return new Response(ANTHROPIC_RESPONSE, {
         status: 200,
-        headers: { "content-type": "application/json", "content-encoding": "gzip" },
+        headers: { "content-type": "application/json" },
       });
     });
 
@@ -747,10 +776,12 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     expect(resp.headers.get("content-encoding")).toBe("gzip");
   });
 
-  it("decompresses upstream gzip body when the client did not advertise gzip", async () => {
-    const gzipped = gzipSync(new TextEncoder().encode(OPENAI_RESPONSE));
+  it("does not propagate a stale upstream gzip label to the translated client response", async () => {
+    // translate mode lets the runtime inflate; the mock simulates the
+    // post-inflate state (decoded body, stale label) — the label must not
+    // reach the OpenAI client
     const fetchMock = mock(async (): Promise<Response> => {
-      return new Response(gzipped, {
+      return new Response(ANTHROPIC_RESPONSE, {
         status: 200,
         headers: { "content-type": "application/json", "content-encoding": "gzip" },
       });
@@ -765,18 +796,19 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     expect(body.object).toBe("chat.completion");
   });
 
-  it("forwards malformed JSON body to OpenAI-compatible upstream", async () => {
+  it("returns 400 for a malformed OpenAI body without calling upstream", async () => {
     const fetchMock = mock(async (): Promise<Response> => new Response("ok"));
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
     const clientReq = makeOpenAIReq("not json");
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
-    expect(resp.status).toBe(200);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(await resp.text()).toBe("ok");
+    expect(resp.status).toBe(400);
+    expect(fetchMock).toHaveBeenCalledTimes(0);
+    const body = await resp.json();
+    expect(body.error.type).toBe("translation_failed");
   });
 
-  it("passes non-JSON upstream body through for OpenAI clients", async () => {
+  it("returns 502 when the upstream returns a non-JSON body", async () => {
     const fetchMock = mock(async (): Promise<Response> => {
       return new Response("not json", { status: 200, headers: { "content-type": "text/plain" } });
     });
@@ -784,26 +816,36 @@ describe("proxyRequest — OpenAI passthrough mode (coding-plan)", () => {
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
-    expect(resp.status).toBe(200);
-    expect(await resp.text()).toBe("not json");
+    expect(resp.status).toBe(502);
+    const body = await resp.json();
+    expect(body.error.type).toBe("translation_failed");
   });
 
-  it("passes upstream non-2xx status through for OpenAI clients", async () => {
+  it("maps upstream non-2xx to 502 translation_failed for translated clients", async () => {
     const fetchMock = mock(async (): Promise<Response> => {
-      return new Response('{"error":"bad request"}', { status: 400, headers: { "content-type": "application/json" } });
+      return new Response('{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}', { status: 400, headers: { "content-type": "application/json" } });
     });
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
-    expect(resp.status).toBe(400);
+    expect(resp.status).toBe(502);
     const body = await resp.json();
-    expect(body.error).toBe("bad request");
+    expect(body.error.type).toBe("translation_failed");
   });
 });
 
 describe("client gzip handling", () => {
-  const OPENAI_RESPONSE = '{"id":"chatcmpl_1","object":"chat.completion","created":1,"model":"glm-4.6","choices":[{"index":0,"message":{"role":"assistant","content":"OpenAI hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":8,"completion_tokens":5,"total_tokens":13}}';
+  const ANTHROPIC_RESPONSE = JSON.stringify({
+    id: "msg_gz",
+    type: "message",
+    role: "assistant",
+    model: "glm-4.6",
+    content: [{ type: "text", text: "Anthropic hello" }],
+    stop_reason: "end_turn",
+    stop_sequence: null,
+    usage: { input_tokens: 8, output_tokens: 5 },
+  });
 
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
@@ -819,6 +861,8 @@ describe("client gzip handling", () => {
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
+  clientSigning: { enabled: false, origin: "https://zcode.z.ai" },
     mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
     async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
     logging: { level: "info" },
@@ -862,8 +906,8 @@ describe("client gzip handling", () => {
     const fetchMock = mock(async (req: Request): Promise<Response> => {
       const parsed = JSON.parse(await req.text());
       expect(parsed.model).toBe("glm-4.6");
-      expect(parsed.messages[0].content).toBe("Hi");
-      return new Response(OPENAI_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
+      expect(parsed.messages[0].content[0].text).toBe("Hi");
+      return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
     const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
@@ -914,13 +958,13 @@ describe("client gzip handling", () => {
     expect(body.error.type).toBe("request_too_large");
   });
 
-  it("forwards plain (uncompressed) request bodies unchanged", async () => {
+  it("forwards plain (uncompressed) request bodies translated", async () => {
     const payload = '{"model":"glm-4.6","messages":[]}';
     const fetchMock = mock(async (req: Request): Promise<Response> => {
       const parsed = JSON.parse(await req.text());
       expect(parsed.model).toBe("glm-4.6");
       expect(parsed.messages).toEqual([]);
-      return new Response(OPENAI_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
     const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
@@ -949,23 +993,31 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
+  clientSigning: { enabled: false, origin: "https://zcode.z.ai" },
   mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   logging: { level: "info" },
   };
 
-  it("Anthropic client request translates through OpenAI-compatible upstream", async () => {
+  it("Anthropic client request passes through to the native Anthropic upstream", async () => {
     const fetchMock = mock(async (req: Request, init?: RequestInit & { decompress?: boolean }): Promise<Response> => {
-      expect(req.url).toBe("https://api.z.ai/api/coding/paas/v4/chat/completions");
-      expect(req.headers.get("authorization")).toBe("Bearer testkey.testsecret");
-      expect(req.headers.get("x-api-key")).toBeNull();
-      expect(init?.decompress).toBeUndefined();
+      expect(req.url).toBe("https://api.z.ai/api/anthropic/v1/messages");
+      expect(req.headers.get("x-api-key")).toBe("testkey.testsecret");
+      expect(req.headers.get("anthropic-version")).toBe("2023-06-01");
+      expect(init?.decompress).toBe(false);
       const reqBody = JSON.parse(await req.text());
-      expect(reqBody.messages).toEqual([{ role: "user", content: "hi" }]);
-      return new Response('{"id":"chatcmpl_1","object":"chat.completion","created":1,"model":"glm-4.6","choices":[{"index":0,"message":{"role":"assistant","content":"Hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}', {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
+      expect(reqBody.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }]);
+      return new Response(JSON.stringify({
+        id: "msg_pt",
+        type: "message",
+        role: "assistant",
+        model: "glm-4.6",
+        content: [{ type: "text", text: "Hi" }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 10, output_tokens: 5 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
     });
 
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
@@ -1240,7 +1292,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
   });
 });
 
-describe("proxyRequest — tool-call roundtrip (OpenAI passthrough upstream)", () => {
+describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upstream)", () => {
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
     auth: { mode: "apikey", apiKey: "testkey.testsecret" },
@@ -1255,6 +1307,8 @@ describe("proxyRequest — tool-call roundtrip (OpenAI passthrough upstream)", (
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
+  clientSigning: { enabled: false, origin: "https://zcode.z.ai" },
   mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   logging: { level: "info" },
@@ -1268,49 +1322,42 @@ describe("proxyRequest — tool-call roundtrip (OpenAI passthrough upstream)", (
     });
   }
 
-  it("passes a full OpenAI tool-call roundtrip through unchanged", async () => {
+  it("passes a full tool-call roundtrip through the Anthropic translation layer", async () => {
     let upstreamBody2: string | undefined;
     const fetchMock = mock(async (req: Request): Promise<Response> => {
       const bodyText = await req.text();
       const parsed = JSON.parse(bodyText) as { messages: Array<{ role: string; content: unknown }> };
 
-      const hasToolResultInHistory = parsed.messages.some((m) => m.role === "tool");
+      const hasToolResultInHistory = parsed.messages.some(
+        (m) => Array.isArray(m.content) && m.content.some((b: any) => b?.type === "tool_result"),
+      );
 
       if (!hasToolResultInHistory) {
         return new Response(JSON.stringify({
-          id: "chatcmpl_tool_1",
-          object: "chat.completion",
-          created: 1,
+          id: "msg_tool_1",
+          type: "message",
+          role: "assistant",
           model: "glm-4.6",
-          choices: [{
-            index: 0,
-            message: {
-              role: "assistant",
-              content: "Let me check.",
-              tool_calls: [{
-                id: "call_xyz",
-                type: "function",
-                function: { name: "get_weather", arguments: "{\"city\":\"SF\"}" },
-              }],
-            },
-            finish_reason: "tool_calls",
-          }],
-          usage: { prompt_tokens: 10, completion_tokens: 8, total_tokens: 18 },
+          content: [
+            { type: "text", text: "Let me check." },
+            { type: "tool_use", id: "call_xyz", name: "get_weather", input: { city: "SF" } },
+          ],
+          stop_reason: "tool_use",
+          stop_sequence: null,
+          usage: { input_tokens: 10, output_tokens: 8 },
         }), { status: 200, headers: { "content-type": "application/json" } });
       }
 
       upstreamBody2 = bodyText;
       return new Response(JSON.stringify({
-        id: "chatcmpl_final",
-        object: "chat.completion",
-        created: 1,
+        id: "msg_final",
+        type: "message",
+        role: "assistant",
         model: "glm-4.6",
-        choices: [{
-          index: 0,
-          message: { role: "assistant", content: "It's 62°F in SF." },
-          finish_reason: "stop",
-        }],
-        usage: { prompt_tokens: 25, completion_tokens: 6, total_tokens: 31 },
+        content: [{ type: "text", text: "It's 62°F in SF." }],
+        stop_reason: "end_turn",
+        stop_sequence: null,
+        usage: { input_tokens: 25, output_tokens: 6 },
       }), { status: 200, headers: { "content-type": "application/json" } });
     });
 
@@ -1352,17 +1399,15 @@ describe("proxyRequest — tool-call roundtrip (OpenAI passthrough upstream)", (
     expect(upstreamReq.messages).toHaveLength(3);
     expect(upstreamReq.messages[0].role).toBe("user");
     expect(upstreamReq.messages[1].role).toBe("assistant");
-    expect(upstreamReq.messages[1].tool_calls[0].id).toBe("call_xyz");
-    expect(upstreamReq.messages[2]).toMatchObject({
-      role: "tool",
-      tool_call_id: "call_xyz",
-      content: "62°F and sunny",
-    });
+    expect(upstreamReq.messages[1].content.some((b: any) => b.type === "tool_use" && b.id === "call_xyz")).toBeTrue();
+    const toolResultMsg = upstreamReq.messages[2];
+    expect(toolResultMsg.role).toBe("user");
+    expect(toolResultMsg.content.some((b: any) => b.type === "tool_result" && b.tool_use_id === "call_xyz" && b.content === "62°F and sunny")).toBeTrue();
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it("preserves parallel OpenAI tool results as separate tool messages upstream", async () => {
+  it("coalesces parallel OpenAI tool results into one user tool_result message upstream", async () => {
     let upstreamBody: string | undefined;
     const fetchMock = mock(async (req: Request): Promise<Response> => {
       upstreamBody = await req.text();
@@ -1401,9 +1446,13 @@ describe("proxyRequest — tool-call roundtrip (OpenAI passthrough upstream)", (
     expect(resp.status).toBe(200);
 
     const upstreamReq = JSON.parse(upstreamBody!);
-    expect(upstreamReq.messages).toHaveLength(4);
-    expect(upstreamReq.messages[2]).toMatchObject({ role: "tool", tool_call_id: "call_a", content: "62°F" });
-    expect(upstreamReq.messages[3]).toMatchObject({ role: "tool", tool_call_id: "call_b", content: "58°F" });
+    expect(upstreamReq.messages).toHaveLength(3);
+    const assistantMsg = upstreamReq.messages[1];
+    expect(assistantMsg.role).toBe("assistant");
+    expect(assistantMsg.content.filter((b: any) => b.type === "tool_use").map((b: any) => b.id)).toEqual(["call_a", "call_b"]);
+    const toolResultMsg = upstreamReq.messages[2];
+    expect(toolResultMsg.role).toBe("user");
+    expect(toolResultMsg.content.filter((b: any) => b.type === "tool_result").map((b: any) => b.tool_use_id)).toEqual(["call_a", "call_b"]);
   });
 });
 
@@ -1422,6 +1471,8 @@ describe("proxyRequest — thinking endpoint matrix", () => {
     identity: IDENTITY,
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
+  clientSigning: { enabled: false, origin: "https://zcode.z.ai" },
   mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   logging: { level: "info" },
@@ -1593,11 +1644,11 @@ describe("proxyRequest — thinking endpoint matrix", () => {
       .filter((event): event is { event: string; data: any } => event !== null);
   }
 
-  it("coding-plan OpenAI endpoint non-streaming passes through OpenAI-compatible reasoning_content", async () => {
+  it("coding-plan Anthropic upstream non-streaming surfaces thinking as OpenAI reasoning_content", async () => {
     let upstreamUrl = "";
     const fetchMock = mock(async (req: Request): Promise<Response> => {
       upstreamUrl = req.url;
-      return new Response(openAIThinkingResponse(), {
+      return new Response(anthropicThinkingResponse(), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -1609,18 +1660,18 @@ describe("proxyRequest — thinking endpoint matrix", () => {
       fetchImpl: fetchMock as any,
     });
 
-    expect(upstreamUrl).toBe("https://api.z.ai/api/coding/paas/v4/chat/completions");
+    expect(upstreamUrl).toBe("https://api.z.ai/api/anthropic/v1/messages");
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.choices[0].message.reasoning_content).toBe("First step. Second step.");
     expect(body.choices[0].message.content).toBe("Final answer.");
   });
 
-  it("coding-plan OpenAI endpoint streaming passes through OpenAI-compatible reasoning_content deltas", async () => {
+  it("coding-plan Anthropic upstream streaming surfaces thinking as reasoning_content deltas", async () => {
     let upstreamUrl = "";
     const fetchMock = mock(async (req: Request): Promise<Response> => {
       upstreamUrl = req.url;
-      return new Response(openAIThinkingSse(), {
+      return new Response(anthropicThinkingSse(), {
         status: 200,
         headers: { "content-type": "text/event-stream" },
       });
@@ -1632,18 +1683,18 @@ describe("proxyRequest — thinking endpoint matrix", () => {
       fetchImpl: fetchMock as any,
     });
 
-    expect(upstreamUrl).toBe("https://api.z.ai/api/coding/paas/v4/chat/completions");
+    expect(upstreamUrl).toBe("https://api.z.ai/api/anthropic/v1/messages");
     expect(resp.status).toBe(200);
     const text = await resp.text();
     expect(openAIReasoningDeltas(text)).toEqual(["First step. ", "Second step."]);
     expect(text).toContain('"content":"Final answer."');
   });
 
-  it("coding-plan Anthropic endpoint non-streaming translates OpenAI-compatible reasoning_content into thinking blocks", async () => {
+  it("coding-plan Anthropic client non-streaming passes thinking blocks through natively", async () => {
     let upstreamUrl = "";
     const fetchMock = mock(async (req: Request): Promise<Response> => {
       upstreamUrl = req.url;
-      return new Response(openAIThinkingResponse(), {
+      return new Response(anthropicThinkingResponse(), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -1655,18 +1706,18 @@ describe("proxyRequest — thinking endpoint matrix", () => {
       fetchImpl: fetchMock as any,
     });
 
-    expect(upstreamUrl).toBe("https://api.z.ai/api/coding/paas/v4/chat/completions");
+    expect(upstreamUrl).toBe("https://api.z.ai/api/anthropic/v1/messages");
     expect(resp.status).toBe(200);
     const body = await resp.json();
-    expect(body.content[0]).toEqual({ type: "thinking", thinking: "First step. Second step." });
+    expect(body.content[0]).toEqual({ type: "thinking", thinking: "First step. Second step.", signature: "sig_real" });
     expect(body.content[1]).toEqual({ type: "text", text: "Final answer." });
   });
 
-  it("coding-plan Anthropic endpoint streaming translates OpenAI-compatible reasoning_content into one thinking block", async () => {
+  it("coding-plan Anthropic client streaming passes thinking deltas through natively", async () => {
     let upstreamUrl = "";
     const fetchMock = mock(async (req: Request): Promise<Response> => {
       upstreamUrl = req.url;
-      return new Response(openAIThinkingSse(), {
+      return new Response(anthropicThinkingSse(), {
         status: 200,
         headers: { "content-type": "text/event-stream" },
       });
@@ -1678,16 +1729,12 @@ describe("proxyRequest — thinking endpoint matrix", () => {
       fetchImpl: fetchMock as any,
     });
 
-    expect(upstreamUrl).toBe("https://api.z.ai/api/coding/paas/v4/chat/completions");
+    expect(upstreamUrl).toBe("https://api.z.ai/api/anthropic/v1/messages");
     expect(resp.status).toBe(200);
-    const events = anthropicEvents(await resp.text());
-    const thinkingStarts = events.filter((e) =>
-      e.event === "content_block_start" && e.data.content_block?.type === "thinking"
-    );
-    const thinkingDeltas = events.filter((e) => e.data.delta?.type === "thinking_delta");
-    expect(thinkingStarts).toHaveLength(1);
-    expect(thinkingDeltas.map((e) => e.data.index)).toEqual([0, 0]);
-    expect(thinkingDeltas.map((e) => e.data.delta.thinking)).toEqual(["First step. ", "Second step."]);
+    const text = await resp.text();
+    expect(text).toContain('"type":"thinking_delta"');
+    expect(text).toContain('"thinking":"First step. "');
+    expect(text).toContain('"text":"Final answer."');
   });
 
   it("start-plan OpenAI endpoint non-streaming passes through OpenAI upstream reasoning_content", async () => {

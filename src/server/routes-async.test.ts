@@ -27,6 +27,8 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
     identity: { appVersion: "test-1.0.0", sourceTitle: "cli", refererOrigin: "https://zcode.z.ai" },
     clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+    endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
+    clientSigning: { enabled: false, origin: "https://zcode.z.ai" },
     mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
     async: {
       enabled: true,

@@ -14,6 +14,9 @@ import type { ProxyConfig } from "../config/types.js";
 import type { AuthManager } from "../auth/manager.js";
 import { getProvider } from "../provider/providers.js";
 import { buildUpstreamHeaderPairs, buildUpstreamRequest, type UpstreamHeaderPair } from "./upstream.js";
+import { getDefaultEndpointRouting, type EndpointRoutingService } from "./endpoint-routing.js";
+import { getDefaultClientSigning, sendWithClientSigning, type ClientSigningManager } from "./client-signing.js";
+import { credentialString } from "../auth/types.js";
 import { sendOrderedUpstreamRequest } from "./ordered-transport.js";
 import { transformRequestBody } from "./body-transformer.js";
 import { type ClientSessionResult } from "./client-session.js";
@@ -50,6 +53,10 @@ export interface ProxyHandlerOptions {
    * selected response headers. Activated by `zcode-proxy serve debug`.
    */
   debug?: boolean;
+  /** Override the process-wide endpoint routing service (for testing). `null` disables. */
+  endpointRouting?: EndpointRoutingService | null;
+  /** Override the process-wide client signing manager (for testing). `null` disables. */
+  clientSigning?: ClientSigningManager | null;
 }
 
 /**
@@ -116,10 +123,13 @@ export async function proxyRequest(
     return errorResponse(503, "credential_unavailable", (err as Error).message);
   }
 
+  // v2.3 shape alignment: coding-plan mirrors the real ZCode client — Anthropic
+  // upstream (api.z.ai/api/anthropic → ultra via endpoint routing). start-plan
+  // stays on the zcode.z.ai OpenAI gateway.
   const startPlan = config.plan === "start-plan";
-  const translateAnthropicToOpenAI = format === "anthropic";
-  const translateOpenAIToAnthropic = false;
-  const upstreamFormat: Format = "openai";
+  const translateAnthropicToOpenAI = format === "anthropic" && startPlan;
+  const translateOpenAIToAnthropic = format === "openai" && !startPlan;
+  const upstreamFormat: Format = startPlan ? "openai" : "anthropic";
   const clientSession = resolveSessionContext({ clientReq, body, upstreamFormat, model: meta.model, config });
   if (debug && clientSession) {
     const shortSession = clientSession.sessionId ? clientSession.sessionId.slice(0, 10) : "-";
@@ -159,6 +169,40 @@ export async function proxyRequest(
   let upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, captchaHeaders, clientSession);
   let upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
 
+  const routing = opts.endpointRouting !== undefined ? opts.endpointRouting : getDefaultEndpointRouting(config);
+  const signer = opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(config);
+  const translateMode = translateOpenAIToAnthropic || translateAnthropicToOpenAI;
+  const dispatch = async (req: Request, pairs: UpstreamHeaderPair[]): Promise<Response> => {
+    let sendUrl = req.url;
+    if (routing) {
+      const routed = await routing.resolve(req.url, credentialString(cred));
+      if (routed.routed) {
+        sendUrl = routed.url;
+        if (debug) debugLine(reqId, `endpoint routing: ${req.url} -> ${routed.url}`);
+      }
+    }
+    // Signing decisions (exempt-path, handshake origin, bypass keying) run
+    // against the PRE-routing provider URL — the client's signer wraps the
+    // routing transport, so its checks see the original URL too.
+    return sendWithClientSigning(signer, {
+      url: req.url,
+      headerPairs: pairs,
+      credential: credentialString(cred),
+      appVersion: config.identity.appVersion,
+      debug: debug ? (message) => debugLine(reqId, message) : undefined,
+      send: (finalPairs) => {
+        const sendReq = sendUrl === req.url && finalPairs === pairs
+          ? req
+          : new Request(sendUrl, {
+              method: req.method,
+              headers: Object.fromEntries(finalPairs),
+              body: transformedBody ?? undefined,
+            });
+        return sendUpstreamRequest(sendReq, finalPairs, transformedBody, translateMode, useOrderedTransport, fetchImpl, clientReq.signal, hasCustomFetchImpl);
+      },
+    });
+  };
+
   if (debug) {
     debugLine(reqId, `→ POST ${upstreamReq.url}`);
     debugLine(reqId, `  ${formatHeaderPairs(upstreamReq.headers)}`);
@@ -180,7 +224,7 @@ export async function proxyRequest(
 
   let upstreamResp: Response;
   try {
-    upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal, hasCustomFetchImpl);
+    upstreamResp = await dispatch(upstreamReq, upstreamHeaderPairs);
   } catch (err) {
     if (debug) debugError(reqId, "upstream_unreachable", (err as Error).message);
     printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
@@ -227,7 +271,7 @@ export async function proxyRequest(
       };
       upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, retryHeaders, clientSession);
       upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, retryHeaders, clientSession);
-      upstreamResp = await sendUpstreamRequest(upstreamReq, upstreamHeaderPairs, transformedBody, translateOpenAIToAnthropic || translateAnthropicToOpenAI, useOrderedTransport, fetchImpl, clientReq.signal, hasCustomFetchImpl).catch((err: Error) => {
+      upstreamResp = await dispatch(upstreamReq, upstreamHeaderPairs).catch((err: Error) => {
         if (debug) debugError(reqId, "upstream_unreachable", err.message);
         printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
         return errorResponse(502, "upstream_unreachable", err.message);

@@ -28,6 +28,8 @@ const TEST_CONFIG: ProxyConfig = {
   identity: IDENTITY,
   clientIdentity: { mode: "observe", ttlSeconds: 900, maxSessions: 1024 },
   responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
+  endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
+  clientSigning: { enabled: false, origin: "https://zcode.z.ai" },
   mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   logging: { level: "info" },
@@ -76,6 +78,22 @@ function openaiOk(): Response {
   );
 }
 
+function anthropicOk(): Response {
+  return new Response(
+    JSON.stringify({
+      id: "msg_debug",
+      type: "message",
+      role: "assistant",
+      model: "glm-4.6",
+      content: [{ type: "text", text: "Hi" }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: { input_tokens: 10, output_tokens: 5 },
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
 describe("proxyRequest debug mode", () => {
   it("emits debug lines when debug=true (upstream URL, headers, response status)", async () => {
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
@@ -86,19 +104,18 @@ describe("proxyRequest debug mode", () => {
         config: TEST_CONFIG,
         auth,
         debug: true,
-        fetchImpl: mockFetch(async () => openaiOk()),
+        fetchImpl: mockFetch(async () => anthropicOk()),
       });
       expect(resp.status).toBe(200);
     });
 
     const debugLines = lines.filter((l) => l.includes(" debug: "));
     expect(debugLines.length).toBeGreaterThan(0);
-    expect(debugLines.some((l) => l.includes("translated Anthropic→OpenAI"))).toBe(true);
-    expect(debugLines.some((l) => l.includes("→ POST https://api.z.ai/api/coding/paas/v4/chat/completions"))).toBe(true);
+    expect(debugLines.some((l) => l.includes("→ POST https://api.z.ai/api/anthropic/v1/messages"))).toBe(true);
     expect(debugLines.some((l) => l.includes("← 200"))).toBe(true);
   });
 
-  it("redacts sensitive request headers (authorization) in debug output", async () => {
+  it("redacts sensitive request headers (x-api-key) in debug output", async () => {
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
 
@@ -107,13 +124,12 @@ describe("proxyRequest debug mode", () => {
         config: TEST_CONFIG,
         auth,
         debug: true,
-        fetchImpl: mockFetch(async () => openaiOk()),
+        fetchImpl: mockFetch(async () => anthropicOk()),
       });
     });
 
-    const headerLine = lines.find((l) => l.includes("debug:") && l.includes("authorization="));
+    const headerLine = lines.find((l) => l.includes("debug:") && l.includes("x-api-key="));
     expect(headerLine).toBeDefined();
-    expect(headerLine!).toContain("authorization=Bearer <redacted>");
     expect(headerLine!).not.toContain("testkey.testsecret");
   });
 
@@ -150,7 +166,7 @@ describe("proxyRequest debug mode", () => {
     expect(lines.some((l) => l.includes("debug: ERROR upstream_unreachable: ECONNREFUSED"))).toBe(true);
   });
 
-  it("does not emit translation note when client format is OpenAI", async () => {
+  it("emits an OpenAI→Anthropic translation note for OpenAI clients on coding-plan", async () => {
     const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
     const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
       method: "POST",
@@ -166,13 +182,12 @@ describe("proxyRequest debug mode", () => {
         config: TEST_CONFIG,
         auth,
         debug: true,
-        fetchImpl: mockFetch(async () => openaiOk()),
+        fetchImpl: mockFetch(async () => anthropicOk()),
       });
     });
 
-    expect(lines.some((l) => l.includes("debug: translated OpenAI→Anthropic"))).toBe(false);
-    expect(lines.some((l) => l.includes("debug: translated Anthropic→OpenAI"))).toBe(false);
-    expect(lines.some((l) => l.includes("→ POST https://api.z.ai/api/coding/paas/v4/chat/completions"))).toBe(true);
+    expect(lines.some((l) => l.includes("translated OpenAI→Anthropic"))).toBe(true);
+    expect(lines.some((l) => l.includes("→ POST https://api.z.ai/api/anthropic/v1/messages"))).toBe(true);
   });
 
   it("emits observe-only client identity inference without stabilizing x-session-id", async () => {

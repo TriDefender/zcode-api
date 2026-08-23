@@ -118,10 +118,19 @@ describe("buildIdentityHeaders", () => {
     }
   });
 
-  it("omits X-Release-Channel/X-Device-Mid when no env override is set", () => {
+  it("defaults X-Release-Channel to production and honors ZCODE_ENV=test (bundle IL())", () => {
     const h = buildIdentityHeaders(BASE);
-    expect(h["X-Release-Channel"]).toBeUndefined();
+    expect(h["X-Release-Channel"]).toBe("production");
     expect(h["X-Device-Mid"]).toBeUndefined();
+
+    const savedEnv = process.env.ZCODE_ENV;
+    process.env.ZCODE_ENV = "test";
+    try {
+      expect(buildIdentityHeaders(BASE)["X-Release-Channel"]).toBe("test");
+    } finally {
+      if (savedEnv === undefined) delete process.env.ZCODE_ENV;
+      else process.env.ZCODE_ENV = savedEnv;
+    }
   });
 
   it("passes refererOrigin through as HTTP-Referer", () => {
@@ -155,6 +164,7 @@ describe("buildIdentityHeaders", () => {
         "X-Title",
         "X-ZCode-Agent",
         "X-Platform",
+        "X-Release-Channel",
         "X-Client-Language",
         "X-Client-Timezone",
         "X-Os-Category",

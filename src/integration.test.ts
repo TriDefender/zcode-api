@@ -76,9 +76,9 @@ beforeAll(async () => {
 
         if (parsed.stream) {
           const sse = [
-            'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_int","model":"glm-4.6"}}\n\n',
+            'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_int","model":"glm-4.6","usage":{"input_tokens":33,"output_tokens":1}}}\n\n',
             'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Integration stream"}}\n\n',
-            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n',
+            'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}\n\n',
             'event: message_stop\ndata: {"type":"message_stop"}\n\n',
           ].join("");
           return new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
@@ -211,8 +211,8 @@ function authHeader(): Record<string, string> {
   return { "Authorization": "Bearer integration-test-key", "Content-Type": "application/json" };
 }
 
-describe("integration: OpenAI passthrough", () => {
-  it("POST /v1/chat/completions returns 200 with OpenAI-compatible response", async () => {
+describe("integration: OpenAI clients (translated Anthropic upstream)", () => {
+  it("POST /v1/chat/completions returns 200 with a translated OpenAI response", async () => {
     const resp = await fetch(proxyUrl("/v1/chat/completions"), {
       method: "POST",
       headers: authHeader(),
@@ -224,21 +224,21 @@ describe("integration: OpenAI passthrough", () => {
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.object).toBe("chat.completion");
-    expect(body.choices[0].message.content).toBe("OpenAI integration response");
+    expect(body.choices[0].message.content).toBe("Integration test response");
     expect(body.model).toBe("glm-4.6");
   });
 
-  it("does not synthesize gzip for OpenAI passthrough when upstream is plain JSON", async () => {
+  it("gzips the translated response when the client advertises gzip", async () => {
     const resp = await fetch(proxyUrl("/v1/chat/completions"), {
       method: "POST",
       headers: { ...authHeader(), "accept-encoding": "gzip" },
       body: JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "Hi" }] }),
     });
     expect(resp.status).toBe(200);
-    expect(resp.headers.get("content-encoding")).toBeNull();
+    expect(resp.headers.get("content-encoding")).toBe("gzip");
     const body = await resp.json();
     expect(body.object).toBe("chat.completion");
-    expect(body.choices[0].message.content).toBe("OpenAI integration response");
+    expect(body.choices[0].message.content).toBe("Integration test response");
   });
 });
 
@@ -263,7 +263,7 @@ describe("integration: OpenAI streaming passthrough", () => {
 });
 
 describe("integration: Anthropic streaming usage", () => {
-  it("delivers real input_tokens via message_delta (not stuck at 0)", async () => {
+  it("passes upstream usage through verbatim (input_tokens on message_start)", async () => {
     const resp = await fetch(proxyUrl("/v1/messages"), {
       method: "POST",
       headers: authHeader(),
@@ -277,20 +277,23 @@ describe("integration: Anthropic streaming usage", () => {
     expect(resp.status).toBe(200);
     const text = await resp.text();
 
-    // Parse the message_delta event and assert usage carries the upstream's
-    // prompt_tokens (33) as input_tokens — the regression was that this was 0
-    // because message_start fired before the usage chunk arrived.
+    // passthrough: the upstream's message_start usage (input_tokens 33) and
+    // message_delta usage (output_tokens 4) must arrive unmodified
+    const startLine = text.split("\n").find((l) => l.startsWith("data: ") && l.includes('"message_start"'));
+    expect(startLine).toBeDefined();
+    const start = JSON.parse(startLine!.slice(6));
+    expect(start.message.usage.input_tokens).toBe(33);
+
     const deltaLine = text.split("\n").find((l) => l.startsWith("data: ") && l.includes('"message_delta"'));
     expect(deltaLine).toBeDefined();
     const delta = JSON.parse(deltaLine!.slice(6));
-    expect(delta.usage.input_tokens).toBe(33);
     expect(delta.usage.output_tokens).toBe(4);
     expect(text).toContain("event: message_stop");
   });
 });
 
 describe("integration: OpenAI tool-call roundtrip (HTTP layer)", () => {
-  it("returns OpenAI tool_calls on turn 1, accepts tool_result on turn 2, upstream receives OpenAI shape", async () => {
+  it("returns OpenAI tool_calls on turn 1, accepts tool results on turn 2, upstream receives Anthropic shape", async () => {
     const tools = [{ type: "function", function: { name: "get_weather", parameters: { type: "object", properties: { city: { type: "string" } } } } }];
 
     const resp1 = await fetch(proxyUrl("/v1/chat/completions"), {
@@ -308,7 +311,7 @@ describe("integration: OpenAI tool-call roundtrip (HTTP layer)", () => {
     expect(body1.choices[0].finish_reason).toBe("tool_calls");
     const toolCall = body1.choices[0].message.tool_calls?.[0];
     expect(toolCall).toBeDefined();
-    expect(toolCall.id).toBe("call_http_1");
+    expect(toolCall.id).toBe("toolu_http_1");
     expect(toolCall.function.name).toBe("get_weather");
     expect(JSON.parse(toolCall.function.arguments)).toEqual({ city: "SF" });
 
@@ -332,21 +335,23 @@ describe("integration: OpenAI tool-call roundtrip (HTTP layer)", () => {
 
     const toolResultBody = capturedUpstreamBodies
       .map((b) => JSON.parse(b))
-      .filter((b) => (b.messages ?? []).some((m: any) => m.role === "tool" && m.tool_call_id === "call_http_1"));
+      .filter((b) => (b.messages ?? []).some(
+        (m: any) => Array.isArray(m.content) && m.content.some((blk: any) => blk?.type === "tool_result" && blk?.tool_use_id === "toolu_http_1"),
+      ));
     expect(toolResultBody.length).toBeGreaterThanOrEqual(1);
     const upstreamReq = toolResultBody.at(-1);
     expect(upstreamReq.messages).toHaveLength(3);
     expect(upstreamReq.messages[0].role).toBe("user");
     expect(upstreamReq.messages[1].role).toBe("assistant");
-    expect(upstreamReq.messages[1].tool_calls[0].id).toBe("call_http_1");
-    expect(upstreamReq.messages[2]).toMatchObject({ role: "tool", tool_call_id: "call_http_1", content: "62°F" });
+    expect(upstreamReq.messages[1].content.some((b: any) => b.type === "tool_use" && b.id === "toolu_http_1")).toBeTrue();
+    expect(upstreamReq.messages[2].content.some((b: any) => b.type === "tool_result" && b.content === "62°F")).toBeTrue();
     expect(upstreamReq.tools).toHaveLength(1);
-    expect(upstreamReq.tools[0].function.name).toBe("get_weather");
+    expect(upstreamReq.tools[0].name).toBe("get_weather");
   });
 });
 
-describe("integration: Anthropic compatibility", () => {
-  it("POST /v1/messages returns 200 with translated OpenAI-compatible response", async () => {
+describe("integration: Anthropic clients (native passthrough)", () => {
+  it("POST /v1/messages returns 200 with the upstream Anthropic response verbatim", async () => {
     const resp = await fetch(proxyUrl("/v1/messages"), {
       method: "POST",
       headers: authHeader(),
@@ -358,11 +363,11 @@ describe("integration: Anthropic compatibility", () => {
     });
     expect(resp.status).toBe(200);
     const body = await resp.json();
-    expect(body.content[0].text).toBe("OpenAI integration response");
+    expect(body.content[0].text).toBe("Integration test response");
     expect(body.stop_reason).toBe("end_turn");
   });
 
-  it("round-trips Anthropic tool_use → tool_result through the OpenAI upstream", async () => {
+  it("round-trips Anthropic tool_use → tool_result with the native shape upstream", async () => {
     const tools = [{ name: "get_weather", description: "Get weather", input_schema: { type: "object", properties: { city: { type: "string" } } } }];
 
     // Turn 1: Anthropic client asks for a tool call.
@@ -385,8 +390,8 @@ describe("integration: Anthropic compatibility", () => {
     expect(toolUse.name).toBe("get_weather");
     expect(toolUse.input).toEqual({ city: "SF" });
 
-    // Turn 2: Anthropic client replays tool_result history; upstream must see
-    // the OpenAI shape (assistant tool_calls + role:"tool" messages).
+    // Turn 2: Anthropic client replays tool_result history; the upstream must
+    // see the native Anthropic shape (assistant tool_use + user tool_result).
     const resp2 = await fetch(proxyUrl("/v1/messages"), {
       method: "POST",
       headers: authHeader(),
@@ -408,12 +413,15 @@ describe("integration: Anthropic compatibility", () => {
 
     const upstreamReq = capturedUpstreamBodies
       .map((b) => JSON.parse(b))
-      .filter((b) => (b.messages ?? []).some((m: any) => m.role === "tool" && m.tool_call_id === toolUse.id))
+      .filter((b) => (b.messages ?? []).some(
+        (m: any) => Array.isArray(m.content) && m.content.some((blk: any) => blk?.type === "tool_result" && blk?.tool_use_id === toolUse.id),
+      ))
       .at(-1);
     expect(upstreamReq).toBeDefined();
-    expect(upstreamReq.messages.map((m: any) => m.role)).toEqual(["user", "assistant", "tool"]);
-    expect(upstreamReq.messages[1].tool_calls[0].function.name).toBe("get_weather");
-    expect(upstreamReq.messages[2]).toMatchObject({ role: "tool", tool_call_id: toolUse.id, content: "62°F" });
+    expect(upstreamReq.messages.map((m: any) => m.role)).toEqual(["user", "assistant", "user"]);
+    expect(upstreamReq.messages[1].content.some((b: any) => b.type === "tool_use" && b.name === "get_weather")).toBeTrue();
+    expect(upstreamReq.messages[2].content.some((b: any) => b.type === "tool_result" && b.content === "62°F")).toBeTrue();
+    expect(upstreamReq.tools[0].name).toBe("get_weather");
   });
 });
 

@@ -45,7 +45,7 @@ auth:
   apiKey: "testkey.testsecret"
 provider: zai
 identity:
-  appVersion: "3.7.7"
+  appVersion: "3.8.1"
   deviceMid: "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0"
 `);
     const cfg = loadConfig(path);
@@ -62,7 +62,7 @@ auth:
   apiKey: "testkey.testsecret"
 provider: zai
 identity:
-  appVersion: "3.7.7"
+  appVersion: "3.8.1"
   deviceMid: ""
 `);
     expect(loadConfig(path).identity.deviceMid).toBeUndefined();
@@ -75,7 +75,7 @@ auth:
   apiKey: "k"
 provider: zai
 identity:
-  appVersion: "3.7.7"
+  appVersion: "3.8.1"
 `);
     expect(loadConfig(path2).identity.deviceMid).toBeUndefined();
   });
@@ -384,7 +384,7 @@ auth:
   apiKey: "abc"
 `);
     const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("3.7.7");
+    expect(cfg.identity.appVersion).toBe("3.8.1");
     expect(cfg.identity.sourceTitle).toBe("cli");
     expect(cfg.identity.refererOrigin).toBe("https://zcode.z.ai");
   });
@@ -427,6 +427,6 @@ identity:
   appVersion: "v3.3.3-中文"
 `);
     const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("3.7.7");
+    expect(cfg.identity.appVersion).toBe("3.8.1");
   });
 });
