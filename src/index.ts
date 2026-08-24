@@ -140,8 +140,7 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   console.log(`zcode-proxy listening on ${url}`);
   if (config.plan === "start-plan") {
     // Pre-solve the captcha token pool in the background so first requests
-    // don't pay the full solve latency. No-op unless a daemon backend
-    // (ZCODE_CAPTCHA_BACKEND=happy|playwright) is configured.
+    // don't pay the full solve latency (in-process happy-dom backend).
     import("./proxy/captcha.js")
       .then((m) => m.startCaptchaPool(config.identity.appVersion))
       .catch((err) => console.error(`[captcha] pool warmup failed: ${(err as Error).message}`));

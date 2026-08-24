@@ -12,7 +12,7 @@ mock.module("./captcha-solver.js", () => ({
   CAPTCHA_NODE_DIR: "/tmp",
 }));
 
-const { CaptchaTokenPool } = await import("./captcha-jsdom.js");
+const { CaptchaTokenPool } = await import("./captcha-pool.js");
 
 const CFG = {
   enabled: true,

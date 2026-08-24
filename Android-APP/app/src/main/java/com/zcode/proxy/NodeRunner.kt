@@ -27,7 +27,6 @@ class NodeRunner(private val context: Context) {
             "server_bundle/config.example.yaml",
             "server_bundle/webui.txt",
             "server_bundle/zcode_system.json",
-            "server_bundle/AliyunCaptcha.js.txt",
         )
         targetDir.mkdirs()
         for (assetPath in filesToExtract) {
@@ -50,7 +49,7 @@ class NodeRunner(private val context: Context) {
         val serverBundle = File(context.filesDir, "server_bundle").apply { mkdirs() }
         val serverCjs = File(serverBundle, "server.cjs")
         require(serverCjs.exists()) {
-            "server.cjs not found in ${serverBundle.absolutePath}. Did copyServerBundle run?"
+            "server.cjs not found in ${serverBundle.absolutePath}. Did ensureAssetsExtracted() run?"
         }
 
         val config = File(context.filesDir, "config.yaml")

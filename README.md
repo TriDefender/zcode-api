@@ -199,7 +199,7 @@ multi-session autosave (localStorage). Open Settings (⚙) to configure.
 | `clientSigning.enabled` | `ZCODE_CLIENT_SIGNING` | `true` | Client request signing V4 (Ed25519 + proof-of-work, gate-driven; only activates when the server sets `codingPlanSignature.enable=true`; fail-open) |
 | config file path | `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file to load on `serve` |
 
-Start-plan captcha tunables (env only): `ZCODE_CAPTCHA_RETRIES`, `ZCODE_CAPTCHA_TIMEOUT_MS`, `ZCODE_CAPTCHA_SDK_LOAD_MS`.
+Start-plan captcha tunables (env only): `ZCODE_CAPTCHA_RETRIES` (per-token solve retries), `CAPTCHA_POOL_MIN` / `CAPTCHA_POOL_MAX` (pre-solved token pool sizing).
 
 ## Architecture
 

@@ -11,17 +11,15 @@
     "build:linux-arm64": "bun build --compile --target bun-linux-arm64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-linux-arm64",
     "build:darwin-x64": "bun build --compile --target bun-darwin-x64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-darwin-x64",
     "build:darwin-arm64": "bun build --compile --target bun-darwin-arm64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-darwin-arm64",
-    "build:android-bundle": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/android/server.cjs --external:jsdom --define:process.env.NODE_ENV=\\\"production\\\""
+    "build:android-bundle": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/android/server.cjs --define:process.env.NODE_ENV=\\\"production\\\""
   },
   "dependencies": {
     "happy-dom": "^20.11.6",
-    "jsdom": "^25.0.0",
     "undici": "^8.10.0",
     "yaml": "^2.5.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "@types/jsdom": "21.1.7",
     "esbuild": "^0.28.1"
   }
 }

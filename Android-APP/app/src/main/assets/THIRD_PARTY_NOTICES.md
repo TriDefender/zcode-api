@@ -35,5 +35,6 @@ Termux `.deb` packages (https://packages.termux.dev/apt/termux-main/).
 ## Application-level dependencies
 
 - esbuild — MIT (https://github.com/evanw/esbuild)
-- jsdom — MIT (https://github.com/jsdom/jsdom) — NOT bundled into the Android APK (excluded via esbuild `--external:jsdom`)
+- happy-dom — MIT (https://github.com/capricorn86/happy-dom) — bundled into `server.cjs`
+- undici — MIT (https://github.com/nodejs/undici) — bundled into `server.cjs`
 - yaml — ISC (https://github.com/eemeli/yaml)

@@ -694,16 +694,12 @@ export function getCaptchaPoolStats(): {
   return pool.stats();
 }
 
-export function invalidateJsdomCaptcha(): void {
-  pool.invalidate();
-}
-
 export function stopCaptchaPool(): void {
   pool.stopBackgroundRefill();
   shutdownCaptchaSolver();
 }
 
-export async function solveCaptchaJsdom(cfg: CaptchaConfig): Promise<string> {
+export async function takeCaptchaToken(cfg: CaptchaConfig): Promise<string> {
   if (!cfg.enabled || !cfg.prefix || !cfg.sceneId) {
     throw new Error("Captcha config unavailable from ZCode API");
   }

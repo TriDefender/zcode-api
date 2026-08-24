@@ -52,8 +52,9 @@ cd android
 - `android/buildSrc/src/main/kotlin/DownloadNodeBinaryTask.kt` — pinned Node.js
   binary + dependency `.so` extraction.
 - `android/app/src/main/java/com/zcode/proxy/` — Kotlin shell.
-- `android/app/src/main/assets/server_bundle/` — populated by
-  `copyServerBundle` Gradle task from `dist/android/` + repo assets.
+- `Android-APP/app/src/main/assets/server_bundle/` — committed in the repo
+  (canonical); regenerate via `bun run build:android-bundle` + copy
+  `dist/android/server.cjs` into it (see BUILD in `Android-APP/AGENTS.md`).
 - `android/gradle/node-binary.lock.json` — pinned URLs and SHA256s.
 
 ## OAuth flow
@@ -72,9 +73,10 @@ cd android
 
 ## Known limitations (v1)
 
-- **Start-plan tier unsupported** — the captcha solver (`jsdom` + AliyunCaptcha
-  SDK) is excluded from the bundle. Coding-plan (direct upstream API key) is
-  the only supported tier on Android v1.
+- **Start-plan tier untested on Android** — the in-process happy-dom captcha
+  solver is now bundled into `server.cjs` (the jsdom exclusion is gone), but
+  the tier has not been validated on-device. Coding-plan (direct upstream
+  API key) is the supported tier on Android v1.
 - **Not Play Store-distributed** — APK is sideload-only. Play Store rejects apps
   that launch external binaries from `jniLibs/`.
 - **arm64-v8a only** — no x86 / armeabi-v7a support. Covers 99%+ of modern

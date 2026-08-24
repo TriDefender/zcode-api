@@ -24,10 +24,9 @@ import { resolveSessionContext } from "./session-context.js";
 import { gzipSync } from "node:zlib";
 
 // captcha.ts is loaded lazily inside the `startPlan` branch (only path that
-// touches it). Combined with `--external:jsdom` in the esbuild Android bundle,
-// this keeps jsdom's ~15 MB source out of the v1 Android bundle and prevents
-// Node from eagerly evaluating the static `import { JSDOM } from "jsdom"` at
-// startup. Desktop Bun keeps the same code path; the dynamic import resolves
+// touches it). The solver itself (captcha-happy.ts) is dynamically imported
+// by captcha-solver.ts, so non-start-plan processes never pay its startup
+// cost. Desktop Bun keeps the same code path; the dynamic import resolves
 // synchronously enough on Bun's warm cache.
 type CaptchaModule = typeof import("./captcha.js");
 let captchaModule: CaptchaModule | null = null;
@@ -253,15 +252,16 @@ export async function proxyRequest(
     return errorResponse(401, "start_plan_jwt_invalid", "Start-plan JWT was rejected. Re-run: zcode-proxy auth login");
   }
 
-  // start-plan: on explicit captcha challenge, force re-solve and retry once.
-  // `&& captcha` looks redundant but is required for TS null-narrowing.
+  // start-plan: on explicit captcha challenge, retry once with a fresh
+  // pooled token (the challenged token was already consumed by this request;
+  // getCaptchaToken takes the next pre-solved one). `&& captcha` looks
+  // redundant but is required for TS null-narrowing.
   const captcha = startPlan ? await loadCaptcha() : null;
   const captchaChallenge = captcha ? captcha.detectCaptchaChallenge(upstreamResp) : null;
   if (captchaChallenge && captcha) {
     if (debug) debugLine(reqId, "captcha challenge — re-solving and retrying once");
     try { upstreamResp.body?.cancel(); } catch {}
     console.log(`${reqId} captcha challenge, re-solving...`);
-    captcha.invalidateCaptchaToken();
     try {
       const fresh = await captcha.getCaptchaToken(config.identity.appVersion);
       console.log(`${reqId} captcha re-solved (token ${fresh.verifyParam.length} chars), retrying...`);
