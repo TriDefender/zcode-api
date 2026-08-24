@@ -14,6 +14,7 @@
     "build:android-bundle": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/android/server.cjs --external:jsdom --define:process.env.NODE_ENV=\\\"production\\\""
   },
   "dependencies": {
+    "happy-dom": "^20.11.6",
     "jsdom": "^25.0.0",
     "undici": "^8.10.0",
     "yaml": "^2.5.0"

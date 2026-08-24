@@ -1,27 +1,124 @@
-#!/usr/bin/env node
-// ============================================================================
-// solve-happy.js — happy-dom port of zcode-proxy's AliyunCaptcha solver
-// ISOLATED EXPERIMENT: prove happy-dom can execute the real Aliyun captcha SDK
-// and produce a REAL ~280-char verify param via startTracelessVerification().
-//
-// Mechanics ported from
-// /home/wraient/Projects/zcode-api-auto-captcha/captcha_node/solve-core.js
-//  1. cookie priming of https://zcode.z.ai/ (5-min cache)
-//  2. CDN disk cache at ~/.zcode-captcha-cdn-cache/<sha1(url)> + in-mem cache
-//  3. installNativeToString (mask JS-implemented platform APIs as native)
-//  4. per-request client-hint / UA / origin / referer injection (interceptor)
-//  5. guest-side patches (Event.isTrusted, HTMLDocument naming, btoa)
-//  6. solve contract: initAliyunCaptcha + getInstance().startTracelessVerification()
-// ============================================================================
-process.env.FONTCONFIG_PATH = "/dev/null";
+// @ts-nocheck — ported from the proven Node happy-dom solver (solve-happy-lib.js)
+/**
+ * captcha-happy.ts — in-process happy-dom Aliyun captcha solver.
+ *
+ * Ported from the production-proven standalone happy-dom solver to run
+ * INSIDE the Bun process so the release binary stays self-contained:
+ * no external Node.js, no canvas/playwright/Chromium.
+ *
+ * Mechanics:
+ *  1. cookie priming of https://zcode.z.ai/ (5-min cache)
+ *  2. CDN disk cache at ~/.zcode-captcha-cdn-cache/<sha1(url)> + in-mem cache
+ *  3. installNativeToString (mask JS-implemented platform APIs as native)
+ *  4. per-request client-hint / UA / origin / referer injection (interceptor)
+ *  5. guest-side patches (Event.isTrusted, HTMLDocument naming, btoa)
+ *  6. solve contract: initAliyunCaptcha + getInstance().startTracelessVerification()
+ */
+import { GlobalWindow as Window, PropertySymbol } from "happy-dom";
+import WindowBrowserContext from "happy-dom/lib/window/WindowBrowserContext.js";
+import { ProxyAgent, setGlobalDispatcher } from "undici";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { Worker } from "node:worker_threads";
 
-const { Window, PropertySymbol } = require("happy-dom");
-const { ProxyAgent, setGlobalDispatcher } = require("undici");
-const crypto = require("node:crypto");
-const fs = require("node:fs");
-const os = require("node:os");
-const path = require("node:path");
-const { spawnSync } = require("node:child_process");
+// ── Blocking fetch for sync XHR (self-contained builds) ────────────────────
+// happy-dom implements sync XHR by spawning `process.argv[0] -e <script>`,
+// which fails inside a compiled Bun binary (argv[0] is the binary; `-e` is
+// not supported). We instead run the request on a worker thread that writes
+// the result into a SharedArrayBuffer and wakes the blocked host thread via
+// Atomics — no child processes, no main-thread event loop dependency (a
+// postMessage-based handshake would deadlock: the main thread is blocked).
+const SYNC_FETCH_BUF_BYTES = 8 * 1024 * 1024;
+const SYNC_FETCH_HEADER_BYTES = 64;
+// SAB layout (Int32 words): [0]=state (0=wait,1=done,2=error), [1]=httpStatus,
+// [2]=statusTextLen, [3]=headersJsonLen, [4]=setCookieJsonLen, [5]=bodyLen,
+// [6..]=payload bytes (statusText, headersJson, setCookieJson, body)
+let _syncFetchWorker: Worker | null = null;
+
+const SYNC_WORKER_SRC = `
+  const { parentPort } = require("node:worker_threads");
+  const enc = new TextEncoder();
+  parentPort.on("message", (m) => {
+    (async () => {
+      const i32 = new Int32Array(m.sab);
+      const u8 = new Uint8Array(m.sab);
+      // Fixed-size header (bytes), NOT i32.length * 4 — that is the whole SAB.
+      const payloadAt = 64;
+      const fail = (msg) => {
+        const b = enc.encode(msg);
+        u8.set(b, payloadAt);
+        i32[5] = b.length; i32[1] = 0; i32[2] = 0; i32[3] = 0; i32[4] = 0;
+        i32[0] = 2; Atomics.notify(i32, 0);
+      };
+      try {
+        const res = await fetch(m.url, m.init);
+        const body = Buffer.from(await res.arrayBuffer());
+        const headers = {};
+        for (const [k, v] of res.headers) headers[k] = v;
+        const setCookie = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
+        const statusText = enc.encode(res.statusText || "");
+        const headersJson = enc.encode(JSON.stringify(headers));
+        const setCookieJson = enc.encode(JSON.stringify(setCookie));
+        let off = payloadAt;
+        u8.set(statusText, off); i32[2] = statusText.length; off += statusText.length;
+        u8.set(headersJson, off); i32[3] = headersJson.length; off += headersJson.length;
+        u8.set(setCookieJson, off); i32[4] = setCookieJson.length; off += setCookieJson.length;
+        u8.set(body, off); i32[5] = body.length;
+        i32[1] = res.status;
+        i32[0] = 1; Atomics.notify(i32, 0);
+      } catch (err) {
+        fail(String((err && err.message) || err));
+      }
+    })();
+  });
+`;
+
+function ensureSyncFetchWorker(): Worker {
+  if (_syncFetchWorker) return _syncFetchWorker;
+  _syncFetchWorker = new Worker(SYNC_WORKER_SRC, { eval: true });
+  return _syncFetchWorker;
+}
+
+function syncFetchBlocking(url: string, init: Record<string, unknown>, timeoutMs = 30_000): {
+  status: number; statusText: string; headers: Record<string, string>;
+  setCookie: string[]; body: Buffer;
+} | { error: string } {
+  try {
+    const worker = ensureSyncFetchWorker();
+    const sab = new SharedArrayBuffer(SYNC_FETCH_HEADER_BYTES + SYNC_FETCH_BUF_BYTES);
+    const i32 = new Int32Array(sab);
+    const u8 = new Uint8Array(sab);
+    worker.postMessage({ sab, url, init });
+    const waitResult = Atomics.wait(i32, 0, 0, timeoutMs);
+    if (waitResult === "timed-out") return { error: "sync fetch timeout" };
+    const dec = new TextDecoder();
+    const payloadAt = SYNC_FETCH_HEADER_BYTES;
+    let off = payloadAt;
+    const readSlice = (len: number) => {
+      const slice = u8.subarray(off, off + len);
+      off += len;
+      return slice;
+    };
+    const statusText = dec.decode(readSlice(i32[2]));
+    const headers = i32[3] ? (JSON.parse(dec.decode(readSlice(i32[3]))) as Record<string, string>) : {};
+    const setCookie = i32[4] ? (JSON.parse(dec.decode(readSlice(i32[4]))) as string[]) : [];
+    const body = Buffer.from(readSlice(i32[5]));
+    if (i32[0] === 2) return { error: dec.decode(u8.subarray(payloadAt, payloadAt + i32[5])) || "sync fetch failed" };
+    return { status: i32[1], statusText, headers, setCookie, body };
+  } catch (err: any) {
+    // A crashed worker must not poison later solves — reset it.
+    try { _syncFetchWorker?.terminate(); } catch {}
+    _syncFetchWorker = null;
+    return { error: `sync fetch error: ${err?.message ?? err}` };
+  }
+}
+
+function shutdownSyncFetchWorker(): void {
+  try { _syncFetchWorker?.terminate(); } catch {}
+  _syncFetchWorker = null;
+}
 
 const CDN_CACHE_DIR = path.join(os.homedir(), ".zcode-captcha-cdn-cache");
 const _memCdnCache = new Map();
@@ -162,23 +259,6 @@ async function fetchAndStore(url) {
   }
 }
 
-function fetchSyncExternal(url) {
-  const args = ["-sSL", "--connect-timeout", "15", "--max-time", "30", url];
-  try {
-    const r = spawnSync("curl", args, { encoding: null, maxBuffer: 64 * 1024 * 1024 });
-    if (!r.error && r.status === 0 && r.stdout && r.stdout.length > 0) {
-      const buf = Buffer.from(r.stdout);
-      _memCdnCache.set(url, buf);
-      try {
-        fs.mkdirSync(CDN_CACHE_DIR, { recursive: true });
-        fs.writeFileSync(diskPathFor(url), buf);
-      } catch (_) {}
-      return buf;
-    }
-  } catch (_) {}
-  return null;
-}
-
 // ── Request header injection (every frame request: XHR, fetch, scripts) ────
 function injectRequestHeaders(request) {
   const h = request.headers;
@@ -273,9 +353,9 @@ function makeInterceptor(bypassPeCache = false) {
             body = null;
           }
         }
-        if (!body) {
-          body = await fetchAndStore(url);
-        }
+        // sync interceptor serves only from cache; the async interceptor
+        // above warms the cache on first load, so misses fall through to
+        // the async fetch path handled by happy-dom.
         if (body) {
           if (/dynamicJS\/[^/]*\/pe\.\d+\./.test(url)) {
             try { w.__lastPeUrl = url; } catch (_) {}
@@ -349,7 +429,9 @@ function makeInterceptor(bypassPeCache = false) {
             body = null;
           }
         }
-        if (!body) body = fetchSyncExternal(url);
+        // sync interceptor serves only from cache; the async interceptor
+        // above warms the cache on first load, so misses fall through to
+        // the async fetch path handled by happy-dom.
       }
       if (body) {
         if (/dynamicJS\/[^/]*\/pe\.\d+\./.test(url)) {
@@ -366,8 +448,69 @@ function makeInterceptor(bypassPeCache = false) {
           [PropertySymbol.virtualServerFile]: null,
         };
       }
-      // Non-CDN sync request: let happy-dom's own child-process sync fetch handle it.
-      return undefined;
+      // Non-CDN sync request: serve it blocking via a worker thread. Never
+      // fall through to happy-dom's own sync fetch — it spawns a child
+      // process with `process.argv[0] -e`, which breaks compiled binaries.
+      const init = { method: request.method, headers: {} as Record<string, string> };
+      request.headers.forEach((value, key) => {
+        init.headers[key] = value;
+      });
+      const cookie = cookieHeader(request, w, global.__browserFrame);
+      if (cookie) init.headers.cookie = cookie;
+      try {
+        if (request.body) {
+          const ab = request.body;
+          if (ab && (ab as any).byteLength > 0) init.body = ab;
+        }
+      } catch (_) {}
+      const res = syncFetchBlocking(url, init as any) as any;
+      if (res.error) {
+        process.stderr.write(`[sync-xhr-err] ${url}: ${res.error}\n`);
+        return new w.Response("", { status: 503, statusText: "sync fetch failed" });
+      }
+      try {
+        for (const raw of res.setCookie || []) {
+          const cookieContainer = global.__cookieContainer;
+          if (!cookieContainer) break;
+          const u = new URL(url);
+          const parts = raw.split(";");
+          const pair = parts[0].split("=");
+          const cookie: any = {
+            name: pair[0].trim(),
+            value: pair.slice(1).join("=").trim(),
+            url: u.origin,
+            domain: u.hostname,
+            path: "/",
+          };
+          for (const p of parts.slice(1)) {
+            const kv = p.trim().split(/=(.*)/s);
+            const k = (kv[0] || "").toLowerCase();
+            if (k === "domain" && kv[1]) cookie.domain = kv[1];
+            if (k === "path" && kv[1]) cookie.path = kv[1];
+            if (k === "expires") cookie.expires = new Date(kv[1]).getTime();
+            if (k === "max-age") cookie.maxAge = parseInt(kv[1], 10);
+            if (k === "httponly") cookie.httpOnly = true;
+            if (k === "secure") cookie.secure = true;
+            if (k === "samesite") cookie.sameSite = kv[1];
+          }
+          try { cookieContainer.addCookies([cookie]); } catch (_) {}
+        }
+      } catch (_) {}
+      const hdrs: Record<string, string> = {};
+      for (const [k, v] of Object.entries(res.headers || {})) hdrs[k] = String(v);
+      // Sync interceptor contract: PLAIN OBJECT with Buffer body (happy-dom's
+      // SyncFetch reads `.body.toString()`); a window.Response here would
+      // stringify its ReadableStream body and corrupt script loading.
+      return {
+        status: res.status,
+        statusText: res.statusText || "",
+        ok: res.status >= 200 && res.status < 300,
+        url,
+        redirected: false,
+        headers: new w.Headers(hdrs),
+        body: Buffer.from(res.body),
+        [PropertySymbol.virtualServerFile]: null,
+      };
     },
   };
 }
@@ -379,10 +522,6 @@ function makeInterceptor(bypassPeCache = false) {
 // is dumped with URL + length + head/tail + sha1, and the disk cache is
 // re-validated against a fresh CDN fetch when the URL is an http(s) file.
 function installEvalInstrumentation(w) {
-  let PropertySymbol;
-  try {
-    PropertySymbol = require("happy-dom/lib/PropertySymbol.js").default ?? require("happy-dom/lib/PropertySymbol.js");
-  } catch (_) {}
   const sym = PropertySymbol && PropertySymbol.evaluateScript;
   if (!sym || typeof w[sym] !== "function") {
     process.stderr.write("[instr] no evaluateScript symbol, host hook skipped\n");
@@ -454,6 +593,15 @@ function installNativeToString(w) {
       depth > 5
     )
       return;
+    // Skip host-realm objects (under Bun, installGlobalWindowAlias exposes
+    // Bun internals via window getters; sweeping them crashes on native
+    // internal-field slots). happy-dom objects live in the window realm.
+    try {
+      if (obj.constructor && obj.constructor.prototype !== Object.prototype) {
+        const ctorName = obj.constructor.name;
+        if (/^(WriteStream|ReadStream|Socket|Process|Timeout|Immediate)$/.test(ctorName)) return;
+      }
+    } catch (_) {}
     if (seen.has(obj)) return;
     try {
       seen.add(obj);
@@ -601,6 +749,30 @@ const GUEST_EVAL_PATCH = `
 function applyPolyfills(w) {
   if (process.env.CAPTCHA_DEBUG_BODIES === "1") {
     installTrafficLogger(w);
+  }
+
+  // Element constructor shortcuts every real browser exposes. The FeiLin
+  // fingerprint SDK references `Option` as a bare identifier; missing it
+  // throws inside its probe chain and degrades the fingerprint.
+  if (typeof w.Option !== "function") {
+    w.Option = class Option extends w.HTMLOptionElement {
+      constructor(text, value, defaultSelected, selected) {
+        super();
+        if (text !== undefined) {
+          const el = w.document.createElement("option");
+          el.text = text;
+          if (value !== undefined) el.value = value;
+          if (defaultSelected) el.defaultSelected = true;
+          if (selected) el.selected = true;
+          return el;
+        }
+      }
+    };
+  }
+  if (typeof w.Video !== "function" && w.HTMLVideoElement) {
+    w.Video = class Video extends w.HTMLVideoElement {
+      constructor() { return w.document.createElement("video"); }
+    };
   }
 
   // happy-dom lacks alert/prompt/confirm/open/close (same stubs as
@@ -1418,6 +1590,16 @@ async function createDom(region, prefix) {
         process.stderr.write(`[host-unhandledRejection] ${typeof reason} ${JSON.stringify(reason).slice(0, 200)} ${r}\n`);
       } catch (_) {}
     });
+    // Guest scripts (rotated pe/FeiLin bundles) can throw synchronous errors
+    // that surface as uncaughtExceptions. Without a handler, happy-dom's
+    // exception observer (or Bun's default) terminates the whole proxy —
+    // a single bad pe version must only fail that one solve, not the server.
+    process.on("uncaughtException", (err) => {
+      try {
+        const msg = err && err.message ? err.message : String(err);
+        process.stderr.write(`[captcha-guest-uncaught] ${msg}\n`);
+      } catch (_) {}
+    });
   }
   // Guest console is silent unless CAPTCHA_DEBUG — piping every SDK log to
   // stderr spams journald and slows mints under systemd.
@@ -1449,7 +1631,7 @@ async function createDom(region, prefix) {
   });
 
   // Reach into the frame for cookie container + frame ref (host side helpers).
-  const WindowBrowserContext = require("happy-dom/lib/window/WindowBrowserContext.js").default;
+  // WindowBrowserContext imported at module scope
   const browserFrame = new WindowBrowserContext(w).getBrowserFrame();
   global.__browserFrame = browserFrame;
   global.__cookieContainer = browserFrame.page.context.cookieContainer;
@@ -1496,12 +1678,25 @@ async function createDom(region, prefix) {
   }
 
   // Apply polyfills + masking BEFORE the SDK script runs.
-  if (w.Error) {
-    w.Error.prepareStackTrace = Error.prepareStackTrace;
-  }
+  // Bun compatibility: happy-dom's VM realm isolation doesn't apply under
+  // Bun — script tags execute against the host globalThis, where bare
+  // `window`/`document`/`location` identifiers don't exist. Node needs none
+  // of this (its VM context resolves them natively). We alias the current
+  // solve's window on globalThis and remove the aliases when the window is
+  // destroyed, so concurrent solves with window reuse stay consistent.
   applyPolyfills(w);
   installNativeToString(w);
   installEvalInstrumentation(w);
+  // Bun alias pass runs AFTER polyfills so polyfilled props (Option, Video,
+  // alert, ...) are visible to guest scripts via globalThis too.
+  const needsGlobalAlias = typeof Bun !== "undefined";
+  if (needsGlobalAlias) {
+    const g = globalThis;
+    installGlobalWindowAlias(g, w);
+  }
+  if (w.Error) {
+    w.Error.prepareStackTrace = Error.prepareStackTrace;
+  }
   // Host-side recorder the guest dump helper calls: computes sha1 of the failing
   // source (guest realm has no node crypto) and re-checks the pe disk cache.
   w.__capDebugDump = (url, src, kind) => {
@@ -1545,6 +1740,113 @@ async function createDom(region, prefix) {
   return { window: w, browserFrame };
 }
 
+// Bun-only: alias the active window on globalThis (script tags run in the
+// Bun-only: alias the active window on globalThis (script tags run in the
+// host realm under Bun). Every own enumerable window property is exposed as a
+// getter so guest scripts resolving bare identifiers (window, document,
+// XMLHttpRequest, Range, HTMLElement, ...) find them, exactly as Node's VM
+// realm would. Removed again in destroyDom.
+// Names that must NOT be shadowed on globalThis — Bun/Node host internals the
+// window happens to expose but the host runtime depends on.
+const HOST_CRITICAL_GLOBALS = new Set([
+  "process", "Bun", "console", "performance", "crypto", "fetch",
+  "queueMicrotask", "structuredClone", "TextEncoder", "TextDecoder",
+  "requestAnimationFrame", "cancelAnimationFrame", "print",
+  "URL", "URLSearchParams", "AbortController", "AbortSignal",
+  "ReadableStream", "WritableStream", "TransformStream", "Blob", "File",
+  "FormData", "Headers", "Request", "Response", "Event", "EventTarget",
+  "MessageChannel", "MessagePort", "Buffer", "global", "globalThis",
+  // JS intrinsics — GlobalWindow re-exposes them as class fields; the host
+  // versions are fine, so never shadow them.
+  "Array", "ArrayBuffer", "Boolean", "DataView", "Date", "Error",
+  "EvalError", "Float32Array", "Float64Array", "Function", "Infinity",
+  "Int8Array", "Int16Array", "Int32Array", "Intl", "JSON", "Map", "Math",
+  "NaN", "Number", "Object", "Promise", "RangeError", "ReferenceError",
+  "RegExp", "Reflect", "Set", "String", "Symbol", "SyntaxError", "TypeError",
+  "URIError", "Uint8Array", "Uint8ClampedArray", "Uint16Array", "Uint32Array",
+  "WeakMap", "WeakSet", "decodeURI", "decodeURIComponent", "encodeURI",
+  "encodeURIComponent", "escape", "isFinite", "isNaN", "parseFloat",
+  "parseInt", "unescape", "eval",
+]);
+// Window methods that exist as prototype members, not own props — the alias
+// pass must include them so guest bare-name references resolve (moveBy,
+// scrollTo, ... are referenced by the FeiLin fingerprint SDK).
+const EXTRA_WINDOW_PROPS = [
+  "moveBy", "moveTo", "resizeBy", "resizeTo", "scrollTo", "scrollBy", "scroll",
+  "open", "close", "stop", "focus", "blur", "print", "alert", "confirm",
+  "prompt", "getSelection", "find",
+];
+
+// Ref-count: the pool solves in parallel waves; each window must keep the
+// aliases alive until the LAST concurrent window is destroyed, otherwise one
+// destroyDom() pulls `window` out from under a sibling mid-solve.
+let _aliasRefCount = 0;
+
+function installGlobalWindowAlias(g, w) {
+  _aliasRefCount += 1;
+  const props = new Set(Object.getOwnPropertyNames(w));
+  for (const name of EXTRA_WINDOW_PROPS) props.add(name);
+  // also walk the prototype chain one level (BrowserWindow getters like
+  // navigator/location live there in some versions)
+  for (const proto = Object.getPrototypeOf(w); proto && proto !== Object.prototype;) {
+    for (const name of Object.getOwnPropertyNames(proto)) props.add(name);
+    break;
+  }
+  for (const prop of props) {
+    if (HOST_CRITICAL_GLOBALS.has(prop)) continue;
+    try {
+      Object.defineProperty(g, prop, {
+        get() {
+          return w[prop];
+        },
+        set(v) {
+          try { w[prop] = v; } catch (_) {}
+        },
+        configurable: true,
+      });
+    } catch (_) {}
+  }
+  // w.window/self may not exist as own props on this happy-dom build
+  for (const prop of ["window", "self", "top", "parent"]) {
+    try {
+      Object.defineProperty(g, prop, { get() { return w; }, configurable: true });
+    } catch (_) {}
+  }
+  // Guest timers must live on the window's timer registry (destroyed with
+  // the window). The host's setTimeout would let pe-VM callbacks fire after
+  // destroyDom, when the `window` alias is gone ("window is not defined").
+  for (const prop of ["setTimeout", "setInterval", "clearTimeout", "clearInterval"]) {
+    try {
+      Object.defineProperty(g, prop, {
+        get() { return w[prop]?.bind(w); },
+        configurable: true,
+      });
+    } catch (_) {}
+  }
+  // Dynamic catch-all: guest code occasionally references window methods that
+  // only exist on the prototype (moveBy, scrollTo, ...) or lands mid-solve on
+  // new props. Proxy fallback for any still-missing global property.
+  try {
+    Object.defineProperty(g, "__capWindowFor", {
+      get() { return w; },
+      configurable: true,
+    });
+  } catch (_) {}
+}
+function removeGlobalWindowAlias(g, w) {
+  _aliasRefCount -= 1;
+  if (_aliasRefCount > 0) return;
+  for (const name of Object.getOwnPropertyNames(w)) {
+    try {
+      const d = Object.getOwnPropertyDescriptor(g, name);
+      if (d?.get) delete g[name];
+    } catch (_) {}
+  }
+  for (const prop of ["window", "self", "top", "parent"]) {
+    try { delete g[prop]; } catch (_) {}
+  }
+}
+
 function destroyDom(win) {
   try {
     const cap = win.document.getElementById("cap");
@@ -1555,6 +1857,10 @@ function destroyDom(win) {
     global.__cookieContainer = null;
     global.__browserFrame = null;
   } catch (_) {}
+  try {
+    if (typeof Bun !== "undefined") removeGlobalWindowAlias(globalThis, win);
+  } catch (_) {}
+  try { shutdownSyncFetchWorker(); } catch (_) {}
 }
 
 function extractVerifyParam(param) {
@@ -1748,7 +2054,7 @@ async function solveTraceless(opts) {
     if (process.env.CAPTCHA_DUMP_DBT === "1") {
       try {
         const dbt = w.__DBT || [];
-        require("node:fs").writeFileSync(
+        fs.writeFileSync(
           process.env.CAPTCHA_DBT_FILE || "/tmp/pe-dbt.json",
           JSON.stringify({ count: dbt.length, last: dbt.slice(-8), all: dbt }, null, 1),
         );
@@ -1774,78 +2080,4 @@ async function solveTraceless(opts) {
   }
 }
 
-async function main() {
-  const count = parseInt(process.env.SOLVES || "3", 10);
-  const results = [];
-  let consecutiveFails = 0;
-  for (let i = 1; i <= count; i++) {
-    const beforeMem = process.memoryUsage().rss;
-    const t0 = Date.now();
-    let label = "?";
-    _requestLog.length = 0;
-    try {
-      const token = await solveTraceless({});
-      const dt = Date.now() - t0;
-      const rss = process.memoryUsage().rss;
-      label = token.length >= 100 ? `REAL token len=${token.length}` : `SHORT token len=${token.length}`;
-      console.log(`solve#${i}: ${label} wall=${dt}ms rss=${(rss / 1024 / 1024).toFixed(1)}MB rssDelta=${((rss - beforeMem) / 1024 / 1024).toFixed(1)}MB`);
-      console.log(`  token[0:60]: ${token.slice(0, 60)}`);
-      const tokPath = `/tmp/opencode/happy-test/last-token.txt`;
-      require("fs").writeFileSync(tokPath, token);
-      results.push({ ok: true, i, wall: dt, token, rss });
-      consecutiveFails = 0;
-    } catch (err) {
-      const dt = Date.now() - t0;
-      const rss = process.memoryUsage().rss;
-      console.log(`solve#${i}: FAIL wall=${dt}ms rss=${(rss / 1024 / 1024).toFixed(1)}MB err=${err.message}`);
-      console.log(`  requests (this solve):`);
-      for (const r of _requestLog) {
-        let short = r.url;
-        try { const u = new URL(r.url); short = u.hostname + u.pathname; } catch (_) {}
-        console.log(`   ${r.sync ? "sync" : "    "} ${r.method} ${short}`);
-      }
-      results.push({ ok: false, i, wall: dt, err: err.message, rss });
-      consecutiveFails++;
-      if (consecutiveFails >= 3) break;
-    }
-  }
-
-  console.log("\n--- request log (interesting hosts) ---");
-  const seen = new Set();
-  for (const r of _requestLog) {
-    let short = r.url;
-    try {
-      const u = new URL(r.url);
-      short = u.hostname + u.pathname;
-    } catch (_) {}
-    if (!seen.has(short) || r.sync) {
-      seen.add(short);
-      console.log(`${r.sync ? "sync " : "     "} ${r.method} ${short}`);
-    }
-  }
-
-  const tok = results.find((r) => r.ok && r.token.length >= 100);
-  if (tok) {
-    console.log(`\n✅ got real token (len=${tok.token.length}) — running GLM validation`);
-    await validateToken(tok.token);
-  } else {
-    console.log("\n❌ no real token produced");
-    process.exit(1);
-  }
-}
-
-async function validateToken(token) {
-  const tokPath = "/tmp/opencode/happy-test/last-token.txt";
-  require("fs").writeFileSync(tokPath, token);
-  const r = spawnSync("node", ["/tmp/opencode/happy-test/verify-token.mjs", tokPath, "glm-5.3"], {
-    encoding: "utf8",
-    timeout: 60_000,
-  });
-  console.log((r.stdout || "") + (r.stderr || ""));
-  if (r.status === 0) {
-    process.exit(0);
-  }
-  process.exit(r.status ?? 1);
-}
-
-module.exports = { solveTraceless };
+export { solveTraceless, createDom, destroyDom };

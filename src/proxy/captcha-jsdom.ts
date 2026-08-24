@@ -1,14 +1,9 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { spawn } from "node:child_process";
 import {
   CaptchaCpuGovernor,
   resolveCpuGovernorConfig,
   type CpuGovernorSnapshot,
 } from "./captcha-cpu-governor.js";
 import {
-  CAPTCHA_NODE_DIR,
   captchaSolverConcurrency,
   runCaptchaSolve,
   setCaptchaSolverConcurrency,
@@ -241,7 +236,6 @@ export class CaptchaTokenPool {
 
   async takeToken(cfg: CaptchaConfig): Promise<string> {
     this.cfg = cfg;
-    await ensureCaptchaDeps();
 
     const readyBefore = this.tokens.length;
     const token = this.popFresh();
@@ -295,7 +289,6 @@ export class CaptchaTokenPool {
 
   async prefill(cfg: CaptchaConfig, count?: number): Promise<void> {
     this.cfg = cfg;
-    await ensureCaptchaDeps();
     const target = Math.min(count ?? this.effectiveTarget, this.effectiveTarget);
     while (this.tokens.length + this.activeSolves < target) {
       const need = target - this.tokens.length - this.activeSolves;
@@ -729,80 +722,4 @@ export async function prefillCaptchaPool(cfg: CaptchaConfig, count?: number): Pr
 
 export function urgentCaptchaRefill(): void {
   pool.requestUrgentRefill();
-}
-
-/** Lazy install Playwright + Chromium in captcha_node (avoids postinstall on every bun install). */
-let depsReady: Promise<void> | null = null;
-
-function playwrightBrowserInstalled(): boolean {
-  const cache =
-    process.env.PLAYWRIGHT_BROWSERS_PATH?.trim() ||
-    path.join(os.homedir(), ".cache", "ms-playwright");
-  try {
-    return fs.readdirSync(cache).some((name) => name.startsWith("chromium-"));
-  } catch {
-    return false;
-  }
-}
-
-function runCommand(
-  cmd: string,
-  args: string[],
-  cwd: string,
-  label: string,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const isWin = process.platform === "win32";
-    const proc = spawn(isWin && cmd === "npm" ? "npm.cmd" : cmd, args, {
-      cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-      shell: isWin && cmd === "npx",
-    });
-    let stderr = "";
-    proc.stderr?.on("data", (c: Buffer) => {
-      stderr += c.toString("utf8");
-    });
-    proc.on("error", (err) => reject(new Error(`${label} failed: ${err.message}`)));
-    proc.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`${label} failed (${code}): ${stderr.slice(0, 300)}`));
-    });
-  });
-}
-
-async function ensureCaptchaDeps(): Promise<void> {
-  if (process.env.ZCODE_CAPTCHA_SKIP_DEPS === "1") return;
-  // Only the "playwright" backend needs the npm package + a Chromium binary;
-  // jsdom and happy run fully in-process, so skip the ~150MB browser install
-  // for them entirely.
-  if ((process.env.ZCODE_CAPTCHA_BACKEND || "jsdom") !== "playwright") return;
-
-  const playwrightPkg = path.join(CAPTCHA_NODE_DIR, "node_modules", "playwright");
-  const needsInstall = !fs.existsSync(playwrightPkg);
-  const needsBrowser = !playwrightBrowserInstalled();
-
-  if (!needsInstall && !needsBrowser) return;
-  if (depsReady) return depsReady;
-
-  depsReady = (async () => {
-    if (needsInstall) {
-      console.log("[captcha] installing Playwright in captcha_node…");
-      await runCommand("npm", ["install", "--omit=dev"], CAPTCHA_NODE_DIR, "npm install");
-    }
-    if (!playwrightBrowserInstalled()) {
-      console.log("[captcha] installing Chromium for Playwright (one-time download)…");
-      await runCommand(
-        "npx",
-        ["playwright", "install", "chromium"],
-        CAPTCHA_NODE_DIR,
-        "playwright install chromium",
-      );
-    }
-  })();
-
-  try {
-    await depsReady;
-  } finally {
-    depsReady = null;
-  }
 }

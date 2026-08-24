@@ -69,18 +69,13 @@ async function fetchCaptchaConfig(appVersion: string): Promise<FetchedCaptchaCon
 
 /**
  * Solve backend selection (ZCODE_CAPTCHA_BACKEND env):
- *   - "jsdom"     (default) — the original in-process jsdom path below.
- *   - "happy"     — happy-dom backend in captcha_node/, run by a dedicated
- *                   Node daemon (captcha_node/daemon.js). Production-proven:
- *                   ~815ms CPU/solve (~260-330ms with CAPTCHA_WINDOW_REUSE=1),
- *                   more IP-tolerant than jsdom, no browser install needed.
- *   - "playwright" — Chromium backend in captcha_node/ (heaviest, last resort).
- *   - "native"    — pure-HTTP solver (captcha_node/native_solve2.js). ~600ms,
- *                   no DOM at all, but the Aliyun risk engine currently rejects
- *                   its tokens with F001 from most IPs — protocol reference.
- *
- * The daemon backend keeps Chromium-class work out of the Bun event loop and
- * bounds memory by recycling workers (see captcha_node/README.md).
+ *   - "happy"     (default) — happy-dom solver (src/proxy/captcha-happy.ts),
+ *                   fully in-process: bundled into the self-contained release
+ *                   binary, no external Node.js or browser. Production-proven
+ *                   (~815ms CPU/solve; ~260-330ms with window reuse). Served
+ *                   through the pre-solved token pool (captcha-jsdom.ts).
+ *   - "jsdom"     — the original in-process jsdom path below (single cached
+ *                   token, no pool).
  */
 import { runCaptchaSolve, shutdownCaptchaSolver } from "./captcha-solver.js";
 import {
@@ -94,15 +89,15 @@ import {
   type CaptchaConfig,
 } from "./captcha-jsdom.js";
 
-const CAPTCHA_BACKEND = process.env.ZCODE_CAPTCHA_BACKEND?.trim().toLowerCase() || "jsdom";
-const DAEMON_BACKENDS = new Set(["happy", "playwright"]);
+const CAPTCHA_BACKEND = process.env.ZCODE_CAPTCHA_BACKEND?.trim().toLowerCase() || "happy";
+const USE_POOL = CAPTCHA_BACKEND === "happy";
 
 export async function getCaptchaToken(appVersion: string): Promise<{ verifyParam: string; region: string }> {
   const cfg = await fetchCaptchaConfig(appVersion);
   if (!cfg || !cfg.enabled || !cfg.prefix || !cfg.sceneId) throw new Error("Captcha config unavailable");
-  if (DAEMON_BACKENDS.has(CAPTCHA_BACKEND)) {
+  if (USE_POOL) {
     // Pre-solved token pool: requests take an already-minted token (sub-ms)
-    // while background workers refill — the hot path never waits on a solve.
+    // while background solves refill — the hot path never waits on a solve.
     const verifyParam = await solveCaptchaJsdom(cfg);
     return { verifyParam, region: cfg.region };
   }
@@ -113,9 +108,10 @@ export async function getCaptchaToken(appVersion: string): Promise<{ verifyParam
 }
 
 async function solveCaptchaWithRetry(cfg: FetchedCaptchaConfig): Promise<string> {
-  if (DAEMON_BACKENDS.has(CAPTCHA_BACKEND)) {
-    // The worker process retries internally (ZCODE_CAPTCHA_RETRIES attempts);
-    // this outer loop is a thin respawn guard for daemon-level failures.
+  if (USE_POOL) {
+    // Retries are handled inside the pool (ZCODE_CAPTCHA_RETRIES attempts
+    // with fresh InitCaptchaV3 per retry); this outer guard is unreachable
+    // in practice but kept for the jsdom->happy transition path.
     let lastErr: Error | null = null;
     for (let attempt = 1; attempt <= SOLVE_RETRIES; attempt++) {
       try {
@@ -136,7 +132,7 @@ export function shutdownCaptcha(): void {
 }
 
 /**
- * Start background pre-solving of the token pool (daemon backends only).
+ * Start background pre-solving of the token pool (happy backend).
  * Warms only the idle minimum; the pool grows on demand with traffic.
  */
 export async function startCaptchaPool(appVersion: string): Promise<void> {
@@ -154,7 +150,7 @@ export async function startCaptchaPool(appVersion: string): Promise<void> {
 
 /** Request an urgent refill burst (e.g. after a challenge/retry). */
 export function urgentCaptcha(): void {
-  if (DAEMON_BACKENDS.has(CAPTCHA_BACKEND)) urgentCaptchaRefill();
+  if (USE_POOL) urgentCaptchaRefill();
 }
 
 export function captchaPoolStats(): { ready: number; target: number; activeSolves: number } {
