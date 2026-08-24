@@ -54,6 +54,8 @@ export function detectCaptchaChallenge(resp: Response): string | null {
 
 export function invalidateCaptchaToken(): void { cachedToken = null; }
 
+
+
 async function fetchCaptchaConfig(appVersion: string): Promise<FetchedCaptchaConfig | null> {
   if (cachedConfig.value && cachedConfig.expiresAt > Date.now()) return cachedConfig.value;
   try {
@@ -65,13 +67,98 @@ async function fetchCaptchaConfig(appVersion: string): Promise<FetchedCaptchaCon
   } catch { return null; }
 }
 
+/**
+ * Solve backend selection (ZCODE_CAPTCHA_BACKEND env):
+ *   - "happy"     (default) — happy-dom solver (src/proxy/captcha-happy.ts),
+ *                   fully in-process: bundled into the self-contained release
+ *                   binary, no external Node.js or browser. Production-proven
+ *                   (~815ms CPU/solve; ~260-330ms with window reuse). Served
+ *                   through the pre-solved token pool (captcha-jsdom.ts).
+ *   - "jsdom"     — the original in-process jsdom path below (single cached
+ *                   token, no pool).
+ */
+import { runCaptchaSolve, shutdownCaptchaSolver } from "./captcha-solver.js";
+import {
+  configureCaptchaPool,
+  getCaptchaPoolStats,
+  prefillCaptchaPool,
+  solveCaptchaJsdom,
+  startCaptchaPoolRefill,
+  stopCaptchaPool,
+  urgentCaptchaRefill,
+  type CaptchaConfig,
+} from "./captcha-jsdom.js";
+
+const CAPTCHA_BACKEND = process.env.ZCODE_CAPTCHA_BACKEND?.trim().toLowerCase() || "happy";
+const USE_POOL = CAPTCHA_BACKEND === "happy";
+
 export async function getCaptchaToken(appVersion: string): Promise<{ verifyParam: string; region: string }> {
-  if (cachedToken && cachedToken.expiresAt > Date.now()) return { verifyParam: cachedToken.verifyParam, region: cachedToken.region };
   const cfg = await fetchCaptchaConfig(appVersion);
   if (!cfg || !cfg.enabled || !cfg.prefix || !cfg.sceneId) throw new Error("Captcha config unavailable");
+  if (USE_POOL) {
+    // Pre-solved token pool: requests take an already-minted token (sub-ms)
+    // while background solves refill — the hot path never waits on a solve.
+    const verifyParam = await solveCaptchaJsdom(cfg);
+    return { verifyParam, region: cfg.region };
+  }
+  if (cachedToken && cachedToken.expiresAt > Date.now()) return { verifyParam: cachedToken.verifyParam, region: cachedToken.region };
   const verifyParam = await solveInJsdomWithRetry(cfg);
   cachedToken = { verifyParam, region: cfg.region, expiresAt: Date.now() + TOKEN_TTL_MS };
   return { verifyParam, region: cfg.region };
+}
+
+async function solveCaptchaWithRetry(cfg: FetchedCaptchaConfig): Promise<string> {
+  if (USE_POOL) {
+    // Retries are handled inside the pool (ZCODE_CAPTCHA_RETRIES attempts
+    // with fresh InitCaptchaV3 per retry); this outer guard is unreachable
+    // in practice but kept for the jsdom->happy transition path.
+    let lastErr: Error | null = null;
+    for (let attempt = 1; attempt <= SOLVE_RETRIES; attempt++) {
+      try {
+        return await runCaptchaSolve(cfg.sceneId, cfg.region, cfg.prefix);
+      } catch (err) {
+        lastErr = err as Error;
+        console.error(`[captcha:${CAPTCHA_BACKEND}] solve attempt ${attempt}/${SOLVE_RETRIES} failed: ${lastErr.message}`);
+      }
+    }
+    throw new Error(`captcha solve failed after ${SOLVE_RETRIES} attempts: ${lastErr?.message ?? "unknown"}`);
+  }
+  return solveInJsdomWithRetry(cfg);
+}
+
+export function shutdownCaptcha(): void {
+  try { shutdownCaptchaSolver(); } catch {}
+  try { stopCaptchaPool(); } catch {}
+}
+
+/**
+ * Start background pre-solving of the token pool (happy backend).
+ * Warms only the idle minimum; the pool grows on demand with traffic.
+ */
+export async function startCaptchaPool(appVersion: string): Promise<void> {
+  const cfg = await fetchCaptchaConfig(appVersion);
+  if (!cfg || !cfg.enabled) return;
+  // Size the pool before prefill: the module-level pool defers sizing to the
+  // first configure() so a cold boot doesn't mint a storm of soon-expired
+  // tokens. CAPTCHA_POOL_MIN/CAPTCHA_POOL_MAX env vars override the defaults.
+  const min = Number(process.env.CAPTCHA_POOL_MIN || 20);
+  const max = Number(process.env.CAPTCHA_POOL_MAX || Math.max(min * 6, 120));
+  configureCaptchaPool({ poolSizeMin: min, poolSizeMax: max });
+  startCaptchaPoolRefill(cfg as CaptchaConfig);
+  await prefillCaptchaPool(cfg as CaptchaConfig, min);
+}
+
+/** Request an urgent refill burst (e.g. after a challenge/retry). */
+export function urgentCaptcha(): void {
+  if (USE_POOL) urgentCaptchaRefill();
+}
+
+export function captchaPoolStats(): { ready: number; target: number; activeSolves: number } {
+  return getCaptchaPoolStats();
+}
+
+export function configureCaptchaSolving(opts: Parameters<typeof configureCaptchaPool>[0]): void {
+  configureCaptchaPool(opts);
 }
 
 async function solveInJsdomWithRetry(cfg: FetchedCaptchaConfig): Promise<string> {
