@@ -65,6 +65,38 @@ describe("translateRequestOpenAIToAnthropic", () => {
     expect(result.max_tokens).toBe(2048);
   });
 
+  it("translates ordinary user image parts to Anthropic image blocks", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-5.3-flash",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "What is this?" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } },
+        ],
+      }],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.messages[0].content).toEqual([
+      { type: "text", text: "What is this?" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+    ]);
+  });
+
+  it("preserves remote image URLs as Anthropic image sources", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-5.3-flash",
+      messages: [{
+        role: "user",
+        content: [{ type: "image_url", image_url: { url: "https://example.com/image.png" } }],
+      }],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.messages[0].content).toEqual([
+      { type: "image", source: { type: "url", url: "https://example.com/image.png" } },
+    ]);
+  });
+
   it("translates stop to stop_sequences", () => {
     const req: OpenAIChatRequest = {
       model: "glm-4.6",
@@ -322,7 +354,7 @@ describe("translateRequestOpenAIToAnthropic", () => {
     expect(inner[1].source).toEqual({ type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" });
   });
 
-  it("falls back to text block for non-data: image URLs in tool results (does not silently drop)", () => {
+  it("preserves remote image URLs in tool results", () => {
     const req: OpenAIChatRequest = {
       model: "glm-4.6",
       messages: [
@@ -347,8 +379,10 @@ describe("translateRequestOpenAIToAnthropic", () => {
     expect(Array.isArray(inner)).toBe(true);
     expect(inner).toHaveLength(2);
     expect(inner[0].type).toBe("text");
-    expect(inner[1].type).toBe("text");
-    expect(inner[1].text).toContain("https://example.com/img.png");
+    expect(inner[1]).toEqual({
+      type: "image",
+      source: { type: "url", url: "https://example.com/img.png" },
+    });
   });
 
   it("preserves message order and alternation: user → assistant → user (tool_result) → assistant", () => {
@@ -380,7 +414,29 @@ describe("translateRequestOpenAIToAnthropic", () => {
     expect(result.thinking).toEqual({ type: "enabled" });
   });
 
-  it("does not enable Anthropic thinking by default for non-reasoning GLM models", () => {
+  it("enables Anthropic thinking by default for GLM-4.7-Flash", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.7-flash",
+      messages: [{ role: "user", content: "Hi" }],
+      reasoning_effort: "high",
+    };
+
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.thinking).toEqual({ type: "enabled" });
+  });
+
+  it("keeps thinking enabled for GLM-5.3-Flash when a client tries to disable it", () => {
+    const req = {
+      model: "glm-5.3-flash",
+      messages: [{ role: "user", content: "Hi" }],
+      reasoning_effort: "none",
+      thinking: { type: "disabled" },
+    } as OpenAIChatRequest;
+    const result = translateRequestOpenAIToAnthropic(req);
+    expect(result.thinking).toEqual({ type: "enabled" });
+  });
+
+ it("does not enable Anthropic thinking by default for non-reasoning GLM models", () => {
     const req: OpenAIChatRequest = {
       model: "glm-4.5",
       messages: [{ role: "user", content: "Hi" }],

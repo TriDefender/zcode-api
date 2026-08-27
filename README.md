@@ -176,8 +176,8 @@ and present the key input); it then sends the key on its own `/v1/*` calls.
 
 Features: streaming responses (SSE), model picker (auto-populated from
 `/v1/models`), editable system prompt, temperature / top-p / max-tokens /
-`do_sample`, deep-thinking toggle with `reasoning_effort` (GLM-5.2+), image
-upload (auto-enabled for models whose id contains `v`), MCP HTTP servers,
+`do_sample`, deep-thinking toggle with `reasoning_effort` (reasoning models), image
+upload (enabled from model capability metadata), MCP HTTP servers,
 markdown + code-highlight rendering, light/dark theme, and per-browser
 multi-session autosave (localStorage). Open Settings (⚙) to configure.
 
@@ -331,12 +331,14 @@ The proxy lists these models on `GET /v1/models` (pinned to the GLM coding-plan 
 | `glm-4.6` | 200K | 128K |
 | `glm-4.6v` | 200K | 128K |
 | `glm-4.7` | 200K | 128K |
+| `glm-4.7-flash` | 200K | 128K |
 | `glm-5` | 200K | 128K |
 | `glm-5-turbo` | 200K | 128K |
 | `glm-5v-turbo` | 200K | 128K |
 | `glm-5.1` | 200K | 128K |
 | `glm-5.2` | 1M | 128K |
 | `glm-5.3` | 1M | 128K |
+| `glm-5.3-flash` | 1M | 128K |
 
 Requests for models not in this list are still forwarded upstream — the listing is informational, not a gate.
 

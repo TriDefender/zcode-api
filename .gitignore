@@ -11,6 +11,7 @@ dist/
 /zcode-proxy-linux-*
 /zcode-proxy-darwin-*
 .idea/
+logs/
 
 # Android build artifacts
 Android-APP/app/build/

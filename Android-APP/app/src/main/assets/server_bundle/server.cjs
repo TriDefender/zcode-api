@@ -110305,12 +110305,14 @@ models:
   - glm-4.6
   - glm-4.6v
   - glm-4.7
+  - glm-4.7-flash
   - glm-5
   - glm-5-turbo
   - glm-5v-turbo
   - glm-5.1
   - glm-5.2
   - glm-5.3
+  - glm-5.3-flash
 
 # Configurable identity headers injected on every upstream request to mimic the
 # ZCode desktop client (User-Agent, X-ZCode-App-Version, X-Title,
@@ -110868,9 +110870,25 @@ var webui_default = `<!doctype html>\r
       // Known model catalog (used as a fallback when /v1/models is unreachable,\r
       // e.g. before the proxy key has been entered).\r
       var KNOWN_MODELS = [\r
-        "glm-4.5-air", "glm-4.6", "glm-4.6v", "glm-4.7", "glm-5",\r
-        "glm-5-turbo", "glm-5v-turbo", "glm-5.1", "glm-5.2"\r
+        "glm-4.5-air", "glm-4.6", "glm-4.6v", "glm-4.7", "glm-4.7-flash", "glm-5",\r
+        "glm-5-turbo", "glm-5v-turbo", "glm-5.1", "glm-5.2", "glm-5.3", "glm-5.3-flash"\r
       ];\r
+      // Fallback capabilities used before /v1/models is reachable. The live\r
+      // endpoint replaces/augments these entries with server-side metadata.\r
+      var MODEL_CAPABILITIES = {\r
+        "glm-4.5-air": { reasoning: true, input_modalities: ["text"] },\r
+        "glm-4.6": { reasoning: true, input_modalities: ["text"] },\r
+        "glm-4.6v": { reasoning: false, input_modalities: ["text", "image"] },\r
+        "glm-4.7": { reasoning: true, input_modalities: ["text"] },\r
+        "glm-4.7-flash": { reasoning: true, input_modalities: ["text"] },\r
+        "glm-5": { reasoning: true, input_modalities: ["text"] },\r
+        "glm-5-turbo": { reasoning: true, input_modalities: ["text"] },\r
+        "glm-5v-turbo": { reasoning: false, input_modalities: ["text", "image"] },\r
+        "glm-5.1": { reasoning: true, input_modalities: ["text"] },\r
+        "glm-5.2": { reasoning: true, input_modalities: ["text"] },\r
+        "glm-5.3": { reasoning: true, input_modalities: ["text"] },\r
+        "glm-5.3-flash": { reasoning: true, input_modalities: ["text", "image", "video"], thinking_required: true }\r
+      };\r
 \r
       var DEFAULT_SETTINGS = {\r
         apiKey: "",\r
@@ -111165,7 +111183,11 @@ var webui_default = `<!doctype html>\r
             return r.json();\r
           })\r
           .then(function (j) {\r
-            var ids = (j.data || []).map(function (m) { return m.id; });\r
+            var entries = Array.isArray(j.data) ? j.data : [];\r
+            entries.forEach(function (m) {\r
+              if (m && m.id && m.capabilities) MODEL_CAPABILITIES[m.id] = m.capabilities;\r
+            });\r
+            var ids = entries.map(function (m) { return m.id; });\r
             populateModels(ids); setStatus("ok");\r
           })\r
           .catch(function () {\r
@@ -111177,7 +111199,14 @@ var webui_default = `<!doctype html>\r
         statusDot.className = "status-dot" + (s === "ok" ? " ok" : s === "err" ? " err" : "");\r
         statusDot.title = s === "ok" ? "Connected" : s === "err" ? "Request failed (check key / proxy)" : "Set proxy API key in settings";\r
       }\r
-      function isVisionModel(id) { return /v/i.test(id || ""); }\r
+      function getModelCapabilities(id) {\r
+        return MODEL_CAPABILITIES[id] || null;\r
+      }\r
+      function isVisionModel(id) {\r
+        var caps = getModelCapabilities(id);\r
+        if (caps && Array.isArray(caps.input_modalities)) return caps.input_modalities.indexOf("image") >= 0;\r
+        return /v/i.test(id || "");\r
+      }\r
       function syncAttachVisibility() { attachBtn.hidden = !isVisionModel(modelSel.value); }\r
 \r
       // =========================================================\r
@@ -111233,8 +111262,13 @@ var webui_default = `<!doctype html>\r
         return body;\r
       }\r
       function isReasoningModel(id) {\r
-        // reasoning_effort is only honored by GLM-5.2 and above per BigModel docs.\r
-        return /glm-5\\.[2-9]|glm-[6-9]/i.test(id || "");\r
+        var caps = getModelCapabilities(id);\r
+        if (caps && typeof caps.reasoning === "boolean") return caps.reasoning;\r
+        return /glm-4\\.7(?:-flash)?|glm-5\\.[2-9]|glm-[6-9]/i.test(id || "");\r
+      }\r
+      function isThinkingRequired(id) {\r
+        var caps = getModelCapabilities(id);\r
+        return !!(caps && caps.thinking_required === true);\r
       }\r
       // =========================================================\r
       // MCP \u2014 client-managed (browser-direct, optional CORS proxy).\r
@@ -111446,7 +111480,7 @@ var webui_default = `<!doctype html>\r
         if (!text && pendingImages.length === 0) return;\r
         // Block image input for non-vision models with a clear message.\r
         if (pendingImages.length && !isVisionModel(state.settings.model)) {\r
-          toast("This model does not support image input. Select a vision model (name contains 'v', e.g. glm-4.6v).");\r
+          toast("This model does not support image input. Select a model marked as image-capable.");\r
           return;\r
         }\r
         var c = activeConv(); if (!c) { newConv(); c = activeConv(); }\r
@@ -111766,11 +111800,9 @@ var webui_default = `<!doctype html>\r
           pendingImages = []; renderAttachPreview();\r
           toast("Switched to a non-vision model \\u2014 attached images were removed.");\r
         }\r
-        saveState(); syncAttachVisibility(); populateEffort();\r
+        saveState(); syncAttachVisibility(); syncThinkButton();\r
       };\r
-      // GLM-5.2 only has two distinct reasoning-effort levels (low/medium map\r
-      // to high, xhigh maps to max), so expose just high and max. Other models\r
-      // get a disabled placeholder (reasoning_effort is GLM-5.2+ only).\r
+      // Expose the useful high/max effort levels for catalog reasoning models.\r
       function populateEffort() {\r
         var model = modelSel.value;\r
         effortSel.innerHTML = "";\r
@@ -111782,7 +111814,7 @@ var webui_default = `<!doctype html>\r
           });\r
           var cur = state.settings.reasoningEffort;\r
           effortSel.value = (cur === "high") ? "high" : "max";\r
-          effortSel.disabled = !state.settings.thinkingEnabled;\r
+          effortSel.disabled = isThinkingRequired(model) ? false : !state.settings.thinkingEnabled;\r
         } else {\r
           var o = document.createElement("option");\r
           o.value = ""; o.textContent = "n/a";\r
@@ -111791,10 +111823,13 @@ var webui_default = `<!doctype html>\r
         }\r
       }\r
       function syncThinkButton() {\r
+        var required = isThinkingRequired(modelSel.value);\r
+        if (required) state.settings.thinkingEnabled = true;\r
         var on = state.settings.thinkingEnabled;\r
         btnThink.classList.toggle("on", on);\r
         btnThink.textContent = on ? "Think: on" : "Think: off";\r
-        btnThink.title = on ? "Deep thinking on \\u2014 click to turn off" : "Deep thinking off \\u2014 click to turn on";\r
+        btnThink.disabled = required;\r
+        btnThink.title = required ? "Thinking is required for this model" : (on ? "Deep thinking on \\u2014 click to turn off" : "Deep thinking off \\u2014 click to turn on");\r
         // Repopulate so the effort dropdown's disabled state tracks the toggle\r
         // (populateEffort sets disabled = !thinkingEnabled for reasoning models).\r
         populateEffort();\r
@@ -111804,6 +111839,7 @@ var webui_default = `<!doctype html>\r
         saveState();\r
       };\r
       btnThink.onclick = function () {\r
+        if (isThinkingRequired(modelSel.value)) return;\r
         state.settings.thinkingEnabled = !state.settings.thinkingEnabled;\r
         saveState(); syncThinkButton();\r
       };\r
@@ -111819,7 +111855,7 @@ var webui_default = `<!doctype html>\r
         composer.addEventListener(ev, function (e) { e.preventDefault(); composer.style.borderColor = ""; });\r
       });\r
       composer.addEventListener("drop", function (e) {\r
-        if (!isVisionModel(modelSel.value)) { toast("Select a vision model (name contains 'v') to attach images."); return; }\r
+        if (!isVisionModel(modelSel.value)) { toast("Select a model marked as image-capable to attach images."); return; }\r
         if (e.dataTransfer && e.dataTransfer.files) readImages(e.dataTransfer.files);\r
       });\r
 \r
@@ -113302,15 +113338,34 @@ var import_node_zlib = require("node:zlib");
 var MODELS = [
   { id: "glm-4.5-air", name: "GLM 4.5 Air", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
   { id: "glm-4.6", name: "GLM 4.6", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
-  { id: "glm-4.6v", name: "GLM 4.6V", contextWindow: 2e5, maxOutputTokens: 128e3 },
+  { id: "glm-4.6v", name: "GLM 4.6V", contextWindow: 2e5, maxOutputTokens: 128e3, inputModalities: ["text", "image"] },
   { id: "glm-4.7", name: "GLM 4.7", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
+  { id: "glm-4.7-flash", name: "GLM 4.7 Flash", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
   { id: "glm-5", name: "GLM 5", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
   { id: "glm-5-turbo", name: "GLM 5 Turbo", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
-  { id: "glm-5v-turbo", name: "GLM 5V Turbo", contextWindow: 2e5, maxOutputTokens: 128e3 },
+  { id: "glm-5v-turbo", name: "GLM 5V Turbo", contextWindow: 2e5, maxOutputTokens: 128e3, inputModalities: ["text", "image"] },
   { id: "glm-5.1", name: "GLM 5.1", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
   { id: "glm-5.2", name: "GLM 5.2", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true },
-  { id: "glm-5.3", name: "GLM 5.3", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true }
+  { id: "glm-5.3", name: "GLM 5.3", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true },
+  {
+    id: "glm-5.3-flash",
+    name: "GLM 5.3 Flash",
+    contextWindow: 1e6,
+    maxOutputTokens: 131072,
+    reasoning: true,
+    inputModalities: ["text", "image", "video"],
+    thinkingRequired: true
+  }
 ];
+function getModel(id2) {
+  return MODELS.find((model) => model.id === id2);
+}
+function isReasoningModel(id2) {
+  return getModel(id2)?.reasoning === true;
+}
+function isThinkingRequired(id2) {
+  return getModel(id2)?.thinkingRequired === true;
+}
 
 // src/translator/openai-to-anthropic.ts
 var DEFAULT_MAX_TOKENS = 4096;
@@ -113342,6 +113397,13 @@ function translateRequestOpenAIToAnthropic(req) {
 }
 function translateThinking(req) {
   const explicit = req.thinking;
+  if (isThinkingRequired(req.model)) {
+    const budget = explicit && typeof explicit === "object" ? explicit.budget_tokens ?? explicit.budgetTokens : void 0;
+    return {
+      type: "enabled",
+      ...typeof budget === "number" && Number.isFinite(budget) && budget > 0 ? { budget_tokens: Math.floor(budget) } : {}
+    };
+  }
   if (explicit && typeof explicit === "object") {
     if (explicit.type === "disabled") return { type: "disabled" };
     if (explicit.type === "enabled" || explicit.type === "adaptive") {
@@ -113356,9 +113418,6 @@ function translateThinking(req) {
   if (req.reasoning_effort === "none") return { type: "disabled" };
   if (isReasoningModel(req.model)) return { type: "enabled" };
   return void 0;
-}
-function isReasoningModel(model) {
-  return MODELS.some((m) => m.id === model && m.reasoning === true);
 }
 function translateToolChoice(choice) {
   if (choice === "auto") return { type: "auto" };
@@ -113430,20 +113489,7 @@ function toolResultContent(msg) {
     const joined = msg.content.map((c) => c.text ?? "").join("");
     return joined;
   }
-  return msg.content.map((c) => {
-    if (c.type === "text") return { type: "text", text: c.text ?? "" };
-    if (c.type === "image_url" && c.image_url) {
-      const parsed = parseDataUrl(c.image_url.url);
-      if (parsed) {
-        return {
-          type: "image",
-          source: { type: "base64", media_type: parsed.mediaType, data: parsed.data }
-        };
-      }
-      return { type: "text", text: c.image_url.url };
-    }
-    return { type: "text", text: "" };
-  });
+  return msg.content.map(translateOpenAIContentPart);
 }
 function parseDataUrl(url2) {
   const m = /^data:([^;]+);base64,(.*)$/s.exec(url2);
@@ -113497,13 +113543,23 @@ function extractText(msg) {
 function translateContentOpenAIToAnthropic(msg) {
   if (typeof msg.content === "string") return msg.content;
   if (msg.content === null) return "";
-  if (Array.isArray(msg.content)) {
-    return msg.content.map((c) => {
-      if (c.type === "text") return { type: "text", text: c.text ?? "" };
-      return { type: "text", text: "" };
-    });
-  }
+  if (Array.isArray(msg.content)) return msg.content.map(translateOpenAIContentPart);
   return "";
+}
+function translateOpenAIContentPart(part) {
+  if (part.type === "text") return { type: "text", text: part.text ?? "" };
+  const url2 = part.image_url?.url ?? "";
+  const parsed = parseDataUrl(url2);
+  if (parsed) {
+    return {
+      type: "image",
+      source: { type: "base64", media_type: parsed.mediaType, data: parsed.data }
+    };
+  }
+  if (/^https?:\/\//i.test(url2)) {
+    return { type: "image", source: { type: "url", url: url2 } };
+  }
+  return { type: "text", text: url2 };
 }
 function translateToolOpenAIToAnthropic(tool) {
   return {
@@ -113635,6 +113691,11 @@ function translateMessageAnthropicToOpenAI(m) {
           contentParts.push({
             type: "image_url",
             image_url: { url: `data:${block.source.media_type};base64,${block.source.data}` }
+          });
+        } else if (block.source.type === "url") {
+          contentParts.push({
+            type: "image_url",
+            image_url: { url: block.source.url }
           });
         }
         break;
@@ -114923,7 +114984,14 @@ function handleListModels() {
     data: MODELS.map((m) => ({
       id: m.id,
       object: "model",
-      owned_by: "zcode-proxy"
+      owned_by: "zcode-proxy",
+      capabilities: {
+        context_window: m.contextWindow,
+        ...m.maxOutputTokens !== void 0 ? { max_output_tokens: m.maxOutputTokens } : {},
+        reasoning: m.reasoning === true,
+        input_modalities: [...m.inputModalities ?? ["text"]],
+        ...m.thinkingRequired ? { thinking_required: true } : {}
+      }
     }))
   };
   return new Response(JSON.stringify(list), {

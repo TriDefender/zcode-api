@@ -441,9 +441,25 @@
       // Known model catalog (used as a fallback when /v1/models is unreachable,
       // e.g. before the proxy key has been entered).
       var KNOWN_MODELS = [
-        "glm-4.5-air", "glm-4.6", "glm-4.6v", "glm-4.7", "glm-5",
-        "glm-5-turbo", "glm-5v-turbo", "glm-5.1", "glm-5.2"
+        "glm-4.5-air", "glm-4.6", "glm-4.6v", "glm-4.7", "glm-4.7-flash", "glm-5",
+        "glm-5-turbo", "glm-5v-turbo", "glm-5.1", "glm-5.2", "glm-5.3", "glm-5.3-flash"
       ];
+      // Fallback capabilities used before /v1/models is reachable. The live
+      // endpoint replaces/augments these entries with server-side metadata.
+      var MODEL_CAPABILITIES = {
+        "glm-4.5-air": { reasoning: true, input_modalities: ["text"] },
+        "glm-4.6": { reasoning: true, input_modalities: ["text"] },
+        "glm-4.6v": { reasoning: false, input_modalities: ["text", "image"] },
+        "glm-4.7": { reasoning: true, input_modalities: ["text"] },
+        "glm-4.7-flash": { reasoning: true, input_modalities: ["text"] },
+        "glm-5": { reasoning: true, input_modalities: ["text"] },
+        "glm-5-turbo": { reasoning: true, input_modalities: ["text"] },
+        "glm-5v-turbo": { reasoning: false, input_modalities: ["text", "image"] },
+        "glm-5.1": { reasoning: true, input_modalities: ["text"] },
+        "glm-5.2": { reasoning: true, input_modalities: ["text"] },
+        "glm-5.3": { reasoning: true, input_modalities: ["text"] },
+        "glm-5.3-flash": { reasoning: true, input_modalities: ["text", "image", "video"], thinking_required: true }
+      };
 
       var DEFAULT_SETTINGS = {
         apiKey: "",
@@ -738,7 +754,11 @@
             return r.json();
           })
           .then(function (j) {
-            var ids = (j.data || []).map(function (m) { return m.id; });
+            var entries = Array.isArray(j.data) ? j.data : [];
+            entries.forEach(function (m) {
+              if (m && m.id && m.capabilities) MODEL_CAPABILITIES[m.id] = m.capabilities;
+            });
+            var ids = entries.map(function (m) { return m.id; });
             populateModels(ids); setStatus("ok");
           })
           .catch(function () {
@@ -750,7 +770,14 @@
         statusDot.className = "status-dot" + (s === "ok" ? " ok" : s === "err" ? " err" : "");
         statusDot.title = s === "ok" ? "Connected" : s === "err" ? "Request failed (check key / proxy)" : "Set proxy API key in settings";
       }
-      function isVisionModel(id) { return /v/i.test(id || ""); }
+      function getModelCapabilities(id) {
+        return MODEL_CAPABILITIES[id] || null;
+      }
+      function isVisionModel(id) {
+        var caps = getModelCapabilities(id);
+        if (caps && Array.isArray(caps.input_modalities)) return caps.input_modalities.indexOf("image") >= 0;
+        return /v/i.test(id || "");
+      }
       function syncAttachVisibility() { attachBtn.hidden = !isVisionModel(modelSel.value); }
 
       // =========================================================
@@ -806,8 +833,13 @@
         return body;
       }
       function isReasoningModel(id) {
-        // reasoning_effort is only honored by GLM-5.2 and above per BigModel docs.
-        return /glm-5\.[2-9]|glm-[6-9]/i.test(id || "");
+        var caps = getModelCapabilities(id);
+        if (caps && typeof caps.reasoning === "boolean") return caps.reasoning;
+        return /glm-4\.7(?:-flash)?|glm-5\.[2-9]|glm-[6-9]/i.test(id || "");
+      }
+      function isThinkingRequired(id) {
+        var caps = getModelCapabilities(id);
+        return !!(caps && caps.thinking_required === true);
       }
       // =========================================================
       // MCP — client-managed (browser-direct, optional CORS proxy).
@@ -1019,7 +1051,7 @@
         if (!text && pendingImages.length === 0) return;
         // Block image input for non-vision models with a clear message.
         if (pendingImages.length && !isVisionModel(state.settings.model)) {
-          toast("This model does not support image input. Select a vision model (name contains 'v', e.g. glm-4.6v).");
+          toast("This model does not support image input. Select a model marked as image-capable.");
           return;
         }
         var c = activeConv(); if (!c) { newConv(); c = activeConv(); }
@@ -1339,11 +1371,9 @@
           pendingImages = []; renderAttachPreview();
           toast("Switched to a non-vision model \u2014 attached images were removed.");
         }
-        saveState(); syncAttachVisibility(); populateEffort();
+        saveState(); syncAttachVisibility(); syncThinkButton();
       };
-      // GLM-5.2 only has two distinct reasoning-effort levels (low/medium map
-      // to high, xhigh maps to max), so expose just high and max. Other models
-      // get a disabled placeholder (reasoning_effort is GLM-5.2+ only).
+      // Expose the useful high/max effort levels for catalog reasoning models.
       function populateEffort() {
         var model = modelSel.value;
         effortSel.innerHTML = "";
@@ -1355,7 +1385,7 @@
           });
           var cur = state.settings.reasoningEffort;
           effortSel.value = (cur === "high") ? "high" : "max";
-          effortSel.disabled = !state.settings.thinkingEnabled;
+          effortSel.disabled = isThinkingRequired(model) ? false : !state.settings.thinkingEnabled;
         } else {
           var o = document.createElement("option");
           o.value = ""; o.textContent = "n/a";
@@ -1364,10 +1394,13 @@
         }
       }
       function syncThinkButton() {
+        var required = isThinkingRequired(modelSel.value);
+        if (required) state.settings.thinkingEnabled = true;
         var on = state.settings.thinkingEnabled;
         btnThink.classList.toggle("on", on);
         btnThink.textContent = on ? "Think: on" : "Think: off";
-        btnThink.title = on ? "Deep thinking on \u2014 click to turn off" : "Deep thinking off \u2014 click to turn on";
+        btnThink.disabled = required;
+        btnThink.title = required ? "Thinking is required for this model" : (on ? "Deep thinking on \u2014 click to turn off" : "Deep thinking off \u2014 click to turn on");
         // Repopulate so the effort dropdown's disabled state tracks the toggle
         // (populateEffort sets disabled = !thinkingEnabled for reasoning models).
         populateEffort();
@@ -1377,6 +1410,7 @@
         saveState();
       };
       btnThink.onclick = function () {
+        if (isThinkingRequired(modelSel.value)) return;
         state.settings.thinkingEnabled = !state.settings.thinkingEnabled;
         saveState(); syncThinkButton();
       };
@@ -1392,7 +1426,7 @@
         composer.addEventListener(ev, function (e) { e.preventDefault(); composer.style.borderColor = ""; });
       });
       composer.addEventListener("drop", function (e) {
-        if (!isVisionModel(modelSel.value)) { toast("Select a vision model (name contains 'v') to attach images."); return; }
+        if (!isVisionModel(modelSel.value)) { toast("Select a model marked as image-capable to attach images."); return; }
         if (e.dataTransfer && e.dataTransfer.files) readImages(e.dataTransfer.files);
       });
 

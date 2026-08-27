@@ -51,12 +51,14 @@ models:
   - glm-4.6
   - glm-4.6v
   - glm-4.7
+  - glm-4.7-flash
   - glm-5
   - glm-5-turbo
   - glm-5v-turbo
   - glm-5.1
   - glm-5.2
   - glm-5.3
+  - glm-5.3-flash
 
 # Configurable identity headers injected on every upstream request to mimic the
 # ZCode desktop client (User-Agent, X-ZCode-App-Version, X-Title,

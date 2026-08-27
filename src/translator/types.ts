@@ -146,12 +146,22 @@ export interface OpenAIStreamChoice {
   finish_reason?: "stop" | "length" | "tool_calls" | "content_filter" | null;
 }
 
+/** Capability metadata attached to `/v1/models` entries. */
+export interface OpenAIModelCapabilities {
+  context_window: number;
+  max_output_tokens?: number;
+  reasoning: boolean;
+  input_modalities: Array<"text" | "image" | "video">;
+  thinking_required?: boolean;
+}
+
 /** /v1/models list entry. */
 interface OpenAIModel {
   id: string;
   object: "model";
   created?: number;
   owned_by: string;
+  capabilities?: OpenAIModelCapabilities;
 }
 
 /** /v1/models list response. */
@@ -167,7 +177,12 @@ export interface OpenAIModelList {
 /** Anthropic content block types. */
 export type AnthropicContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
+  | {
+      type: "image";
+      source:
+        | { type: "base64"; media_type: string; data: string }
+        | { type: "url"; url: string };
+    }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
   | { type: "tool_result"; tool_use_id: string; content: string | AnthropicContentBlock[]; is_error?: boolean }
   | { type: "thinking"; thinking: string; signature?: string };

@@ -176,6 +176,11 @@ function translateMessageAnthropicToOpenAI(m: AnthropicMessage): OpenAIMessage[]
             type: "image_url",
             image_url: { url: `data:${block.source.media_type};base64,${block.source.data}` },
           });
+        } else if (block.source.type === "url") {
+          contentParts.push({
+            type: "image_url",
+            image_url: { url: block.source.url },
+          });
         }
         break;
       }

@@ -22,6 +22,13 @@ export function handleListModels(): Response {
       id: m.id,
       object: "model" as const,
       owned_by: "zcode-proxy",
+      capabilities: {
+        context_window: m.contextWindow,
+        ...(m.maxOutputTokens !== undefined ? { max_output_tokens: m.maxOutputTokens } : {}),
+        reasoning: m.reasoning === true,
+        input_modalities: [...(m.inputModalities ?? ["text"])] as Array<"text" | "image" | "video">,
+        ...(m.thinkingRequired ? { thinking_required: true } : {}),
+      },
     })),
   };
   return new Response(JSON.stringify(list), {

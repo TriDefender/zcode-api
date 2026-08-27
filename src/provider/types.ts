@@ -18,6 +18,9 @@ export interface ProviderDef {
   bizHost: string;
 }
 
+/** Input modalities advertised by a model. */
+export type ModelInputModality = "text" | "image" | "video";
+
 /** Model definition derived from the catalog. */
 export interface ModelDef {
   id: string;
@@ -26,4 +29,8 @@ export interface ModelDef {
   maxOutputTokens?: number;
   /** Whether the model supports reasoning/thinking mode. */
   reasoning?: boolean;
+  /** Input modalities accepted by the model. Omitted means text-only. */
+  inputModalities?: readonly ModelInputModality[];
+  /** Whether the upstream requires thinking to be enabled for this model. */
+  thinkingRequired?: boolean;
 }

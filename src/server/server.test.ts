@@ -82,6 +82,17 @@ describe("server routing", () => {
     expect(body.object).toBe("list");
     expect(body.data.length).toBeGreaterThan(0);
     expect(body.data[0].object).toBe("model");
+    const ids = body.data.map((model: { id: string }) => model.id);
+    expect(ids).toContain("glm-4.7-flash");
+    expect(ids).toContain("glm-5.3-flash");
+    const glm53Flash = body.data.find((model: { id: string }) => model.id === "glm-5.3-flash");
+    expect(glm53Flash.capabilities).toMatchObject({
+      context_window: 1_000_000,
+      max_output_tokens: 131_072,
+      reasoning: true,
+      input_modalities: ["text", "image", "video"],
+      thinking_required: true,
+    });
   });
 
   it("POST /v1/chat/completions forwards to upstream", async () => {
@@ -240,6 +251,10 @@ describe("web UI", () => {
     expect(resp.headers.get("content-type")).toContain("text/html");
     const body = await resp.text();
     expect(body).toContain("<!doctype html>");
+    expect(body).toContain("glm-4.7-flash");
+    expect(body).toContain("glm-5.3-flash");
+    expect(body).toContain("MODEL_CAPABILITIES");
+    expect(body).toContain("thinking_required");
   });
 
   it("non-GET /webui is not served as the SPA", async () => {

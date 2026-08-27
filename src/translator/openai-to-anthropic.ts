@@ -14,7 +14,7 @@ import type {
   AnthropicToolDefinition,
   AnthropicThinkingConfig,
 } from "./types.js";
-import { MODELS } from "../provider/models.js";
+import { isReasoningModel, isThinkingRequired } from "../provider/models.js";
 
 /** Default max_tokens if the OpenAI request doesn't specify one. */
 const DEFAULT_MAX_TOKENS = 4096;
@@ -56,6 +56,21 @@ export function translateRequestOpenAIToAnthropic(req: OpenAIChatRequest): Anthr
 
 function translateThinking(req: OpenAIChatRequest): AnthropicThinkingConfig | undefined {
   const explicit = req.thinking;
+
+  // GLM-5.3-Flash requires thinking; normalize attempts to disable or use an
+  // unsupported adaptive mode to the provider's accepted enabled shape.
+  if (isThinkingRequired(req.model)) {
+    const budget = explicit && typeof explicit === "object"
+      ? explicit.budget_tokens ?? explicit.budgetTokens
+      : undefined;
+    return {
+      type: "enabled",
+      ...(typeof budget === "number" && Number.isFinite(budget) && budget > 0
+        ? { budget_tokens: Math.floor(budget) }
+        : {}),
+    };
+  }
+
   if (explicit && typeof explicit === "object") {
     if (explicit.type === "disabled") return { type: "disabled" };
     if (explicit.type === "enabled" || explicit.type === "adaptive") {
@@ -74,10 +89,6 @@ function translateThinking(req: OpenAIChatRequest): AnthropicThinkingConfig | un
   if (req.reasoning_effort === "none") return { type: "disabled" };
   if (isReasoningModel(req.model)) return { type: "enabled" };
   return undefined;
-}
-
-function isReasoningModel(model: string): boolean {
-  return MODELS.some((m) => m.id === model && m.reasoning === true);
 }
 
 function translateToolChoice(
@@ -164,20 +175,7 @@ function toolResultContent(msg: OpenAIMessage): string | AnthropicContentBlock[]
     const joined = msg.content.map((c) => c.text ?? "").join("");
     return joined;
   }
-  return msg.content.map((c) => {
-    if (c.type === "text") return { type: "text" as const, text: c.text ?? "" };
-    if (c.type === "image_url" && c.image_url) {
-      const parsed = parseDataUrl(c.image_url.url);
-      if (parsed) {
-        return {
-          type: "image" as const,
-          source: { type: "base64" as const, media_type: parsed.mediaType, data: parsed.data },
-        };
-      }
-      return { type: "text" as const, text: c.image_url.url };
-    }
-    return { type: "text" as const, text: "" };
-  });
+  return msg.content.map(translateOpenAIContentPart);
 }
 
 function parseDataUrl(url: string): { mediaType: string; data: string } | undefined {
@@ -247,13 +245,27 @@ function extractText(msg: OpenAIMessage): string {
 function translateContentOpenAIToAnthropic(msg: OpenAIMessage): string | AnthropicContentBlock[] {
   if (typeof msg.content === "string") return msg.content;
   if (msg.content === null) return "";
-  if (Array.isArray(msg.content)) {
-    return msg.content.map((c) => {
-      if (c.type === "text") return { type: "text" as const, text: c.text ?? "" };
-      return { type: "text" as const, text: "" };
-    });
-  }
+  if (Array.isArray(msg.content)) return msg.content.map(translateOpenAIContentPart);
   return "";
+}
+
+/** Convert an OpenAI content part without silently dropping image input. */
+function translateOpenAIContentPart(part: { type: "text" | "image_url"; text?: string; image_url?: { url: string; detail?: string } }): AnthropicContentBlock {
+  if (part.type === "text") return { type: "text", text: part.text ?? "" };
+  const url = part.image_url?.url ?? "";
+  const parsed = parseDataUrl(url);
+  if (parsed) {
+    return {
+      type: "image",
+      source: { type: "base64", media_type: parsed.mediaType, data: parsed.data },
+    };
+  }
+  if (/^https?:\/\//i.test(url)) {
+    return { type: "image", source: { type: "url", url } };
+  }
+  // Preserve malformed/unsupported image references as text rather than
+  // turning them into an empty content block.
+  return { type: "text", text: url };
 }
 
 function translateToolOpenAIToAnthropic(tool: OpenAIToolDefinition): AnthropicToolDefinition {
