@@ -6,7 +6,7 @@
 import type { AuthManager } from "../auth/manager.js";
 import type { ProxyConfig } from "../config/types.js";
 import type { ClaimablePlan, ClaimOutcome } from "./types.js";
-import { createClaimClient } from "./client.js";
+import { createClaimClient, ClaimPreviewError } from "./client.js";
 import { ClaimScheduler } from "./scheduler.js";
 import { getCaptchaToken } from "../proxy/captcha.js";
 import { loadCredential } from "../auth/store.js";
@@ -78,7 +78,18 @@ export async function runClaimCli(config: ProxyConfig, mode: "list" | "now"): Pr
     platform: claimPlatform(),
   });
 
-  const plans = await client.getPreviews();
+  let plans: ClaimablePlan[];
+  try {
+    plans = await client.getPreviews();
+  } catch (err) {
+    if (err instanceof ClaimPreviewError && err.status === 404) {
+      console.log("No claimable plans: the campaign endpoint is not deployed yet (404).");
+      console.log("Weekend campaigns typically go live shortly before the window — keep the proxy");
+      console.log("serving with claim.enabled, or re-run this command later.");
+      return;
+    }
+    throw err;
+  }
   if (plans.length === 0) {
     console.log("No claimable plans right now.");
     return;
