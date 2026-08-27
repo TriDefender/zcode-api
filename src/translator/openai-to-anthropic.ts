@@ -166,15 +166,8 @@ function toolResultContent(msg: OpenAIMessage): string | AnthropicContentBlock[]
   }
   return msg.content.map((c) => {
     if (c.type === "text") return { type: "text" as const, text: c.text ?? "" };
-    if (c.type === "image_url" && c.image_url) {
-      const parsed = parseDataUrl(c.image_url.url);
-      if (parsed) {
-        return {
-          type: "image" as const,
-          source: { type: "base64" as const, media_type: parsed.mediaType, data: parsed.data },
-        };
-      }
-      return { type: "text" as const, text: c.image_url.url };
+    if (c.type === "image_url" && c.image_url?.url) {
+      return imageUrlToAnthropicBlock(c.image_url.url);
     }
     return { type: "text" as const, text: "" };
   });
@@ -184,6 +177,30 @@ function parseDataUrl(url: string): { mediaType: string; data: string } | undefi
   const m = /^data:([^;]+);base64,(.*)$/s.exec(url);
   if (!m) return undefined;
   return { mediaType: m[1], data: m[2] };
+}
+
+/**
+ * Map an OpenAI `image_url` string to an Anthropic image block.
+ *
+ * `data:` base64 URLs become inline base64 sources; http(s) URLs become
+ * url-source image blocks — the same two shapes the ZCode client emits
+ * (`image-data` → base64 source, `image-url` → url source). Anything else
+ * (non-base64 data URLs, exotic schemes) degrades to a text block carrying
+ * the URL verbatim rather than emitting a block the upstream would reject.
+ * OpenAI's `detail` hint has no Anthropic equivalent and is dropped.
+ */
+function imageUrlToAnthropicBlock(url: string): AnthropicContentBlock {
+  const parsed = parseDataUrl(url);
+  if (parsed) {
+    return {
+      type: "image",
+      source: { type: "base64", media_type: parsed.mediaType, data: parsed.data },
+    };
+  }
+  if (/^https?:\/\//i.test(url)) {
+    return { type: "image", source: { type: "url", url } };
+  }
+  return { type: "text", text: url };
 }
 
 /** Translate an Anthropic messages response into an OpenAI chat completion response. */
@@ -250,6 +267,9 @@ function translateContentOpenAIToAnthropic(msg: OpenAIMessage): string | Anthrop
   if (Array.isArray(msg.content)) {
     return msg.content.map((c) => {
       if (c.type === "text") return { type: "text" as const, text: c.text ?? "" };
+      if (c.type === "image_url" && c.image_url?.url) {
+        return imageUrlToAnthropicBlock(c.image_url.url);
+      }
       return { type: "text" as const, text: "" };
     });
   }

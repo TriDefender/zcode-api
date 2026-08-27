@@ -13,6 +13,8 @@ import {
 } from "./anthropic-to-openai.js";
 import type {
   OpenAIChatRequest,
+  OpenAIContentPart,
+  AnthropicContentBlock,
   AnthropicMessagesResponse,
   AnthropicMessagesRequest,
   OpenAIChatResponse,
@@ -322,7 +324,7 @@ describe("translateRequestOpenAIToAnthropic", () => {
     expect(inner[1].source).toEqual({ type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" });
   });
 
-  it("falls back to text block for non-data: image URLs in tool results (does not silently drop)", () => {
+  it("preserves non-data: image URLs in tool results as url-source image blocks", () => {
     const req: OpenAIChatRequest = {
       model: "glm-4.6",
       messages: [
@@ -346,9 +348,57 @@ describe("translateRequestOpenAIToAnthropic", () => {
     const inner = (result.messages[2].content as any[])[0].content;
     expect(Array.isArray(inner)).toBe(true);
     expect(inner).toHaveLength(2);
-    expect(inner[0].type).toBe("text");
-    expect(inner[1].type).toBe("text");
-    expect(inner[1].text).toContain("https://example.com/img.png");
+    expect(inner[0]).toEqual({ type: "text", text: "see:" });
+    expect(inner[1]).toEqual({ type: "image", source: { type: "url", url: "https://example.com/img.png" } });
+  });
+
+  it("preserves image_url parts in regular user messages (data: URL → base64 image block)", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "what is this?" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } },
+        ],
+      }],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const blocks = result.messages[0].content as AnthropicContentBlock[];
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0]).toEqual({ type: "text", text: "what is this?" });
+    expect(blocks[1]).toEqual({
+      type: "image",
+      source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" },
+    });
+  });
+
+  it("preserves http(s) image URLs in regular user messages as url-source image blocks", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image_url", image_url: { url: "https://example.com/cat.png", detail: "high" } },
+        ],
+      }],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const blocks = result.messages[0].content as AnthropicContentBlock[];
+    expect(blocks).toEqual([{ type: "image", source: { type: "url", url: "https://example.com/cat.png" } }]);
+  });
+
+  it("degrades non-http non-base64 image URLs to a text block (no invalid url-source block)", () => {
+    const req: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{
+        role: "user",
+        content: [{ type: "image_url", image_url: { url: "ftp://example.com/img.png" } }],
+      }],
+    };
+    const result = translateRequestOpenAIToAnthropic(req);
+    const blocks = result.messages[0].content as AnthropicContentBlock[];
+    expect(blocks).toEqual([{ type: "text", text: "ftp://example.com/img.png" }]);
   });
 
   it("preserves message order and alternation: user → assistant → user (tool_result) → assistant", () => {
@@ -519,6 +569,57 @@ describe("translateRequestAnthropicToOpenAI", () => {
     expect(result.messages[0].role).toBe("system");
     expect(result.messages[0].content).toBe("Be helpful");
     expect(result.max_tokens).toBe(1000);
+  });
+
+  it("preserves base64 image blocks as image_url data: URLs", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      max_tokens: 100,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "look" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: "iVBORw0KGgo=" } },
+        ],
+      }],
+    };
+    const result = translateRequestAnthropicToOpenAI(req);
+    const content = result.messages[0].content as OpenAIContentPart[];
+    expect(content).toEqual([
+      { type: "text", text: "look" },
+      { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } },
+    ]);
+  });
+
+  it("preserves url-source image blocks as image_url http URLs", () => {
+    const req: AnthropicMessagesRequest = {
+      model: "glm-4.6",
+      max_tokens: 100,
+      messages: [{
+        role: "user",
+        content: [{ type: "image", source: { type: "url", url: "https://example.com/img.png" } }],
+      }],
+    };
+    const result = translateRequestAnthropicToOpenAI(req);
+    const content = result.messages[0].content as OpenAIContentPart[];
+    expect(content).toEqual([{ type: "image_url", image_url: { url: "https://example.com/img.png" } }]);
+  });
+
+  it("round-trips images through both translators without loss", () => {
+    const original: OpenAIChatRequest = {
+      model: "glm-4.6",
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "see" },
+          { type: "image_url", image_url: { url: "data:image/jpeg;base64,QUJD" } },
+          { type: "image_url", image_url: { url: "https://example.com/a.png" } },
+        ],
+      }],
+    };
+    const anthropic = translateRequestOpenAIToAnthropic(original);
+    const back = translateRequestAnthropicToOpenAI(anthropic);
+    expect(back.messages[0].content).toEqual(original.messages[0].content);
   });
 
   it("converts stop_sequences to stop", () => {

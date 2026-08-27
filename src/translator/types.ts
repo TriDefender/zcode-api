@@ -164,10 +164,15 @@ export interface OpenAIModelList {
 // Anthropic types
 // ─────────────────────────────────────────────
 
+/** Anthropic image source: inline base64 payload or a remote URL. */
+export type AnthropicImageSource =
+  | { type: "base64"; media_type: string; data: string }
+  | { type: "url"; url: string };
+
 /** Anthropic content block types. */
 export type AnthropicContentBlock =
   | { type: "text"; text: string }
-  | { type: "image"; source: { type: "base64"; media_type: string; data: string } }
+  | { type: "image"; source: AnthropicImageSource }
   | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> }
   | { type: "tool_result"; tool_use_id: string; content: string | AnthropicContentBlock[]; is_error?: boolean }
   | { type: "thinking"; thinking: string; signature?: string };
