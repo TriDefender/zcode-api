@@ -4,7 +4,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
-import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig, AsyncConfig, EndpointRoutingConfig, ClientSigningConfig } from "./types.js";
+import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig, AsyncConfig, EndpointRoutingConfig, ClientSigningConfig, ClaimConfig } from "./types.js";
 
 /** Environment variable keys that override YAML values. */
 const ENV = {
@@ -19,6 +19,10 @@ const ENV = {
   ASYNC_ORIGIN: "ZCODE_ASYNC_ORIGIN",
   ASYNC_MAX_RETRIES: "ZCODE_ASYNC_MAX_RETRIES",
   ASYNC_MAX_WAIT_MS: "ZCODE_ASYNC_MAX_WAIT_MS",
+  CLAIM_ENABLED: "ZCODE_CLAIM_ENABLED",
+  CLAIM_AUTO: "ZCODE_CLAIM_AUTO",
+  CLAIM_ORIGIN: "ZCODE_CLAIM_ORIGIN",
+  CLAIM_POLL_INTERVAL_MS: "ZCODE_CLAIM_POLL_INTERVAL_MS",
   ENDPOINT_ROUTING_ENABLED: "ZCODE_ENDPOINT_ROUTING",
   CLIENT_SIGNING_ENABLED: "ZCODE_CLIENT_SIGNING",
 } as const;
@@ -34,7 +38,7 @@ const DEFAULTS = {
   ZAI_OPENAI_BASE: "https://api.z.ai/api/coding/paas/v4",
   BIGMODEL_ANTHROPIC_BASE: "https://open.bigmodel.cn/api/anthropic",
   BIGMODEL_OPENAI_BASE: "https://open.bigmodel.cn/api/coding/paas/v4",
-  APP_VERSION: "3.9.1",
+  APP_VERSION: "3.10.0",
   SOURCE_TITLE: "cli",
   REFERER_ORIGIN: "https://zcode.z.ai",
   CLIENT_IDENTITY_MODE: "observe" as const,
@@ -56,6 +60,12 @@ const DEFAULTS = {
   ASYNC_SETTLE_TIMEOUT_MS: 8000,
   ASYNC_CONTROL_TIMEOUT_MS: 15000,
   ASYNC_DEFAULT_MODEL: "",
+  CLAIM_ENABLED: false,
+  CLAIM_AUTO: true,
+  CLAIM_ORIGIN: "https://zcode.z.ai",
+  CLAIM_POLL_INTERVAL_MS: 300000,
+  CLAIM_COOLDOWN_MS: 600000,
+  CLAIM_PLAN_ID: "",
   ENDPOINT_ROUTING_ENABLED: true,
   ENDPOINT_ROUTING_ORIGIN: "https://zcode.z.ai",
   CLIENT_SIGNING_ENABLED: true,
@@ -125,6 +135,7 @@ export function loadConfig(path: string): ProxyConfig {
   const responses = resolveResponsesConfig(parsed?.responses);
   const mcp = resolveMcpConfig(parsed?.mcp);
   const asyncCfg = resolveAsyncConfig(parsed?.async);
+  const claimCfg = resolveClaimConfig(parsed?.claim);
   const endpointRouting = resolveEndpointRoutingConfig(parsed?.endpointRouting);
   const clientSigning = resolveClientSigningConfig(parsed?.clientSigning);
 
@@ -143,6 +154,7 @@ export function loadConfig(path: string): ProxyConfig {
     clientSigning,
     mcp,
     async: asyncCfg,
+    claim: claimCfg,
     logging: { level: logLevel },
   };
 
@@ -346,6 +358,26 @@ function resolveIdentity(inp: IdentityInputs): ProxyIdentity {
 }
 
 /** Cross-field validation after all fields are resolved. */
+function resolveClaimConfig(raw: unknown): ClaimConfig {
+  const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const enabledEnv = process.env[ENV.CLAIM_ENABLED];
+  const autoEnv = process.env[ENV.CLAIM_AUTO];
+  const originEnv = process.env[ENV.CLAIM_ORIGIN];
+  const pollIntervalEnv = process.env[ENV.CLAIM_POLL_INTERVAL_MS];
+
+  const origin = (originEnv ?? (typeof obj.origin === "string" ? obj.origin : DEFAULTS.CLAIM_ORIGIN)).trim() || DEFAULTS.CLAIM_ORIGIN;
+  validateOrigin(origin, "claim.origin");
+
+  return {
+    enabled: enabledEnv !== undefined ? resolveBool(enabledEnv, DEFAULTS.CLAIM_ENABLED) : resolveBool(obj.enabled, DEFAULTS.CLAIM_ENABLED),
+    auto: autoEnv !== undefined ? resolveBool(autoEnv, DEFAULTS.CLAIM_AUTO) : resolveBool(obj.auto, DEFAULTS.CLAIM_AUTO),
+    origin,
+    pollIntervalMs: resolvePositiveInt(pollIntervalEnv ?? obj.pollIntervalMs ?? obj.poll_interval_ms, DEFAULTS.CLAIM_POLL_INTERVAL_MS, "claim.pollIntervalMs"),
+    cooldownMs: resolvePositiveInt(obj.cooldownMs ?? obj.cooldown_ms, DEFAULTS.CLAIM_COOLDOWN_MS, "claim.cooldownMs"),
+    planId: typeof obj.planId === "string" ? obj.planId.trim() : DEFAULTS.CLAIM_PLAN_ID,
+  };
+}
+
 function validate(config: ProxyConfig): void {
   if (config.server.port < 1 || config.server.port > 65535) {
     throw new Error(`server.port ${config.server.port} is out of range (1-65535)`);

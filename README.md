@@ -120,6 +120,32 @@ curl http://localhost:8080/async/v1/messages \
   }'
 ```
 
+### Weekend-Plan Auto-Claim (manualClaimPlan)
+
+ZCode 3.10 exposes limited-quota trial plans (e.g. weekend packages) that are
+claimed first-come-first-served and activate at a future time. The proxy can
+grab them for you automatically — it polls the preview endpoint every 5 minutes
+and claims the highest-priority plan the moment the campaign endpoint goes live
+(a 404 before launch is the expected pre-campaign state). Requires
+`auth.mode: oauth` and `identity.appVersion >= 3.10.0`.
+
+```yaml
+claim:
+  enabled: true   # start the auto-claim scheduler while serving
+  # auto: true    # set false to only use the CLI command
+  # planId: ""    # claim a specific plan; empty = highest priority
+```
+
+One-shot usage:
+
+```bash
+zcode-proxy claim list   # show currently claimable plans
+zcode-proxy claim        # claim now (highest priority, or claim.planId)
+```
+
+Backoff: `already_claimed`/`quota_exhausted` wait for the server-provided next
+window; other failures use `claim.cooldownMs` (default 10 min).
+
 ## Usage Examples
 
 ### OpenAI Format
@@ -191,12 +217,13 @@ multi-session autosave (localStorage). Open Settings (⚙) to configure.
 | `provider` | `ZCODE_PROVIDER` | `zai` | Upstream provider |
 | `plan` | — | `coding-plan` | Plan tier: `coding-plan` (direct upstream) or `start-plan` (zcode.z.ai gateway + JWT + captcha) |
 | `providers.<p>.credential` | — | — | Per-provider credential override (else uses `auth.apiKey`) |
-| `identity.appVersion` | `ZCODE_APP_VERSION` | `3.9.1` | `User-Agent: ZCode/{version}` |
+| `identity.appVersion` | `ZCODE_APP_VERSION` | `3.10.0` | `User-Agent: ZCode/{version}` |
 | `identity.deviceMid` | `ZCODE_IDENTITY_DEVICE_MID` | auto-generated | Device identity (`X-Device-Mid`); UUIDv4 generated once at first `auth login` / config creation and reused forever |
 | `identity.sourceTitle` | `ZCODE_SOURCE_TITLE` | `cli` | `X-Title: Z Code@{title}` |
 | `identity.refererOrigin` | `ZCODE_REFERER_ORIGIN` | `https://zcode.z.ai` | `HTTP-Referer` URL |
 | `endpointRouting.enabled` | `ZCODE_ENDPOINT_ROUTING` | `true` | Server-controlled upstream URL remapping via `zcode.z.ai/api/v1/agent/configs` (mirrors ZCode's `ProviderEndpointRoutingService`; fail-open) |
 | `clientSigning.enabled` | `ZCODE_CLIENT_SIGNING` | `true` | Client request signing V4 (Ed25519 + proof-of-work, gate-driven; only activates when the server sets `codingPlanSignature.enable=true`; fail-open) |
+| `claim.enabled` | `ZCODE_CLAIM_ENABLED` | `false` | Weekend-plan auto-claim: poll `zcode.z.ai/api/v1/zcode-plan/billing/preview` and claim trial packages (oauth-only; see below) |
 | config file path | `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file to load on `serve` |
 
 Start-plan captcha tunables (env only): `ZCODE_CAPTCHA_RETRIES` (per-token solve retries), `CAPTCHA_POOL_MIN` / `CAPTCHA_POOL_MAX` (pre-solved token pool sizing).

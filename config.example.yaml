@@ -58,8 +58,8 @@ models:
 identity:
   # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
   # Must be printable ASCII; non-conforming values fall back to the default.
-  # Default: "3.9.1" (current ZCode release). Override to match your real client.
-  appVersion: "3.9.1"
+  # Default: "3.10.0" (current ZCode release). Override to match your real client.
+  appVersion: "3.10.0"
   # X-Title suffix → "Z Code@{sourceTitle}". Default "cli".
   sourceTitle: "cli"
   # HTTP-Referer URL. Default "https://zcode.z.ai".
@@ -127,6 +127,34 @@ async:
   controlTimeoutMs: 15000
   # Optional model override; empty uses the request's `model`.
   defaultModel: ""
+
+# Manual claim ("weekend plan") — mirrors the ZCode 3.10 desktop client's
+# manualClaimPlan feature. When enabled, the proxy periodically lists claimable
+# trial plans ({origin}/api/v1/zcode-plan/billing/preview) and auto-claims the
+# highest-priority one ({origin}/api/v1/zcode-plan/billing/claim) using the
+# OAuth JWT + an Aliyun captcha token (same solver as start-plan). Weekend
+# campaigns are quota-limited first-come-first-served; claimed plans activate
+# at the campaign's `starts_at` and land as Start-Plan quota.
+#
+# IMPORTANT: requires `auth.mode: oauth` (claim uses the JWT from login), and
+# identity.appVersion must be >= the campaign's minimum client version
+# (default 3.10.0) or the server rejects with `ineligible`.
+#
+# Env overrides: ZCODE_CLAIM_ENABLED, ZCODE_CLAIM_AUTO, ZCODE_CLAIM_ORIGIN,
+# ZCODE_CLAIM_POLL_INTERVAL_MS.
+claim:
+  enabled: false
+  # Auto-claim in the background while serving. `false` = CLI-only
+  # (`zcode-proxy claim` still works when `enabled: true`).
+  auto: true
+  origin: "https://zcode.z.ai"
+  # Preview poll cadence (5 min default).
+  pollIntervalMs: 300000
+  # Backoff after failed attempts (10 min default); quota_exhausted /
+  # already_claimed back off to the server-provided next window instead.
+  cooldownMs: 600000
+  # Optional: claim a specific plan_id. Empty = highest-priority preview.
+  planId: ""
 
 # Server-controlled upstream URL remapping (mirrors the ZCode client's
 # ProviderEndpointRoutingService). The proxy periodically fetches

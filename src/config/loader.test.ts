@@ -28,6 +28,10 @@ beforeEach(() => {
   delete process.env.ZCODE_REFERER_ORIGIN;
   delete process.env.ZCODE_ASYNC_ENABLED;
   delete process.env.ZCODE_ASYNC_ORIGIN;
+  delete process.env.ZCODE_CLAIM_ENABLED;
+  delete process.env.ZCODE_CLAIM_AUTO;
+  delete process.env.ZCODE_CLAIM_ORIGIN;
+  delete process.env.ZCODE_CLAIM_POLL_INTERVAL_MS;
 });
 
 afterEach(() => {
@@ -152,6 +156,14 @@ auth:
       controlTimeoutMs: 15000,
       defaultModel: "",
     });
+    expect(cfg.claim).toEqual({
+      enabled: false,
+      auto: true,
+      origin: "https://zcode.z.ai",
+      pollIntervalMs: 300000,
+      cooldownMs: 600000,
+      planId: "",
+    });
   });
 
   it("clientIdentity: YAML values override defaults", () => {
@@ -252,6 +264,45 @@ async:
     process.env.ZCODE_ASYNC_ENABLED = "true";
     const cfg = loadConfig(path);
     expect(cfg.async.enabled).toBe(true);
+  });
+
+  it("claim: YAML values override defaults", () => {
+    const path = writeYaml(`
+auth:
+  mode: apikey
+  apiKey: "abc"
+claim:
+  enabled: true
+  auto: false
+  origin: "https://zcode.z.ai"
+  pollIntervalMs: 60000
+  cooldownMs: 120000
+  planId: "weekend-special"
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.claim).toEqual({
+      enabled: true,
+      auto: false,
+      origin: "https://zcode.z.ai",
+      pollIntervalMs: 60000,
+      cooldownMs: 120000,
+      planId: "weekend-special",
+    });
+  });
+
+  it("claim: ZCODE_CLAIM_ENABLED / ZCODE_CLAIM_POLL_INTERVAL_MS env override", () => {
+    const path = writeYaml(`
+auth:
+  mode: apikey
+  apiKey: "abc"
+claim:
+  enabled: false
+`);
+    process.env.ZCODE_CLAIM_ENABLED = "true";
+    process.env.ZCODE_CLAIM_POLL_INTERVAL_MS = "45000";
+    const cfg = loadConfig(path);
+    expect(cfg.claim.enabled).toBe(true);
+    expect(cfg.claim.pollIntervalMs).toBe(45000);
   });
 
   it("async: maxWaitMs=0 is allowed (non-negative, not positive)", () => {
@@ -384,7 +435,7 @@ auth:
   apiKey: "abc"
 `);
     const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("3.9.1");
+    expect(cfg.identity.appVersion).toBe("3.10.0");
     expect(cfg.identity.sourceTitle).toBe("cli");
     expect(cfg.identity.refererOrigin).toBe("https://zcode.z.ai");
   });
@@ -427,6 +478,6 @@ identity:
   appVersion: "v3.3.3-中文"
 `);
     const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("3.9.1");
+    expect(cfg.identity.appVersion).toBe("3.10.0");
   });
 });

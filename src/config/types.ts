@@ -124,6 +124,33 @@ export interface AsyncConfig {
 }
 
 /**
+ * Manual claim ("weekend plan") — mirrors the ZCode 3.10 desktop client's
+ * `manualClaimPlan` feature: periodically list claimable trial plans
+ * (`GET {origin}/api/v1/zcode-plan/billing/preview`) and, when one is
+ * available, claim it (`POST {origin}/api/v1/zcode-plan/billing/claim`) with
+ * the OAuth JWT and an Aliyun captcha token. Claimed plans grant Start-Plan
+ * style quota with delayed activation (`effective_at` / `starts_at`).
+ *
+ * Requires `auth.mode: oauth` (claim uses `Authorization: Bearer ${jwt}`).
+ *
+ * @see _reverse/NOTEPAD.md "Manual Claim Plan" section for the protocol.
+ */
+export interface ClaimConfig {
+  /** Enable the claim subsystem (CLI `claim` command + auto scheduler). Default `false`. */
+  enabled: boolean;
+  /** Auto-claim in the background while the proxy is serving. Default `true` (effective when `enabled`). */
+  auto: boolean;
+  /** Base origin of the zcode-plan billing endpoints. Default `"https://zcode.z.ai"`. */
+  origin: string;
+  /** Preview poll interval in ms. Default `300000` (5 min). */
+  pollIntervalMs: number;
+  /** Backoff after a failed claim attempt in ms. Default `600000` (10 min). */
+  cooldownMs: number;
+  /** Optional `plan_id` to claim; empty string claims the highest-priority preview. Default `""`. */
+  planId: string;
+}
+
+/**
  * Provider endpoint routing — mirrors the ZCode client's
  * `ProviderEndpointRoutingService`: periodically fetch
  * `GET {configUrl}/api/v1/agent/configs` and rewrite matching upstream URLs
@@ -192,6 +219,8 @@ export interface ProxyConfig {
   mcp: McpConfig;
   /** Async (off-peak / idle-plan) bridge configuration. */
   async: AsyncConfig;
+  /** Manual claim ("weekend plan") configuration. */
+  claim: ClaimConfig;
   logging: {
     level: "debug" | "info" | "warn" | "error";
   };

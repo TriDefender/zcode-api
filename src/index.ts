@@ -64,6 +64,8 @@ function runCli(): void {
 
   if (cmd === "auth") {
     authCommand(args.slice(1));
+  } else if (cmd === "claim") {
+    void claimCommand(args.slice(1));
   } else if (cmd === "android") {
     runAndroid();
   } else if (cmd === "serve" || cmd.endsWith(".yaml") || cmd.endsWith(".yml")) {
@@ -95,6 +97,7 @@ Usage:
                                     Import API key from ~/.zcode/v2/config.json
   zcode-proxy auth logout           Clear stored credentials
   zcode-proxy auth status           Show current authentication state
+  zcode-proxy claim [list|now]      List / claim weekend-plan trial packages
   zcode-proxy version               Show version
   zcode-proxy help                  Show this help
 
@@ -144,6 +147,14 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
     import("./proxy/captcha.js")
       .then((m) => m.startCaptchaPool(config.identity.appVersion))
       .catch((err) => console.error(`[captcha] pool warmup failed: ${(err as Error).message}`));
+  }
+  if (config.claim.enabled && config.claim.auto && config.auth.mode === "oauth") {
+    import("./claim/runtime.js")
+      .then((m) => {
+        m.startAutoClaim(config, auth);
+        console.log(`  claim: auto ON (poll ${Math.round(config.claim.pollIntervalMs / 1000)}s)`);
+      })
+      .catch((err) => console.error(`[claim] scheduler failed to start: ${(err as Error).message}`));
   }
   console.log(`  provider: ${config.provider}`);
   console.log(`  plan: ${config.plan}`);
@@ -266,6 +277,15 @@ async function runAndroid(): Promise<void> {
 
   console.log("control listener ready; proxy stopped — use startProxy command to start");
 
+  if (config.claim.enabled && config.claim.auto && config.auth.mode === "oauth") {
+    import("./claim/runtime.js")
+      .then((m) => {
+        m.startAutoClaim(config, auth);
+        console.log(`[claim] auto ON (poll ${Math.round(config.claim.pollIntervalMs / 1000)}s; waits for login)`);
+      })
+      .catch((err) => console.error(`[claim] scheduler failed to start: ${(err as Error).message}`));
+  }
+
   const controlPort = Number(process.env.ZCODE_CONTROL_PORT ?? 0) || 0;
   const controlState: ControlState = {
     provider: config.provider,
@@ -336,6 +356,27 @@ function authCommand(args: string[]): void {
     authStatus();
   } else {
     console.error("Usage: zcode-proxy auth <login|logout|status>");
+    process.exit(1);
+  }
+}
+
+async function claimCommand(args: string[]): Promise<void> {
+  const sub = args[0] ?? "now";
+  if (sub !== "list" && sub !== "now") {
+    console.error("Usage: zcode-proxy claim [list|now]");
+    process.exit(1);
+  }
+  const path = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
+  if (!existsSync(path)) {
+    console.error(`Config file not found: ${path} (run serve once or create it).`);
+    process.exit(1);
+  }
+  const config = loadConfig(path);
+  try {
+    const { runClaimCli } = await import("./claim/runtime.js");
+    await runClaimCli(config, sub);
+  } catch (err) {
+    console.error(`claim failed: ${(err as Error).message}`);
     process.exit(1);
   }
 }

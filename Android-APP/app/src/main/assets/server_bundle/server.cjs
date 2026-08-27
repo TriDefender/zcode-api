@@ -109960,6 +109960,523 @@ var init_captcha = __esm({
   }
 });
 
+// src/auth/store.ts
+function getEncryptionKey() {
+  const hash = new Uint8Array(new ArrayBuffer(32));
+  const encoder2 = new TextEncoder();
+  const seed2 = process.env[ENV_SECRET] ?? `${(0, import_node_os4.homedir)()}-${process.platform}-${process.arch}`;
+  const seedBytes = encoder2.encode(seed2);
+  for (let i = 0; i < seedBytes.length; i++) {
+    hash[i % 32] ^= seedBytes[i];
+  }
+  return hash;
+}
+async function encrypt(plaintext) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    getEncryptionKey(),
+    { name: "AES-GCM" },
+    false,
+    ["encrypt", "decrypt"]
+  );
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoder2 = new TextEncoder();
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    encoder2.encode(plaintext)
+  );
+  const combined = new Uint8Array(iv.length + encrypted.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(encrypted), iv.length);
+  return Buffer.from(combined).toString("base64");
+}
+async function decrypt(ciphertext) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    getEncryptionKey(),
+    { name: "AES-GCM" },
+    false,
+    ["encrypt", "decrypt"]
+  );
+  const combined = Buffer.from(ciphertext, "base64");
+  const iv = combined.slice(0, 12);
+  const data2 = combined.slice(12);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv },
+    key,
+    data2
+  );
+  return new TextDecoder().decode(decrypted);
+}
+async function saveCredential(cred) {
+  (0, import_node_fs4.mkdirSync)((0, import_node_path2.dirname)(STORE_FILE), { recursive: true });
+  const json = JSON.stringify(cred);
+  const encrypted = await encrypt(json);
+  (0, import_node_fs4.writeFileSync)(STORE_FILE, JSON.stringify({ encrypted }), { mode: 384 });
+}
+async function loadCredential() {
+  if (!(0, import_node_fs4.existsSync)(STORE_FILE)) return null;
+  const raw = (0, import_node_fs4.readFileSync)(STORE_FILE, "utf-8");
+  const parsed = JSON.parse(raw);
+  if (!parsed.encrypted) return null;
+  try {
+    const json = await decrypt(parsed.encrypted);
+    return JSON.parse(json);
+  } catch (e) {
+    console.warn(`Ignoring corrupted or stale credentials at ${STORE_FILE}: ${e.message}`);
+    return null;
+  }
+}
+function clearCredential() {
+  if ((0, import_node_fs4.existsSync)(STORE_FILE)) {
+    (0, import_node_fs4.unlinkSync)(STORE_FILE);
+  }
+}
+function getStorePath() {
+  return STORE_FILE;
+}
+var import_node_fs4, import_node_path2, import_node_os4, STORE_DIR, STORE_FILE, ENV_SECRET;
+var init_store = __esm({
+  "src/auth/store.ts"() {
+    "use strict";
+    import_node_fs4 = require("node:fs");
+    import_node_path2 = require("node:path");
+    import_node_os4 = require("node:os");
+    STORE_DIR = (0, import_node_path2.join)((0, import_node_os4.homedir)(), ".zcode-proxy");
+    STORE_FILE = (0, import_node_path2.join)(STORE_DIR, "credentials.json");
+    ENV_SECRET = "ZCODE_PROXY_CREDENTIAL_SECRET";
+  }
+});
+
+// src/claim/types.ts
+function classifyClaimCode(code) {
+  switch (typeof code === "string" ? Number.parseInt(code, 10) : code) {
+    case 1001:
+      return "not_found";
+    case 1002:
+      return "unavailable";
+    case 1003:
+      return "already_claimed";
+    case 1004:
+      return "ineligible";
+    case 1005:
+      return "quota_exhausted";
+    case 3001:
+      return "invalid_request";
+    case 3007:
+      return "captcha";
+    case 401:
+      return "login_required";
+    default:
+      return "unknown";
+  }
+}
+var init_types = __esm({
+  "src/claim/types.ts"() {
+    "use strict";
+  }
+});
+
+// src/claim/client.ts
+function createClaimClient(opts) {
+  const origin = opts.origin.replace(/\/+$/, "");
+  const jwt = opts.jwt?.trim() || void 0;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+  function parseEntitlement(c) {
+    const entitlementId = c.entitlement_id?.trim() ?? "";
+    if (!entitlementId) return null;
+    const e = {
+      entitlementId,
+      showName: c.show_name?.trim() ?? "",
+      meter: c.meter?.trim() ?? "",
+      unitType: c.unit_type?.trim() ?? "",
+      capabilities: Array.isArray(c.capabilities) ? c.capabilities : [],
+      grantUnits: Number.isFinite(c.grant_units) ? c.grant_units : 0,
+      period: c.period?.trim() ?? "",
+      priority: Number.isFinite(c.priority) ? c.priority : 0
+    };
+    if (Number.isFinite(c.effective_at)) e.effectiveAt = c.effective_at;
+    return e;
+  }
+  function parsePlan(p) {
+    const planId = p.plan_id?.trim() ?? "";
+    if (!planId) return null;
+    const plan = {
+      planId,
+      name: p.name?.trim() || planId,
+      description: p.description?.trim() ?? "",
+      priority: Number.isFinite(p.priority) ? p.priority : 0,
+      entitlements: (p.entitlements ?? []).flatMap((c) => {
+        const e = parseEntitlement(c);
+        return e ? [e] : [];
+      })
+    };
+    if (Number.isFinite(p.starts_at)) plan.startsAt = p.starts_at;
+    if (Number.isFinite(p.ends_at)) plan.endsAt = p.ends_at;
+    return plan;
+  }
+  async function request(method2, path2, init) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    if (init.signal) {
+      if (init.signal.aborted) controller.abort();
+      else init.signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    let resp;
+    try {
+      resp = await fetchImpl(`${origin}${path2}`, {
+        method: method2,
+        headers: init.headers,
+        body: init.body === void 0 ? void 0 : JSON.stringify(init.body),
+        signal: controller.signal
+      });
+      const text = await resp.text();
+      let json;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object") json = parsed;
+      } catch {
+      }
+      return { status: resp.status, json, text };
+    } finally {
+      clearTimeout(timer);
+      init.signal?.removeEventListener("abort", onExternalAbort);
+    }
+  }
+  function unwrapError(json, status, text) {
+    const code = json?.code !== void 0 ? json.code : status >= 400 ? status : -1;
+    const rawMsg = json?.msg ?? json?.message;
+    const message = typeof rawMsg === "string" && rawMsg.trim() ? rawMsg.trim() : text.length > 0 && text.length < 200 ? text : `HTTP ${status}`;
+    return { code, message };
+  }
+  return {
+    async getPreviews(signal2) {
+      const url2 = `/api/v1/zcode-plan/billing/preview?app_version=${encodeURIComponent(opts.appVersion)}&platform=${encodeURIComponent(opts.platform)}`;
+      const headers2 = {};
+      if (jwt) headers2.authorization = `Bearer ${jwt}`;
+      const { status, json, text } = await request("GET", url2, { headers: headers2, signal: signal2 });
+      if (status < 200 || status >= 300 || json?.code !== void 0 && json.code !== 0 || json?.data === void 0) {
+        const { code, message } = unwrapError(json, status, text);
+        throw new ClaimPreviewError(`claim preview failed (${code}): ${message}`, status, code);
+      }
+      const data2 = json.data;
+      return (data2.plans ?? []).flatMap((p) => {
+        const plan = parsePlan(p);
+        return plan ? [plan] : [];
+      });
+    },
+    async claim(planId, captcha, signal2) {
+      if (!jwt) return { ok: false, planId, failureKind: "login_required", code: 401, message: "manual_claim_login_required" };
+      const headers2 = {
+        authorization: `Bearer ${jwt}`,
+        "content-type": "application/json",
+        "x-aliyun-captcha-verify-param": captcha.verifyParam,
+        "x-zcode-app-version": opts.appVersion,
+        "x-platform": opts.platform
+      };
+      if (captcha.region) headers2["x-aliyun-captcha-verify-region"] = captcha.region;
+      const { status, json, text } = await request("POST", "/api/v1/zcode-plan/billing/claim", { body: { plan_id: planId }, headers: headers2, signal: signal2 });
+      const data2 = json?.data;
+      const bizCode = json?.code !== void 0 ? json.code : void 0;
+      const plan = data2?.plan;
+      if (status >= 200 && status < 300 && bizCode === 0 && plan) {
+        const out = { ok: true, planId };
+        if (Number.isFinite(plan.starts_at)) out.startsAt = plan.starts_at;
+        if (Number.isFinite(plan.ends_at)) out.endsAt = plan.ends_at;
+        return out;
+      }
+      const { code, message } = unwrapError(json, status, text);
+      const failureEndsAt = Number.isFinite(plan?.ends_at) ? plan?.ends_at : void 0;
+      const httpDerived = status >= 400 && bizCode === void 0;
+      return {
+        ok: false,
+        planId,
+        failureKind: httpDerived ? status === 401 ? "login_required" : "http_error" : classifyClaimCode(code),
+        code,
+        message,
+        ...failureEndsAt !== void 0 ? { failureEndsAt } : {}
+      };
+    }
+  };
+}
+var DEFAULT_TIMEOUT_MS, ClaimPreviewError;
+var init_client = __esm({
+  "src/claim/client.ts"() {
+    "use strict";
+    init_types();
+    DEFAULT_TIMEOUT_MS = 15e3;
+    ClaimPreviewError = class extends Error {
+      status;
+      code;
+      constructor(message, status, code) {
+        super(message);
+        this.name = "ClaimPreviewError";
+        this.status = status;
+        this.code = code;
+      }
+    };
+  }
+});
+
+// src/claim/scheduler.ts
+var ClaimScheduler;
+var init_scheduler = __esm({
+  "src/claim/scheduler.ts"() {
+    "use strict";
+    init_client();
+    ClaimScheduler = class {
+      constructor(deps) {
+        this.deps = deps;
+        this.now = deps.now ?? Date.now;
+        this.log = deps.log ?? (() => {
+        });
+      }
+      deps;
+      stopped = false;
+      holdUntil = 0;
+      timer = null;
+      now;
+      log;
+      isStopped() {
+        return this.stopped;
+      }
+      start() {
+        if (this.stopped) return;
+        this.scheduleNext(0);
+      }
+      stop() {
+        this.stopped = true;
+        if (this.timer !== null) {
+          clearTimeout(this.timer);
+          this.timer = null;
+        }
+      }
+      /** One poll→claim cycle. Exposed for tests; `start()` drives it on a timer. */
+      async tick() {
+        if (this.stopped) return { action: "stopped" };
+        const nowMs = this.now();
+        if (nowMs < this.holdUntil) return { action: "skipped_hold" };
+        let jwt;
+        try {
+          jwt = await this.deps.getJwt();
+        } catch (err) {
+          return this.errorBackoff(`credential resolution failed: ${err.message}`);
+        }
+        if (!jwt) {
+          return this.errorBackoff("no JWT available (oauth login pending)");
+        }
+        const client = this.deps.createClient(jwt);
+        let plans;
+        try {
+          plans = await client.getPreviews();
+        } catch (err) {
+          if (err instanceof ClaimPreviewError && err.status === 404) {
+            this.holdUntil = nowMs + this.deps.config.pollIntervalMs;
+            return { action: "idle" };
+          }
+          return this.errorBackoff(`preview failed: ${err.message}`);
+        }
+        if (plans.length === 0) {
+          this.holdUntil = nowMs + this.deps.config.pollIntervalMs;
+          return { action: "idle" };
+        }
+        const target2 = this.pickPlan(plans);
+        if (!target2) {
+          this.holdUntil = nowMs + this.deps.config.pollIntervalMs;
+          return { action: "idle" };
+        }
+        let captcha;
+        try {
+          captcha = await this.deps.getCaptcha();
+        } catch (err) {
+          return this.errorBackoff(`captcha token failed: ${err.message}`);
+        }
+        let outcome;
+        try {
+          outcome = await client.claim(target2.planId, captcha);
+        } catch (err) {
+          return this.errorBackoff(`claim request failed: ${err.message}`);
+        }
+        if (outcome.ok) {
+          const endsAtMs = outcome.endsAt !== void 0 ? outcome.endsAt * 1e3 : void 0;
+          this.holdUntil = endsAtMs ?? nowMs + this.deps.config.pollIntervalMs;
+          this.log(`claim: claimed plan ${target2.planId}${outcome.startsAt !== void 0 ? ` (activates ${new Date(outcome.startsAt * 1e3).toISOString()})` : ""}`);
+          return { action: "claimed", planId: target2.planId, startsAt: outcome.startsAt, endsAt: outcome.endsAt };
+        }
+        const holdMs = this.holdForFailure(outcome.failureKind, outcome.failureEndsAt, nowMs);
+        this.holdUntil = nowMs + holdMs;
+        this.log(`claim: ${outcome.failureKind} (${outcome.code}) \u2014 ${outcome.message}; retry in ${Math.round(holdMs / 1e3)}s`);
+        if (outcome.failureKind === "login_required") {
+          this.stop();
+        }
+        return { action: "failed", outcome, holdMs };
+      }
+      pickPlan(plans) {
+        const wanted = this.deps.config.planId?.trim();
+        if (wanted) return plans.find((p) => p.planId === wanted) ?? null;
+        const sorted = [...plans].sort((a, b) => b.priority - a.priority);
+        return sorted[0] ?? null;
+      }
+      holdForFailure(kind2, failureEndsAtSec, nowMs) {
+        if ((kind2 === "already_claimed" || kind2 === "quota_exhausted") && Number.isFinite(failureEndsAtSec)) {
+          const untilMs = failureEndsAtSec * 1e3;
+          if (untilMs > nowMs) return Math.min(untilMs - nowMs, 24 * 60 * 60 * 1e3);
+        }
+        return this.deps.config.cooldownMs;
+      }
+      errorBackoff(message) {
+        const holdMs = this.deps.config.cooldownMs;
+        this.holdUntil = this.now() + holdMs;
+        this.log(`claim: ${message}; retry in ${Math.round(holdMs / 1e3)}s`);
+        return { action: "error", message, holdMs };
+      }
+      scheduleNext(delayMs) {
+        if (this.stopped) return;
+        this.timer = setTimeout(() => {
+          this.timer = null;
+          void this.tick().finally(() => this.scheduleNext(this.nextDelay()));
+        }, delayMs);
+      }
+      nextDelay() {
+        const remaining = this.holdUntil - this.now();
+        return remaining > 0 ? remaining : this.deps.config.pollIntervalMs;
+      }
+    };
+  }
+});
+
+// src/claim/runtime.ts
+var runtime_exports = {};
+__export(runtime_exports, {
+  claimPlatform: () => claimPlatform,
+  runClaimCli: () => runClaimCli,
+  startAutoClaim: () => startAutoClaim
+});
+function claimPlatform() {
+  return `${process.platform}-${process.arch}`;
+}
+function startAutoClaim(config, auth) {
+  const scheduler = new ClaimScheduler({
+    // AuthManager first (fresh), then the encrypted store — on Android the
+    // login can land in the store after boot while auth hasn't been reloaded.
+    getJwt: async () => {
+      try {
+        const cred = await auth.getCredential();
+        if (cred.jwt) return cred.jwt;
+      } catch {
+      }
+      const stored = await loadCredential().catch(() => null);
+      return stored?.jwt;
+    },
+    createClient: (jwt) => createClaimClient({
+      origin: config.claim.origin,
+      jwt,
+      appVersion: config.identity.appVersion,
+      platform: claimPlatform()
+    }),
+    getCaptcha: async () => {
+      const { verifyParam, region } = await getCaptchaToken(config.identity.appVersion);
+      return { verifyParam, region: region || void 0 };
+    },
+    config: {
+      planId: config.claim.planId || void 0,
+      pollIntervalMs: config.claim.pollIntervalMs,
+      cooldownMs: config.claim.cooldownMs
+    },
+    log: (message) => console.log(`[claim] ${message}`)
+  });
+  scheduler.start();
+  return scheduler;
+}
+async function runClaimCli(config, mode2) {
+  const cred = await loadCredential();
+  const jwt = cred?.jwt;
+  if (!jwt) {
+    console.error("Claim requires oauth mode (no JWT stored). Run: zcode-proxy auth login <zai|bigmodel>");
+    process.exit(1);
+  }
+  const client = createClaimClient({
+    origin: config.claim.origin,
+    jwt,
+    appVersion: config.identity.appVersion,
+    platform: claimPlatform()
+  });
+  const plans = await client.getPreviews();
+  if (plans.length === 0) {
+    console.log("No claimable plans right now.");
+    return;
+  }
+  printPlans(plans);
+  if (mode2 === "list") return;
+  const wanted = config.claim.planId.trim();
+  const target2 = wanted ? plans.find((p) => p.planId === wanted) : [...plans].sort((a, b) => b.priority - a.priority)[0];
+  if (!target2) {
+    console.error(`Configured claim.planId "${wanted}" not in the preview list.`);
+    process.exit(1);
+  }
+  if (target2.planId !== plans[0].planId) console.log(`Claiming configured plan: ${target2.planId}`);
+  const captcha = await getCaptchaToken(config.identity.appVersion);
+  const outcome = await client.claim(target2.planId, { verifyParam: captcha.verifyParam, region: captcha.region || void 0 });
+  printOutcome(outcome);
+  if (!outcome.ok) process.exit(1);
+}
+function printPlans(plans) {
+  console.log(`Claimable plans (${plans.length}):`);
+  for (const p of plans) {
+    const window2 = [fmtTime(p.startsAt), fmtTime(p.endsAt)].filter(Boolean).join(" \u2192 ");
+    console.log(`  - ${p.planId}  "${p.name}"  priority=${p.priority}${window2 ? `  ${window2}` : ""}`);
+    for (const e of p.entitlements) {
+      const quota = e.grantUnits > 0 ? ` ${e.grantUnits} ${e.unitType}` : "";
+      const activate = e.effectiveAt !== void 0 ? ` (activates ${new Date(e.effectiveAt * 1e3).toISOString()})` : "";
+      console.log(`      \xB7 ${e.showName || e.entitlementId}${quota}${activate}`);
+    }
+  }
+}
+function printOutcome(outcome) {
+  if (outcome.ok) {
+    console.log(`
+Claimed: ${outcome.planId}`);
+    if (outcome.startsAt !== void 0) console.log(`  activates: ${new Date(outcome.startsAt * 1e3).toISOString()}`);
+    if (outcome.endsAt !== void 0) console.log(`  expires:   ${new Date(outcome.endsAt * 1e3).toISOString()}`);
+    if (outcome.startsAt === void 0 && outcome.endsAt === void 0) console.log("  active immediately");
+    return;
+  }
+  const label2 = FAILURE_LABELS[outcome.failureKind] ?? FAILURE_LABELS.unknown;
+  console.error(`
+Claim failed: ${label2} (code ${String(outcome.code)}) \u2014 ${outcome.message}`);
+  if (outcome.failureEndsAt !== void 0) {
+    console.error(`  retry window opens: ${new Date(outcome.failureEndsAt * 1e3).toISOString()}`);
+  }
+}
+function fmtTime(sec) {
+  return sec === void 0 ? "" : new Date(sec * 1e3).toISOString();
+}
+var FAILURE_LABELS;
+var init_runtime = __esm({
+  "src/claim/runtime.ts"() {
+    "use strict";
+    init_client();
+    init_scheduler();
+    init_captcha();
+    init_store();
+    FAILURE_LABELS = {
+      not_found: "plan does not exist",
+      unavailable: "campaign ended or not claimable yet",
+      already_claimed: "already claimed on this account",
+      ineligible: "account or client version not eligible (needs appVersion >= campaign minimum)",
+      quota_exhausted: "daily claim quota exhausted",
+      invalid_request: "invalid request",
+      captcha: "captcha verification failed",
+      login_required: "not logged in (oauth mode required)",
+      http_error: "HTTP error",
+      unknown: "unknown failure"
+    };
+  }
+});
+
 // src/index.ts
 var index_exports = {};
 __export(index_exports, {
@@ -109985,6 +110502,10 @@ var ENV = {
   ASYNC_ORIGIN: "ZCODE_ASYNC_ORIGIN",
   ASYNC_MAX_RETRIES: "ZCODE_ASYNC_MAX_RETRIES",
   ASYNC_MAX_WAIT_MS: "ZCODE_ASYNC_MAX_WAIT_MS",
+  CLAIM_ENABLED: "ZCODE_CLAIM_ENABLED",
+  CLAIM_AUTO: "ZCODE_CLAIM_AUTO",
+  CLAIM_ORIGIN: "ZCODE_CLAIM_ORIGIN",
+  CLAIM_POLL_INTERVAL_MS: "ZCODE_CLAIM_POLL_INTERVAL_MS",
   ENDPOINT_ROUTING_ENABLED: "ZCODE_ENDPOINT_ROUTING",
   CLIENT_SIGNING_ENABLED: "ZCODE_CLIENT_SIGNING"
 };
@@ -109999,7 +110520,7 @@ var DEFAULTS = {
   ZAI_OPENAI_BASE: "https://api.z.ai/api/coding/paas/v4",
   BIGMODEL_ANTHROPIC_BASE: "https://open.bigmodel.cn/api/anthropic",
   BIGMODEL_OPENAI_BASE: "https://open.bigmodel.cn/api/coding/paas/v4",
-  APP_VERSION: "3.9.1",
+  APP_VERSION: "3.10.0",
   SOURCE_TITLE: "cli",
   REFERER_ORIGIN: "https://zcode.z.ai",
   CLIENT_IDENTITY_MODE: "observe",
@@ -110021,6 +110542,12 @@ var DEFAULTS = {
   ASYNC_SETTLE_TIMEOUT_MS: 8e3,
   ASYNC_CONTROL_TIMEOUT_MS: 15e3,
   ASYNC_DEFAULT_MODEL: "",
+  CLAIM_ENABLED: false,
+  CLAIM_AUTO: true,
+  CLAIM_ORIGIN: "https://zcode.z.ai",
+  CLAIM_POLL_INTERVAL_MS: 3e5,
+  CLAIM_COOLDOWN_MS: 6e5,
+  CLAIM_PLAN_ID: "",
   ENDPOINT_ROUTING_ENABLED: true,
   ENDPOINT_ROUTING_ORIGIN: "https://zcode.z.ai",
   CLIENT_SIGNING_ENABLED: true,
@@ -110067,6 +110594,7 @@ function loadConfig(path2) {
   const responses = resolveResponsesConfig(parsed?.responses);
   const mcp = resolveMcpConfig(parsed?.mcp);
   const asyncCfg = resolveAsyncConfig(parsed?.async);
+  const claimCfg = resolveClaimConfig(parsed?.claim);
   const endpointRouting = resolveEndpointRoutingConfig(parsed?.endpointRouting);
   const clientSigning = resolveClientSigningConfig(parsed?.clientSigning);
   const config = {
@@ -110084,6 +110612,7 @@ function loadConfig(path2) {
     clientSigning,
     mcp,
     async: asyncCfg,
+    claim: claimCfg,
     logging: { level: logLevel }
   };
   validate(config);
@@ -110242,6 +110771,23 @@ function resolveIdentity(inp) {
   const deviceMid = typeof inp.deviceMidYaml === "string" ? inp.deviceMidYaml.trim() : "";
   return { appVersion, sourceTitle, refererOrigin, ...deviceMid ? { deviceMid } : {} };
 }
+function resolveClaimConfig(raw) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  const enabledEnv = process.env[ENV.CLAIM_ENABLED];
+  const autoEnv = process.env[ENV.CLAIM_AUTO];
+  const originEnv = process.env[ENV.CLAIM_ORIGIN];
+  const pollIntervalEnv = process.env[ENV.CLAIM_POLL_INTERVAL_MS];
+  const origin = (originEnv ?? (typeof obj.origin === "string" ? obj.origin : DEFAULTS.CLAIM_ORIGIN)).trim() || DEFAULTS.CLAIM_ORIGIN;
+  validateOrigin(origin, "claim.origin");
+  return {
+    enabled: enabledEnv !== void 0 ? resolveBool(enabledEnv, DEFAULTS.CLAIM_ENABLED) : resolveBool(obj.enabled, DEFAULTS.CLAIM_ENABLED),
+    auto: autoEnv !== void 0 ? resolveBool(autoEnv, DEFAULTS.CLAIM_AUTO) : resolveBool(obj.auto, DEFAULTS.CLAIM_AUTO),
+    origin,
+    pollIntervalMs: resolvePositiveInt(pollIntervalEnv ?? obj.pollIntervalMs ?? obj.poll_interval_ms, DEFAULTS.CLAIM_POLL_INTERVAL_MS, "claim.pollIntervalMs"),
+    cooldownMs: resolvePositiveInt(obj.cooldownMs ?? obj.cooldown_ms, DEFAULTS.CLAIM_COOLDOWN_MS, "claim.cooldownMs"),
+    planId: typeof obj.planId === "string" ? obj.planId.trim() : DEFAULTS.CLAIM_PLAN_ID
+  };
+}
 function validate(config) {
   if (config.server.port < 1 || config.server.port > 65535) {
     throw new Error(`server.port ${config.server.port} is out of range (1-65535)`);
@@ -110321,8 +110867,8 @@ models:
 identity:
   # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
   # Must be printable ASCII; non-conforming values fall back to the default.
-  # Default: "3.9.1" (current ZCode release). Override to match your real client.
-  appVersion: "3.9.1"
+  # Default: "3.10.0" (current ZCode release). Override to match your real client.
+  appVersion: "3.10.0"
   # X-Title suffix \u2192 "Z Code@{sourceTitle}". Default "cli".
   sourceTitle: "cli"
   # HTTP-Referer URL. Default "https://zcode.z.ai".
@@ -113432,15 +113978,8 @@ function toolResultContent(msg) {
   }
   return msg.content.map((c) => {
     if (c.type === "text") return { type: "text", text: c.text ?? "" };
-    if (c.type === "image_url" && c.image_url) {
-      const parsed = parseDataUrl(c.image_url.url);
-      if (parsed) {
-        return {
-          type: "image",
-          source: { type: "base64", media_type: parsed.mediaType, data: parsed.data }
-        };
-      }
-      return { type: "text", text: c.image_url.url };
+    if (c.type === "image_url" && c.image_url?.url) {
+      return imageUrlToAnthropicBlock(c.image_url.url);
     }
     return { type: "text", text: "" };
   });
@@ -113449,6 +113988,19 @@ function parseDataUrl(url2) {
   const m = /^data:([^;]+);base64,(.*)$/s.exec(url2);
   if (!m) return void 0;
   return { mediaType: m[1], data: m[2] };
+}
+function imageUrlToAnthropicBlock(url2) {
+  const parsed = parseDataUrl(url2);
+  if (parsed) {
+    return {
+      type: "image",
+      source: { type: "base64", media_type: parsed.mediaType, data: parsed.data }
+    };
+  }
+  if (/^https?:\/\//i.test(url2)) {
+    return { type: "image", source: { type: "url", url: url2 } };
+  }
+  return { type: "text", text: url2 };
 }
 function translateResponseAnthropicToOpenAI(resp, model) {
   const textBlocks = resp.content.filter((b) => b.type === "text");
@@ -113500,6 +114052,9 @@ function translateContentOpenAIToAnthropic(msg) {
   if (Array.isArray(msg.content)) {
     return msg.content.map((c) => {
       if (c.type === "text") return { type: "text", text: c.text ?? "" };
+      if (c.type === "image_url" && c.image_url?.url) {
+        return imageUrlToAnthropicBlock(c.image_url.url);
+      }
       return { type: "text", text: "" };
     });
   }
@@ -113635,6 +114190,11 @@ function translateMessageAnthropicToOpenAI(m) {
           contentParts.push({
             type: "image_url",
             image_url: { url: `data:${block.source.media_type};base64,${block.source.data}` }
+          });
+        } else if (block.source.type === "url") {
+          contentParts.push({
+            type: "image_url",
+            image_url: { url: block.source.url }
           });
         }
         break;
@@ -117774,90 +118334,8 @@ var KeyResolver = class {
   }
 };
 
-// src/auth/store.ts
-var import_node_fs4 = require("node:fs");
-var import_node_path2 = require("node:path");
-var import_node_os4 = require("node:os");
-var STORE_DIR = (0, import_node_path2.join)((0, import_node_os4.homedir)(), ".zcode-proxy");
-var STORE_FILE = (0, import_node_path2.join)(STORE_DIR, "credentials.json");
-var ENV_SECRET = "ZCODE_PROXY_CREDENTIAL_SECRET";
-function getEncryptionKey() {
-  const hash = new Uint8Array(new ArrayBuffer(32));
-  const encoder2 = new TextEncoder();
-  const seed2 = process.env[ENV_SECRET] ?? `${(0, import_node_os4.homedir)()}-${process.platform}-${process.arch}`;
-  const seedBytes = encoder2.encode(seed2);
-  for (let i = 0; i < seedBytes.length; i++) {
-    hash[i % 32] ^= seedBytes[i];
-  }
-  return hash;
-}
-async function encrypt(plaintext) {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    getEncryptionKey(),
-    { name: "AES-GCM" },
-    false,
-    ["encrypt", "decrypt"]
-  );
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encoder2 = new TextEncoder();
-  const encrypted = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
-    key,
-    encoder2.encode(plaintext)
-  );
-  const combined = new Uint8Array(iv.length + encrypted.byteLength);
-  combined.set(iv, 0);
-  combined.set(new Uint8Array(encrypted), iv.length);
-  return Buffer.from(combined).toString("base64");
-}
-async function decrypt(ciphertext) {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    getEncryptionKey(),
-    { name: "AES-GCM" },
-    false,
-    ["encrypt", "decrypt"]
-  );
-  const combined = Buffer.from(ciphertext, "base64");
-  const iv = combined.slice(0, 12);
-  const data2 = combined.slice(12);
-  const decrypted = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv },
-    key,
-    data2
-  );
-  return new TextDecoder().decode(decrypted);
-}
-async function saveCredential(cred) {
-  (0, import_node_fs4.mkdirSync)((0, import_node_path2.dirname)(STORE_FILE), { recursive: true });
-  const json = JSON.stringify(cred);
-  const encrypted = await encrypt(json);
-  (0, import_node_fs4.writeFileSync)(STORE_FILE, JSON.stringify({ encrypted }), { mode: 384 });
-}
-async function loadCredential() {
-  if (!(0, import_node_fs4.existsSync)(STORE_FILE)) return null;
-  const raw = (0, import_node_fs4.readFileSync)(STORE_FILE, "utf-8");
-  const parsed = JSON.parse(raw);
-  if (!parsed.encrypted) return null;
-  try {
-    const json = await decrypt(parsed.encrypted);
-    return JSON.parse(json);
-  } catch (e) {
-    console.warn(`Ignoring corrupted or stale credentials at ${STORE_FILE}: ${e.message}`);
-    return null;
-  }
-}
-function clearCredential() {
-  if ((0, import_node_fs4.existsSync)(STORE_FILE)) {
-    (0, import_node_fs4.unlinkSync)(STORE_FILE);
-  }
-}
-function getStorePath() {
-  return STORE_FILE;
-}
-
 // src/android/control.ts
+init_store();
 var LogBuffer = class {
   lines = [];
   capacity;
@@ -118120,6 +118598,7 @@ var ResponseStore = class {
 };
 
 // src/index.ts
+init_store();
 var import_yaml2 = __toESM(require_dist(), 1);
 var import_node_child_process = require("node:child_process");
 var import_node_fs5 = require("node:fs");
@@ -118164,6 +118643,8 @@ function runCli() {
   const cmd = args[0] ?? "serve";
   if (cmd === "auth") {
     authCommand(args.slice(1));
+  } else if (cmd === "claim") {
+    void claimCommand(args.slice(1));
   } else if (cmd === "android") {
     runAndroid();
   } else if (cmd === "serve" || cmd.endsWith(".yaml") || cmd.endsWith(".yml")) {
@@ -118193,6 +118674,7 @@ Usage:
                                     Import API key from ~/.zcode/v2/config.json
   zcode-proxy auth logout           Clear stored credentials
   zcode-proxy auth status           Show current authentication state
+  zcode-proxy claim [list|now]      List / claim weekend-plan trial packages
   zcode-proxy version               Show version
   zcode-proxy help                  Show this help
 
@@ -118234,6 +118716,12 @@ async function serve(configPath, debug) {
   console.log(`zcode-proxy listening on ${url2}`);
   if (config.plan === "start-plan") {
     Promise.resolve().then(() => (init_captcha(), captcha_exports)).then((m) => m.startCaptchaPool(config.identity.appVersion)).catch((err) => console.error(`[captcha] pool warmup failed: ${err.message}`));
+  }
+  if (config.claim.enabled && config.claim.auto && config.auth.mode === "oauth") {
+    Promise.resolve().then(() => (init_runtime(), runtime_exports)).then((m) => {
+      m.startAutoClaim(config, auth);
+      console.log(`  claim: auto ON (poll ${Math.round(config.claim.pollIntervalMs / 1e3)}s)`);
+    }).catch((err) => console.error(`[claim] scheduler failed to start: ${err.message}`));
   }
   console.log(`  provider: ${config.provider}`);
   console.log(`  plan: ${config.plan}`);
@@ -118332,6 +118820,12 @@ async function runAndroid() {
     return { ok: true, provider: config.provider, plan: config.plan };
   }
   console.log("control listener ready; proxy stopped \u2014 use startProxy command to start");
+  if (config.claim.enabled && config.claim.auto && config.auth.mode === "oauth") {
+    Promise.resolve().then(() => (init_runtime(), runtime_exports)).then((m) => {
+      m.startAutoClaim(config, auth);
+      console.log(`[claim] auto ON (poll ${Math.round(config.claim.pollIntervalMs / 1e3)}s; waits for login)`);
+    }).catch((err) => console.error(`[claim] scheduler failed to start: ${err.message}`));
+  }
   const controlPort = Number(process.env.ZCODE_CONTROL_PORT ?? 0) || 0;
   const controlState = {
     provider: config.provider,
@@ -118395,6 +118889,26 @@ function authCommand(args) {
     authStatus();
   } else {
     console.error("Usage: zcode-proxy auth <login|logout|status>");
+    process.exit(1);
+  }
+}
+async function claimCommand(args) {
+  const sub = args[0] ?? "now";
+  if (sub !== "list" && sub !== "now") {
+    console.error("Usage: zcode-proxy claim [list|now]");
+    process.exit(1);
+  }
+  const path2 = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
+  if (!(0, import_node_fs5.existsSync)(path2)) {
+    console.error(`Config file not found: ${path2} (run serve once or create it).`);
+    process.exit(1);
+  }
+  const config = loadConfig(path2);
+  try {
+    const { runClaimCli: runClaimCli2 } = await Promise.resolve().then(() => (init_runtime(), runtime_exports));
+    await runClaimCli2(config, sub);
+  } catch (err) {
+    console.error(`claim failed: ${err.message}`);
     process.exit(1);
   }
 }

@@ -67,8 +67,8 @@ models:
 identity:
   # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
   # Must be printable ASCII; non-conforming values fall back to the default.
-  # Default: "3.9.1" (current ZCode release). Override to match your real client.
-  appVersion: "3.9.1"
+  # Default: "3.10.0" (current ZCode release). Override to match your real client.
+  appVersion: "3.10.0"
   # X-Title suffix → "Z Code@{sourceTitle}". Default "cli".
   sourceTitle: "cli"
   # HTTP-Referer URL. Default "https://zcode.z.ai".
