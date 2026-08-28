@@ -110404,7 +110404,18 @@ async function runClaimCli(config, mode2) {
     appVersion: config.identity.appVersion,
     platform: claimPlatform()
   });
-  const plans = await client.getPreviews();
+  let plans;
+  try {
+    plans = await client.getPreviews();
+  } catch (err) {
+    if (err instanceof ClaimPreviewError && err.status === 404) {
+      console.log("No claimable plans: the campaign endpoint is not deployed yet (404).");
+      console.log("Weekend campaigns typically go live shortly before the window \u2014 keep the proxy");
+      console.log("serving with claim.enabled, or re-run this command later.");
+      return;
+    }
+    throw err;
+  }
   if (plans.length === 0) {
     console.log("No claimable plans right now.");
     return;
@@ -118065,7 +118076,10 @@ var AuthCodeOAuthClient = class {
       this.server = (0, import_node_http2.createServer)((req, res) => {
         this.handleCallback(req, res, state2);
       });
-      this.server.on("error", reject);
+      this.server.on("error", (err) => {
+        this.server = null;
+        reject(err);
+      });
       this.server.listen(requestedPort, "127.0.0.1", () => {
         const addr = this.server.address();
         if (!addr || typeof addr !== "object") {
@@ -118171,10 +118185,12 @@ var AuthCodeOAuthClient = class {
   }
   async close() {
     if (this.server) {
-      await new Promise((resolve) => {
-        this.server.close(() => resolve());
-      });
+      const server = this.server;
       this.server = null;
+      server.closeAllConnections?.();
+      await new Promise((resolve) => {
+        server.close(() => resolve());
+      });
     }
   }
 };
@@ -118427,6 +118443,11 @@ async function dispatch(cmd, state2, ctx) {
       };
     }
     case "startOAuth": {
+      if (state2.activeOauth) {
+        await state2.activeOauth.client.close().catch(() => {
+        });
+        state2.activeOauth = void 0;
+      }
       const client = cmd.provider === "bigmodel" ? new BigmodelOAuthClient() : new ZaiOAuthClient();
       const started = await client.start();
       const callbackUrlObj = new URL(started.callbackUrl);
@@ -118437,21 +118458,18 @@ async function dispatch(cmd, state2, ctx) {
         state: started.state
       };
       client.waitForCallback().then(async (code) => {
-        try {
-          const { accessToken, userId, jwt } = await client.exchangeCode(code, started.callbackUrl, started.state);
-          const resolver = new KeyResolver();
-          const cred = await resolver.resolveCodingPlanCredential(accessToken, cmd.provider, userId);
-          if (jwt) cred.jwt = jwt;
-          await saveCredential(cred);
-          console.log(`OAuth completed for ${cmd.provider} via browser callback`);
-        } catch (err) {
-          console.error(`OAuth auto-complete failed: ${err.message}`);
-        } finally {
-          await client.close().catch(() => {
-          });
-          if (state2.activeOauth?.state === started.state) state2.activeOauth = void 0;
-        }
-      }).catch(() => {
+        const { accessToken, userId, jwt } = await client.exchangeCode(code, started.callbackUrl, started.state);
+        const resolver = new KeyResolver();
+        const cred = await resolver.resolveCodingPlanCredential(accessToken, cmd.provider, userId);
+        if (jwt) cred.jwt = jwt;
+        await saveCredential(cred);
+        console.log(`OAuth completed for ${cmd.provider} via browser callback`);
+      }).catch((err) => {
+        console.error(`OAuth flow ended without success: ${err?.message ?? String(err)}`);
+      }).finally(() => {
+        void client.close().catch(() => {
+        });
+        if (state2.activeOauth?.state === started.state) state2.activeOauth = void 0;
       });
       return {
         ok: true,
@@ -118646,7 +118664,11 @@ function runCli() {
   } else if (cmd === "claim") {
     void claimCommand(args.slice(1));
   } else if (cmd === "android") {
-    runAndroid();
+    runAndroid().catch((err) => {
+      process.stderr.write(`zcode-proxy: android entry failed: ${err.stack ?? String(err)}
+`);
+      process.exit(1);
+    });
   } else if (cmd === "serve" || cmd.endsWith(".yaml") || cmd.endsWith(".yml")) {
     const serveArgs = cmd === "serve" ? parseServeArgs(args.slice(1)) : parseServeArgs(args);
     serve(serveArgs.configPath, serveArgs.debug);

@@ -67,7 +67,13 @@ function runCli(): void {
   } else if (cmd === "claim") {
     void claimCommand(args.slice(1));
   } else if (cmd === "android") {
-    runAndroid();
+    // Explicit catch: an async startup failure (e.g. control port already
+    // bound by an orphaned process) must exit non-zero deterministically, not
+    // surface as an unhandled rejection.
+    runAndroid().catch((err: unknown) => {
+      process.stderr.write(`zcode-proxy: android entry failed: ${(err as Error).stack ?? String(err)}\n`);
+      process.exit(1);
+    });
   } else if (cmd === "serve" || cmd.endsWith(".yaml") || cmd.endsWith(".yml")) {
     const serveArgs = cmd === "serve"
       ? parseServeArgs(args.slice(1))

@@ -140,7 +140,10 @@ export abstract class AuthCodeOAuthClient {
         this.handleCallback(req, res, state);
       });
 
-      this.server.on("error", reject);
+      this.server.on("error", (err) => {
+        this.server = null;
+        reject(err);
+      });
       this.server.listen(requestedPort, "127.0.0.1", () => {
         const addr = this.server!.address();
         if (!addr || typeof addr !== "object") {
@@ -272,10 +275,14 @@ export abstract class AuthCodeOAuthClient {
 
   async close(): Promise<void> {
     if (this.server) {
-      await new Promise<void>((resolve) => {
-        this.server!.close(() => resolve());
-      });
+      const server = this.server;
       this.server = null;
+      // Drop idle keep-alive connections so the port is released immediately
+      // (plain close() would wait for them to time out).
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
     }
   }
 }

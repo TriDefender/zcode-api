@@ -246,6 +246,11 @@ async function dispatch(
     }
 
     case "startOAuth": {
+      // Tear down any previous in-flight flow so its callback port is released.
+      if (state.activeOauth) {
+        await state.activeOauth.client.close().catch(() => {});
+        state.activeOauth = undefined;
+      }
       const client = cmd.provider === "bigmodel" ? new BigmodelOAuthClient() : new ZaiOAuthClient();
       const started = await client.start();
       const callbackUrlObj = new URL(started.callbackUrl);
@@ -256,20 +261,22 @@ async function dispatch(
         state: started.state,
       };
       client.waitForCallback().then(async (code) => {
-        try {
-          const { accessToken, userId, jwt } = await client.exchangeCode(code, started.callbackUrl, started.state);
-          const resolver = new KeyResolver();
-          const cred: Credential = await resolver.resolveCodingPlanCredential(accessToken, cmd.provider, userId);
-          if (jwt) cred.jwt = jwt;
-          await saveCredential(cred);
-          console.log(`OAuth completed for ${cmd.provider} via browser callback`);
-        } catch (err) {
-          console.error(`OAuth auto-complete failed: ${(err as Error).message}`);
-        } finally {
-          await client.close().catch(() => {});
-          if (state.activeOauth?.state === started.state) state.activeOauth = undefined;
-        }
-      }).catch(() => {});
+        const { accessToken, userId, jwt } = await client.exchangeCode(code, started.callbackUrl, started.state);
+        const resolver = new KeyResolver();
+        const cred: Credential = await resolver.resolveCodingPlanCredential(accessToken, cmd.provider, userId);
+        if (jwt) cred.jwt = jwt;
+        await saveCredential(cred);
+        console.log(`OAuth completed for ${cmd.provider} via browser callback`);
+      }).catch((err: unknown) => {
+        // Timeouts / callback rejections are expected when the user abandons
+        // the browser; nothing to surface beyond the log buffer.
+        console.error(`OAuth flow ended without success: ${(err as Error)?.message ?? String(err)}`);
+      }).finally(() => {
+        // MUST run on rejection too — otherwise the callback port leaks until
+        // process death (Android: only a device reboot clears it).
+        void client.close().catch(() => {});
+        if (state.activeOauth?.state === started.state) state.activeOauth = undefined;
+      });
       return {
         ok: true,
         event: "oauthUrl",

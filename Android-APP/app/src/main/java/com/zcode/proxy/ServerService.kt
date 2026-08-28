@@ -9,6 +9,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -19,7 +20,8 @@ import kotlinx.coroutines.launch
 class ServerService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var nodeJob: Job? = null
-    private var nodeRunner: NodeRunner? = null
+
+    @Volatile private var nodeRunner: NodeRunner? = null
     private var controlClient: ControlClient? = null
 
     override fun onCreate() {
@@ -31,16 +33,29 @@ class ServerService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (nodeJob?.isActive != true) {
             nodeJob = scope.launch {
+                // Never spawn a second node while a healthy one is running:
+                // every Activity recreate (rotation, app reopen) re-enters here,
+                // and each superfluous spawn orphans the previous process.
+                if (nodeRunner?.isAlive() == true) return@launch
+                val runner = NodeRunner(applicationContext)
+                // Registered before start() so onDestroy()->stop() reaches it
+                // even while it is still spawning; NodeRunner self-destructs a
+                // process that spawns after stop() was requested.
+                nodeRunner = runner
                 try {
-                    val runner = NodeRunner(applicationContext)
                     runner.ensureAssetsExtracted()
                     runner.start()
-                    nodeRunner = runner
-                    controlClient = ControlClient(runner.controlPort).also { it.connect() }
-                    MainActivity.controlClient = controlClient
+                } catch (ce: CancellationException) {
+                    runner.stop()
+                    throw ce
                 } catch (t: Throwable) {
+                    runner.stop()
                     Log.e(TAG, "Node.js failed to start", t)
+                    startForeground("Node failed: ${t.message ?: t.javaClass.simpleName}")
+                    return@launch
                 }
+                controlClient = ControlClient(runner.controlPort).also { it.connect() }
+                MainActivity.controlClient = controlClient
             }
         }
         return START_STICKY
@@ -70,10 +85,10 @@ class ServerService : Service() {
         }
     }
 
-    private fun startForeground() {
+    private fun startForeground(contentText: String = "Running") {
         val notif = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("ZCode Proxy")
-            .setContentText("Running")
+            .setContentText(contentText)
             .setSmallIcon(android.R.drawable.stat_sys_download)
             .setOngoing(true)
             .build()

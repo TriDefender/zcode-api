@@ -88,19 +88,22 @@ responses:
     maxEntries: 1000
     ttlMs: 86400000
 
-# GLM MCP hosted-tool integration.
-# Endpoints are derived from `provider`:
+# GLM MCP hosted-tool integration — NOT currently wired into production.
+# These keys are parsed but have no effect: hosted tools (`mcp`,
+# `web_search_preview`, ...) are silently stripped by the Responses
+# translator, and the MCP client subsystem (src/mcp) is retained for a
+# future function-injection design. Endpoints are derived from `provider`:
 #   zai      → https://api.z.ai/api/mcp/{tool}/mcp
 #   bigmodel → https://open.bigmodel.cn/api/mcp/{tool}/mcp
 # Auth reuses the upstream credential (auth.apiKey / OAuth) — no extra key needed.
 mcp:
   enabled: true
-  # Intercept `web_search`/`web_search_preview` hosted tools via GLM's
-  # `web_search_prime` MCP. Adds a one-shot agentic loop on /v1/responses.
+  # (planned) Intercept `web_search`/`web_search_preview` hosted tools via
+  # GLM's `web_search_prime` MCP.
   webSearch: true
-  # Inject `webReader` as a function tool the model can call directly.
+  # (planned) Inject `webReader` as a function tool the model can call directly.
   webReader: false
-  # Inject the three `zread` tools (search_doc/get_repo_structure/read_file).
+  # (planned) Inject the three `zread` tools (search_doc/get_repo_structure/read_file).
   zread: false
 
 # Async (off-peak / "idle plan") bridge.

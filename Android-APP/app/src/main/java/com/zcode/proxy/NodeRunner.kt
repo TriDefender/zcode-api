@@ -13,9 +13,22 @@ import java.util.concurrent.ConcurrentLinkedDeque
 
 class NodeRunner(private val context: Context) {
 
-    val controlPort: Int = allocateOrReusePort()
-    val callbackPort: Int = controlPort + 1
+    // Two independently-allocated loopback ports. The callback port used to be
+    // controlPort + 1, which was never validated — a collision surfaced later
+    // as EADDRINUSE when the user tapped OAuth Login. The pair is persisted in
+    // `control-port` (one port per line; a legacy single-int file is migrated).
+    val controlPort: Int
+    val callbackPort: Int
     private var process: Process? = null
+
+    /** Set by stop(); a process that spawns after this self-destructs. */
+    @Volatile private var stopRequested = false
+
+    init {
+        val ports = allocateOrReusePorts()
+        controlPort = ports.first
+        callbackPort = ports.second
+    }
 
     private val logLines: ConcurrentLinkedDeque<String> = ConcurrentLinkedDeque()
 
@@ -84,6 +97,13 @@ class NodeRunner(private val context: Context) {
 
         val p = pb.start()
         process = p
+        // stop() may have run while the process was spawning (it saw
+        // process == null); destroy the newborn so it cannot become an orphan
+        // holding the control/callback ports past service destruction.
+        if (stopRequested) {
+            p.destroy()
+            throw IllegalStateException("NodeRunner.stop() called before start completed")
+        }
         Log.i(TAG, "Node.js started (controlPort=$controlPort)")
 
         Thread({
@@ -100,7 +120,10 @@ class NodeRunner(private val context: Context) {
 
     fun snapshotLogs(): List<String> = logLines.toList()
 
+    fun isAlive(): Boolean = process?.isAlive == true
+
     fun stop() {
+        stopRequested = true
         process?.destroy()
         process = null
     }
@@ -113,17 +136,34 @@ class NodeRunner(private val context: Context) {
         }
     }
 
-    private fun allocateOrReusePort(): Int {
+    private fun allocateOrReusePorts(): Pair<Int, Int> {
         val portFile = File(context.filesDir, "control-port")
         if (portFile.exists()) {
-            val cached = portFile.readText().trim().toIntOrNull()
-            if (cached != null && isPortFree(cached)) return cached
+            val parts = portFile.readText().trim().split(Regex("\\s+"))
+            val cached: Pair<Int, Int>? = when {
+                parts.size >= 2 ->
+                    parts[0].toIntOrNull()?.let { c ->
+                        parts[1].toIntOrNull()?.let { cb -> c to cb }
+                    }
+                // Legacy single-port file from older builds: callback was
+                // controlPort + 1 by convention.
+                parts.size == 1 -> parts[0].toIntOrNull()?.let { it to it + 1 }
+                else -> null
+            }
+            if (cached != null && isPortFree(cached.first) && isPortFree(cached.second)) {
+                if (parts.size < 2) portFile.writeText("${cached.first}\n${cached.second}\n")
+                return cached
+            }
         }
-        ServerSocket(0).use { s ->
-            val port = s.localPort
-            portFile.writeText(port.toString())
-            return port
-        }
+        val control = reservePort()
+        var callback = reservePort()
+        while (callback == control) callback = reservePort()
+        portFile.writeText("$control\n$callback\n")
+        return control to callback
+    }
+
+    private fun reservePort(): Int {
+        ServerSocket(0).use { s -> return s.localPort }
     }
 
     private fun isPortFree(port: Int): Boolean = try {

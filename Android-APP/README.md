@@ -9,9 +9,9 @@ a Kotlin shell; OAuth login happens in an embedded Android System WebView.
 - **Bun** (latest stable) — for building the TS bundle
 - **JDK 17** (Temurin recommended)
 - **Android SDK** with platform `android-35` and build-tools `35.0.0`
-- **GNU binutils** (`ar`, `tar`, `xz`) on PATH — needed by the `downloadNodeBinary`
-  Gradle task to extract the Termux Node.js `.deb` package
-- **readelf** (binutils) on PATH — for the DT_NEEDED closure check
+- **GNU binutils** (`ar`, `tar`, `xz`) on PATH — only needed if you re-extract
+  the Termux Node.js `.deb` packages via `scripts/extract-termux-deps.sh` (the
+  extracted `.so` files are committed in `app/src/main/jniLibs/arm64-v8a/`)
 
 ## Build steps
 
@@ -21,9 +21,11 @@ bun install
 
 # 2. Build the esbuild CJS bundle (outputs dist/android/server.cjs)
 bun run build:android-bundle
+cp dist/android/server.cjs Android-APP/app/src/main/assets/server_bundle/server.cjs
 
-# 3. Build the debug APK (downloads Node.js + deps, copies the bundle)
-cd android
+# 3. Build the debug APK (Node binary + dependency .so files are committed
+#    in jniLibs — nothing is downloaded at build time)
+cd Android-APP
 ./gradlew assembleDebug
 
 # 4. Sideload onto a device (USB debugging enabled)
@@ -34,11 +36,11 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 
 Requires GitHub Actions secrets `ANDROID_KEYSTORE_BASE64`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. The
-release CI workflow builds a signed APK automatically on tag push
-(`vX.Y.Z`). For local signed builds:
+release CI workflow (`.github/workflows/release.yml`, manual dispatch with a
+`vX.Y.Z` tag input) builds a signed APK. For local signed builds:
 
 ```bash
-cd android
+cd Android-APP
 ./gradlew assembleRelease \
   -PandroidSigning.keystoreFile=/path/to/release.keystore \
   -PandroidSigning.storePassword=... \
@@ -48,14 +50,15 @@ cd android
 
 ## Architecture
 
-- `android/` — Gradle project; everything Android-specific lives here.
-- `android/buildSrc/src/main/kotlin/DownloadNodeBinaryTask.kt` — pinned Node.js
-  binary + dependency `.so` extraction.
-- `android/app/src/main/java/com/zcode/proxy/` — Kotlin shell.
+- `Android-APP/` — Gradle project; everything Android-specific lives here.
+- `Android-APP/app/src/main/java/com/zcode/proxy/` — Kotlin shell.
 - `Android-APP/app/src/main/assets/server_bundle/` — committed in the repo
   (canonical); regenerate via `bun run build:android-bundle` + copy
   `dist/android/server.cjs` into it (see BUILD in `Android-APP/AGENTS.md`).
-- `android/gradle/node-binary.lock.json` — pinned URLs and SHA256s.
+- `Android-APP/app/src/main/jniLibs/arm64-v8a/` — committed Node.js binary
+  (`libnode.so`) + Termux dependency `.so` files, extracted once via
+  `scripts/extract-termux-deps.sh`.
+- `Android-APP/gradle/node-binary.lock.json` — pinned URLs and SHA256s.
 
 ## OAuth flow
 
@@ -74,9 +77,9 @@ cd android
 ## Known limitations (v1)
 
 - **Start-plan tier untested on Android** — the in-process happy-dom captcha
-  solver is now bundled into `server.cjs` (the jsdom exclusion is gone), but
-  the tier has not been validated on-device. Coding-plan (direct upstream
-  API key) is the supported tier on Android v1.
+  solver is bundled into `server.cjs` (jsdom was removed from the project
+  entirely), but the tier has not been validated on-device. Coding-plan
+  (direct upstream API key) is the supported tier on Android v1.
 - **Not Play Store-distributed** — APK is sideload-only. Play Store rejects apps
   that launch external binaries from `jniLibs/`.
 - **arm64-v8a only** — no x86 / armeabi-v7a support. Covers 99%+ of modern

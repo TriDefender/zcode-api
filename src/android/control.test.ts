@@ -1,4 +1,5 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, afterEach } from "bun:test";
+import net from "node:net";
 import { Readable } from "node:stream";
 import {
   handleControlRequestForTest,
@@ -242,6 +243,73 @@ describe("android control listener — getLogs", () => {
     if (result.body.ok && "lines" in result.body) {
       expect(result.body.lines).toEqual([]);
     }
+  });
+});
+
+describe("android control startOAuth callback-port lifecycle", () => {
+  /** Find a free loopback TCP port (bind port 0, read back, close). */
+  async function freePort(): Promise<number> {
+    
+    return new Promise((resolve, reject) => {
+      const srv = net.createServer();
+      srv.on("error", reject);
+      srv.listen(0, "127.0.0.1", () => {
+        const { port } = srv.address() as net.AddressInfo;
+        srv.close(() => resolve(port));
+      });
+    });
+  }
+
+  /** True when nothing is listening on `port` anymore. */
+  async function portIsFree(port: number): Promise<boolean> {
+    
+    return new Promise((resolve) => {
+      const srv = net.createServer();
+      srv.once("error", () => resolve(false));
+      srv.listen(port, "127.0.0.1", () => srv.close(() => resolve(true)));
+    });
+  }
+
+  afterEach(() => {
+    delete process.env.ZCODE_OAUTH_CALLBACK_PORT;
+  });
+
+  it("releases the callback port when the flow is rejected (abandoned login)", async () => {
+    const port = await freePort();
+    process.env.ZCODE_OAUTH_CALLBACK_PORT = String(port);
+    const state: ControlState = { provider: "zai", plan: "coding-plan", proxyPort: 0 };
+
+    const started = await post({ cmd: "startOAuth", provider: "zai" }, state);
+    expect(started.body.ok).toBe(true);
+    expect(state.activeOauth).toBeDefined();
+
+    // Simulate the user abandoning the flow: a callback with a bad state
+    // rejects every waitForCallback waiter.
+    const resp = await fetch(`http://127.0.0.1:${port}/oauth/callback/zai?state=bad&code=x`);
+    expect(resp.status).toBe(400);
+    await Bun.sleep(50);
+
+    expect(state.activeOauth).toBeUndefined();
+    expect(await portIsFree(port)).toBe(true);
+  });
+
+  it("a second startOAuth tears down the previous flow instead of hitting EADDRINUSE", async () => {
+    const port = await freePort();
+    process.env.ZCODE_OAUTH_CALLBACK_PORT = String(port);
+    const state: ControlState = { provider: "zai", plan: "coding-plan", proxyPort: 0 };
+
+    const first = await post({ cmd: "startOAuth", provider: "zai" }, state);
+    expect(first.body.ok).toBe(true);
+
+    // Previously this threw EADDRINUSE (500) because the first flow still
+    // held the fixed callback port.
+    const second = await post({ cmd: "startOAuth", provider: "zai" }, state);
+    expect(second.body.ok).toBe(true);
+
+    // Clean up the flow started by the second command.
+    state.activeOauth?.client.close().catch(() => {});
+    state.activeOauth = undefined;
+    await Bun.sleep(50);
   });
 });
 
