@@ -7369,6 +7369,80 @@ var require_dist = __commonJS({
   }
 });
 
+// src/proxy/identity.ts
+function resolveAppVersion(raw) {
+  if (typeof raw !== "string") return void 0;
+  const v = raw.trim();
+  return v.length > 0 && ASCII_PRINTABLE2.test(v) ? v : void 0;
+}
+function normalizePrintableHeaderValue(raw) {
+  if (typeof raw !== "string") return void 0;
+  const v = raw.trim();
+  return v.length > 0 && ASCII_PRINTABLE2.test(v) ? v : void 0;
+}
+function normalizeOsCategory(platform) {
+  switch (platform) {
+    case "darwin":
+      return "macos";
+    case "win32":
+      return "windows";
+    default:
+      return "linux";
+  }
+}
+function resolveClientLanguage() {
+  const override = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_CLIENT_LANGUAGE);
+  if (override) return override;
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale || void 0;
+  } catch {
+    return void 0;
+  }
+}
+function resolveClientTimezone() {
+  const override = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_CLIENT_TIMEZONE);
+  if (override) return override;
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || void 0;
+  } catch {
+    return void 0;
+  }
+}
+function buildIdentityHeaders(id2) {
+  const n = resolveAppVersion(id2.appVersion);
+  const platform = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform);
+  const arch = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH ?? import_node_os.default.arch());
+  const release = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE ?? import_node_os.default.release());
+  const platformForCategory = process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform;
+  const releaseChannel = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE_CHANNEL) ?? (process.env.ZCODE_ENV?.trim().toLowerCase() === "test" ? "test" : "production");
+  const clientLanguage = resolveClientLanguage();
+  const clientTimezone = resolveClientTimezone();
+  const deviceMid = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_DEVICE_MID) ?? normalizePrintableHeaderValue(id2.deviceMid);
+  const headers2 = {
+    "HTTP-Referer": id2.refererOrigin,
+    "User-Agent": `ZCode/${n ?? "unknown"}`,
+    ...n ? { "X-ZCode-App-Version": n } : {},
+    "X-Title": `Z Code@${id2.sourceTitle}`,
+    "X-ZCode-Agent": "glm",
+    ...platform && arch ? { "X-Platform": `${platform}-${arch}` } : {},
+    ...releaseChannel ? { "X-Release-Channel": releaseChannel } : {},
+    ...clientLanguage ? { "X-Client-Language": clientLanguage } : {},
+    ...clientTimezone ? { "X-Client-Timezone": clientTimezone } : {},
+    ...platform ? { "X-Os-Category": normalizeOsCategory(platformForCategory) } : {},
+    ...release ? { "X-Os-Version": release } : {},
+    ...deviceMid ? { "X-Device-Mid": deviceMid } : {}
+  };
+  return headers2;
+}
+var import_node_os, ASCII_PRINTABLE2;
+var init_identity = __esm({
+  "src/proxy/identity.ts"() {
+    "use strict";
+    import_node_os = __toESM(require("node:os"), 1);
+    ASCII_PRINTABLE2 = /^[\x20-\x7e]+$/;
+  }
+});
+
 // node_modules/happy-dom/lib/PropertySymbol.js
 var PropertySymbol_exports = {};
 __export(PropertySymbol_exports, {
@@ -110084,6 +110158,9 @@ function createClaimClient(opts) {
   const jwt = opts.jwt?.trim() || void 0;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+  const identityHeaders = opts.identity ? Object.fromEntries(
+    Object.entries(buildIdentityHeaders(opts.identity)).filter(([name2]) => name2 !== "X-ZCode-Agent")
+  ) : { "X-ZCode-App-Version": opts.appVersion, "X-Platform": opts.platform };
   function parseEntitlement(c) {
     const entitlementId = c.entitlement_id?.trim() ?? "";
     if (!entitlementId) return null;
@@ -110155,7 +110232,7 @@ function createClaimClient(opts) {
   return {
     async getPreviews(signal2) {
       const url2 = `/api/v1/zcode-plan/billing/preview?app_version=${encodeURIComponent(opts.appVersion)}&platform=${encodeURIComponent(opts.platform)}`;
-      const headers2 = {};
+      const headers2 = { ...identityHeaders };
       if (jwt) headers2.authorization = `Bearer ${jwt}`;
       const { status, json, text } = await request("GET", url2, { headers: headers2, signal: signal2 });
       if (status < 200 || status >= 300 || json?.code !== void 0 && json.code !== 0 || json?.data === void 0) {
@@ -110171,13 +110248,12 @@ function createClaimClient(opts) {
     async claim(planId, captcha, signal2) {
       if (!jwt) return { ok: false, planId, failureKind: "login_required", code: 401, message: "manual_claim_login_required" };
       const headers2 = {
+        ...identityHeaders,
         authorization: `Bearer ${jwt}`,
         "content-type": "application/json",
-        "x-aliyun-captcha-verify-param": captcha.verifyParam,
-        "x-zcode-app-version": opts.appVersion,
-        "x-platform": opts.platform
+        "X-Aliyun-Captcha-Verify-Param": captcha.verifyParam
       };
-      if (captcha.region) headers2["x-aliyun-captcha-verify-region"] = captcha.region;
+      if (captcha.region) headers2["X-Aliyun-Captcha-Verify-Region"] = captcha.region;
       const { status, json, text } = await request("POST", "/api/v1/zcode-plan/billing/claim", { body: { plan_id: planId }, headers: headers2, signal: signal2 });
       const data2 = json?.data;
       const bizCode = json?.code !== void 0 ? json.code : void 0;
@@ -110207,6 +110283,7 @@ var init_client = __esm({
   "src/claim/client.ts"() {
     "use strict";
     init_types();
+    init_identity();
     DEFAULT_TIMEOUT_MS = 15e3;
     ClaimPreviewError = class extends Error {
       status;
@@ -110375,7 +110452,8 @@ function startAutoClaim(config, auth) {
       origin: config.claim.origin,
       jwt,
       appVersion: config.identity.appVersion,
-      platform: claimPlatform()
+      platform: claimPlatform(),
+      identity: config.identity
     }),
     getCaptcha: async () => {
       const { verifyParam, region } = await getCaptchaToken(config.identity.appVersion);
@@ -110402,7 +110480,8 @@ async function runClaimCli(config, mode2) {
     origin: config.claim.origin,
     jwt,
     appVersion: config.identity.appVersion,
-    platform: claimPlatform()
+    platform: claimPlatform(),
+    identity: config.identity
   });
   let plans;
   try {
@@ -112439,73 +112518,8 @@ function credentialString(cred) {
   return cred.apiKey;
 }
 
-// src/proxy/identity.ts
-var import_node_os = __toESM(require("node:os"), 1);
-var ASCII_PRINTABLE2 = /^[\x20-\x7e]+$/;
-function resolveAppVersion(raw) {
-  if (typeof raw !== "string") return void 0;
-  const v = raw.trim();
-  return v.length > 0 && ASCII_PRINTABLE2.test(v) ? v : void 0;
-}
-function normalizePrintableHeaderValue(raw) {
-  if (typeof raw !== "string") return void 0;
-  const v = raw.trim();
-  return v.length > 0 && ASCII_PRINTABLE2.test(v) ? v : void 0;
-}
-function normalizeOsCategory(platform) {
-  switch (platform) {
-    case "darwin":
-      return "macos";
-    case "win32":
-      return "windows";
-    default:
-      return "linux";
-  }
-}
-function resolveClientLanguage() {
-  const override = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_CLIENT_LANGUAGE);
-  if (override) return override;
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().locale || void 0;
-  } catch {
-    return void 0;
-  }
-}
-function resolveClientTimezone() {
-  const override = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_CLIENT_TIMEZONE);
-  if (override) return override;
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || void 0;
-  } catch {
-    return void 0;
-  }
-}
-function buildIdentityHeaders(id2) {
-  const n = resolveAppVersion(id2.appVersion);
-  const platform = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform);
-  const arch = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH ?? import_node_os.default.arch());
-  const release = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE ?? import_node_os.default.release());
-  const platformForCategory = process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform;
-  const releaseChannel = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE_CHANNEL) ?? (process.env.ZCODE_ENV?.trim().toLowerCase() === "test" ? "test" : "production");
-  const clientLanguage = resolveClientLanguage();
-  const clientTimezone = resolveClientTimezone();
-  const deviceMid = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_DEVICE_MID) ?? normalizePrintableHeaderValue(id2.deviceMid);
-  const headers2 = {
-    "HTTP-Referer": id2.refererOrigin,
-    "User-Agent": `ZCode/${n ?? "unknown"}`,
-    ...n ? { "X-ZCode-App-Version": n } : {},
-    "X-Title": `Z Code@${id2.sourceTitle}`,
-    "X-ZCode-Agent": "glm",
-    ...platform && arch ? { "X-Platform": `${platform}-${arch}` } : {},
-    ...releaseChannel ? { "X-Release-Channel": releaseChannel } : {},
-    ...clientLanguage ? { "X-Client-Language": clientLanguage } : {},
-    ...clientTimezone ? { "X-Client-Timezone": clientTimezone } : {},
-    ...platform ? { "X-Os-Category": normalizeOsCategory(platformForCategory) } : {},
-    ...release ? { "X-Os-Version": release } : {},
-    ...deviceMid ? { "X-Device-Mid": deviceMid } : {}
-  };
-  return headers2;
-}
+// src/proxy/upstream.ts
+init_identity();
 
 // src/proxy/trace-headers.ts
 var QUERY_PREFIX = "query_";
@@ -112860,6 +112874,7 @@ function buildUpstreamRequest(clientReq, format, provider, cred, body2, identity
 }
 
 // src/proxy/endpoint-routing.ts
+init_identity();
 var DEFAULT_ORIGIN = "https://zcode.z.ai";
 var CONFIG_PATH = "/api/v1/agent/configs";
 var SUCCESS_TTL_MS = 3e5;
@@ -113014,6 +113029,7 @@ ${identityCacheKey(config.identity)}`;
 }
 
 // src/proxy/client-signing.ts
+init_identity();
 var DEFAULT_ORIGIN2 = "https://zcode.z.ai";
 var GATE_PATH = "/api/v1/agent/configs";
 var HANDSHAKE_PATH = "/api/paas/c1f3a7e2/v2/client";
@@ -117063,6 +117079,7 @@ function keepaliveFrame(text = "keepalive") {
 }
 
 // src/async/bridge.ts
+init_identity();
 var EXPIRED_MARKER = "off-peak-ticket-expired";
 function runAsyncBridge(opts) {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
@@ -118925,6 +118942,7 @@ async function claimCommand(args) {
     console.error(`Config file not found: ${path2} (run serve once or create it).`);
     process.exit(1);
   }
+  ensureDeviceMidInConfig(path2);
   const config = loadConfig(path2);
   try {
     const { runClaimCli: runClaimCli2 } = await Promise.resolve().then(() => (init_runtime(), runtime_exports));
