@@ -106,6 +106,41 @@ describe("createClaimClient — getPreviews", () => {
   });
 });
 
+describe("createClaimClient — identity header set", () => {
+  it("preview and claim carry X-Device-Mid (server-required) and full identity minus X-ZCode-Agent", async () => {
+    const seen: Array<{ path: string; deviceMid: string | null; agent: string | null; version: string | null }> = [];
+    const fetchImpl = makeMockFetch((req) => {
+      seen.push({
+        path: new URL(req.url).pathname,
+        deviceMid: req.headers.get("x-device-mid"),
+        agent: req.headers.get("x-zcode-agent"),
+        version: req.headers.get("x-zcode-app-version"),
+      });
+      return Promise.resolve(jsonResp(PREVIEW_BODY));
+    });
+    const client = createClaimClient({
+      origin: "https://zcode.z.ai",
+      jwt: "jwt-1",
+      appVersion: "3.10.0",
+      platform: "win32-x64",
+      identity: { appVersion: "3.10.0", refererOrigin: "https://zcode.z.ai", sourceTitle: "cli", deviceMid: "d4ad5b5e-1234-4abc-9def-aabbccddeeff" },
+      fetchImpl,
+    });
+
+    await client.getPreviews();
+    await client.claim("weekend-free-1024", { verifyParam: "t" });
+
+    expect(seen).toHaveLength(2);
+    for (const r of seen) {
+      expect(r.deviceMid).toBe("d4ad5b5e-1234-4abc-9def-aabbccddeeff");
+      expect(r.agent).toBeNull();
+      expect(r.version).toBe("3.10.0");
+    }
+    expect(seen[0].path).toBe("/api/v1/zcode-plan/billing/preview");
+    expect(seen[1].path).toBe("/api/v1/zcode-plan/billing/claim");
+  });
+});
+
 describe("createClaimClient — claim", () => {
   function capture(req: Request) {
     return {
