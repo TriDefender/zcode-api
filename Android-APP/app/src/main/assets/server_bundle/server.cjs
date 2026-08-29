@@ -109124,7 +109124,13 @@ var init_captcha_happy = __esm({
       "TextDecoder",
       "requestAnimationFrame",
       "cancelAnimationFrame",
-      "print",
+      // NOTE: `print` was removed from this list (2026-08-29). The polyfill
+      // defines a harmless no-op on the window, but the alias pass skipped it,
+      // so under Bun (guest scripts run in the HOST realm) the Aliyun pe risk
+      // engine hit a bare `print` reference → ReferenceError → broken
+      // fingerprint chain → degraded solve success rate (711 WINDOW-ERRORs in
+      // one day). Bun's host global has no native `print`, so aliasing the
+      // stub shadows nothing critical.
       "URL",
       "URLSearchParams",
       "AbortController",
@@ -112764,7 +112770,7 @@ function hasExplicitTraceHeaders(session) {
 
 // src/proxy/upstream.ts
 var ANTHROPIC_VERSION = "2023-06-01";
-var STARTPLAN_OPENAI_BASE = "https://zcode.z.ai/api/v1/zcode-plan";
+var STARTPLAN_ANTHROPIC_BASE = "https://zcode.z.ai/api/v1/zcode-plan";
 var STRIP_HEADERS = /* @__PURE__ */ new Set([
   "host",
   "authorization",
@@ -112793,7 +112799,7 @@ var STRIP_HEADERS = /* @__PURE__ */ new Set([
 ]);
 function buildUpstreamURL(format, provider, plan = "coding-plan") {
   if (plan === "start-plan") {
-    return `${STARTPLAN_OPENAI_BASE}/chat/completions`;
+    return `${STARTPLAN_ANTHROPIC_BASE}/anthropic/v1/messages`;
   }
   if (format === "anthropic") {
     return `${provider.anthropicBaseURL}/v1/messages`;
@@ -113508,6 +113514,7 @@ async function sendOrderedUpstreamRequest(req) {
   return await new Promise((resolve, reject) => {
     let headerBuffer = new Uint8Array(0);
     let responseStarted = false;
+    let postWrite = false;
     let bodyController = null;
     let chunkedDecoder = null;
     let remainingContentLength = null;
@@ -113520,6 +113527,12 @@ async function sendOrderedUpstreamRequest(req) {
       }
     });
     function fail(err) {
+      if (!responseStarted && postWrite) {
+        try {
+          err.postWrite = true;
+        } catch {
+        }
+      }
       if (responseStarted) bodyController?.error(err);
       else reject(err);
       socket.destroy();
@@ -113604,6 +113617,7 @@ async function sendOrderedUpstreamRequest(req) {
     });
     socket.write(requestHead);
     if (bodyBytes.byteLength > 0) socket.write(bodyBytes);
+    postWrite = true;
   });
 }
 function openSocket(url2) {
@@ -113882,8 +113896,55 @@ var MODELS = [
   { id: "glm-5v-turbo", name: "GLM 5V Turbo", contextWindow: 2e5, maxOutputTokens: 128e3 },
   { id: "glm-5.1", name: "GLM 5.1", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
   { id: "glm-5.2", name: "GLM 5.2", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true },
-  { id: "glm-5.3", name: "GLM 5.3", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true }
+  { id: "glm-5.3", name: "GLM 5.3", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true },
+  // start-plan gateway serves the -flash variant (used by claimed trial plans
+  // like the weekend package); advertised so client-side discovery lists it.
+  { id: "glm-5.3-flash", name: "GLM 5.3 Flash", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true }
 ];
+
+// src/provider/reasoning.ts
+var GLM53_DEFAULT_EFFORT = "max";
+var GLM53_THINKING_BUDGETS = {
+  low: 8e3,
+  high: 16e3,
+  max: 32e3
+};
+var GLM53_MIN_THINKING_BUDGET = 1024;
+var GLM53_ANSWER_RESERVE = 1024;
+var GLM53_MODEL_PATTERN = /glm-5\.3(?![0-9])/i;
+function isGlm53Model(model) {
+  if (!model) return false;
+  return GLM53_MODEL_PATTERN.test(model);
+}
+function normalizeGlm53Effort(effort) {
+  switch (effort) {
+    case "none":
+    case "minimal":
+    case "light":
+    case "low":
+      return "low";
+    case "medium":
+    case "high":
+      return "high";
+    case "xhigh":
+    case "max":
+    case "ultra":
+      return "max";
+    default:
+      return GLM53_DEFAULT_EFFORT;
+  }
+}
+function buildGlm53Reasoning(effort) {
+  return {
+    thinking: { type: "enabled", budget_tokens: GLM53_THINKING_BUDGETS[effort] },
+    output_config: { effort }
+  };
+}
+function fitGlm53Budget(budget, maxTokens) {
+  if (typeof maxTokens !== "number" || !Number.isFinite(maxTokens)) return budget;
+  const clamped = Math.min(budget, Math.floor(maxTokens) - GLM53_ANSWER_RESERVE);
+  return clamped >= GLM53_MIN_THINKING_BUDGET ? clamped : void 0;
+}
 
 // src/translator/openai-to-anthropic.ts
 var DEFAULT_MAX_TOKENS = 4096;
@@ -113895,15 +113956,21 @@ function translateRequestOpenAIToAnthropic(req) {
   const result3 = {
     model: req.model,
     messages: anthropicMessages,
-    max_tokens: req.max_tokens ?? DEFAULT_MAX_TOKENS
+    max_tokens: req.max_tokens ?? resolveDefaultMaxTokens(req.model)
   };
   if (system) result3.system = system;
   if (req.temperature !== void 0) result3.temperature = req.temperature;
   if (req.top_p !== void 0) result3.top_p = req.top_p;
   if (req.stream !== void 0) result3.stream = req.stream;
   if (req.stop) result3.stop_sequences = Array.isArray(req.stop) ? req.stop : [req.stop];
-  const thinking = translateThinking(req);
-  if (thinking) result3.thinking = thinking;
+  if (isGlm53Model(req.model)) {
+    const { thinking, output_config } = translateGlm53Reasoning(req, result3.max_tokens);
+    result3.thinking = thinking;
+    if (output_config) result3.output_config = output_config;
+  } else {
+    const thinking = translateThinking(req);
+    if (thinking) result3.thinking = thinking;
+  }
   if (req.tools?.length && req.tool_choice !== "none") {
     result3.tools = req.tools.map(translateToolOpenAIToAnthropic);
   }
@@ -113932,6 +113999,32 @@ function translateThinking(req) {
 }
 function isReasoningModel(model) {
   return MODELS.some((m) => m.id === model && m.reasoning === true);
+}
+function resolveDefaultMaxTokens(model) {
+  if (!isGlm53Model(model)) return DEFAULT_MAX_TOKENS;
+  const catalogEntry = MODELS.find((m) => m.id === model);
+  return catalogEntry?.maxOutputTokens ?? DEFAULT_MAX_TOKENS;
+}
+function translateGlm53Reasoning(req, maxTokens) {
+  const explicit = req.thinking;
+  if (explicit && typeof explicit === "object" && explicit.type === "disabled") {
+    return { thinking: { type: "disabled" } };
+  }
+  const effort = normalizeGlm53Effort(req.reasoning_effort);
+  const base = buildGlm53Reasoning(effort);
+  let budget = base.thinking.budget_tokens;
+  if (explicit && typeof explicit === "object" && (explicit.type === "enabled" || explicit.type === "adaptive")) {
+    const explicitBudget = explicit.budget_tokens ?? explicit.budgetTokens;
+    if (typeof explicitBudget === "number" && Number.isFinite(explicitBudget)) {
+      const floored = Math.floor(explicitBudget);
+      if (floored > 0) budget = floored;
+    }
+  }
+  const fitted = fitGlm53Budget(budget, maxTokens);
+  return {
+    thinking: fitted !== void 0 ? { type: "enabled", budget_tokens: fitted } : { type: "enabled" },
+    output_config: base.output_config
+  };
 }
 function translateToolChoice(choice) {
   if (choice === "auto") return { type: "auto" };
@@ -114029,6 +114122,21 @@ function imageUrlToAnthropicBlock(url2) {
   }
   return { type: "text", text: url2 };
 }
+function anthropicUsageToOpenAI(usage) {
+  const inputTokens = usage?.input_tokens ?? 0;
+  const outputTokens = usage?.output_tokens ?? 0;
+  const cacheRead = usage?.cache_read_input_tokens ?? 0;
+  const cacheCreation = usage?.cache_creation_input_tokens ?? 0;
+  const promptTokens = inputTokens + cacheRead + cacheCreation;
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: outputTokens,
+    total_tokens: promptTokens + outputTokens,
+    // Presence-preserving: an upstream explicitly reporting 0 cache reads stays
+    // distinguishable from one reporting no cache breakdown at all.
+    ...usage?.cache_read_input_tokens != null ? { prompt_tokens_details: { cached_tokens: cacheRead } } : {}
+  };
+}
 function translateResponseAnthropicToOpenAI(resp, model) {
   const textBlocks = resp.content.filter((b) => b.type === "text");
   const toolUseBlocks = resp.content.filter((b) => b.type === "tool_use");
@@ -114059,11 +114167,7 @@ function translateResponseAnthropicToOpenAI(resp, model) {
       },
       finish_reason: finishReason
     }],
-    usage: {
-      prompt_tokens: resp.usage?.input_tokens ?? 0,
-      completion_tokens: resp.usage?.output_tokens ?? 0,
-      total_tokens: (resp.usage?.input_tokens ?? 0) + (resp.usage?.output_tokens ?? 0)
-    }
+    usage: anthropicUsageToOpenAI(resp.usage)
   };
 }
 function extractText(msg) {
@@ -114131,6 +114235,9 @@ function translateRequestAnthropicToOpenAI(req) {
   }
   if (req.thinking) {
     result3.thinking = req.thinking;
+  }
+  if (isGlm53Model(req.model) && req.output_config?.effort) {
+    result3.reasoning_effort = req.output_config.effort;
   }
   if (req.tools?.length) {
     result3.tools = req.tools.map((t) => ({
@@ -114334,12 +114441,18 @@ function initState(model) {
     messageId: "",
     model,
     roleSent: false,
-    inputTokens: 0,
-    outputTokens: 0,
+    usage: { input_tokens: 0, output_tokens: 0 },
     toolCallIndex: 0,
     blockIndexToToolCallIndex: /* @__PURE__ */ new Map(),
     finishReasonSent: false
   };
+}
+function mergeAnthropicUsage(target2, patch) {
+  if (!patch) return;
+  if (patch.input_tokens != null) target2.input_tokens = patch.input_tokens;
+  if (patch.output_tokens != null) target2.output_tokens = patch.output_tokens;
+  if (patch.cache_read_input_tokens != null) target2.cache_read_input_tokens = patch.cache_read_input_tokens;
+  if (patch.cache_creation_input_tokens != null) target2.cache_creation_input_tokens = patch.cache_creation_input_tokens;
 }
 function makeChunk(state2, delta, finishReason = null, usage) {
   const chunk = {
@@ -114417,7 +114530,7 @@ function translateEvent(state2, sse) {
       const msg = data2.message;
       state2.messageId = msg?.id ?? "msg_stream";
       state2.model = msg?.model ?? state2.model;
-      state2.inputTokens = msg?.usage?.input_tokens ?? 0;
+      mergeAnthropicUsage(state2.usage, msg?.usage);
       if (!state2.roleSent) {
         state2.roleSent = true;
         return makeChunk(state2, { role: "assistant" });
@@ -114468,29 +114581,18 @@ function translateEvent(state2, sse) {
       return null;
     }
     case "message_delta": {
-      const dataAny = data2;
-      const delta = dataAny.delta;
-      if (dataAny?.usage?.output_tokens !== void 0) {
-        state2.outputTokens = dataAny.usage.output_tokens;
-      }
-      if (delta?.stop_reason) {
-        const finishReason = mapStopReason(delta.stop_reason);
+      mergeAnthropicUsage(state2.usage, data2.usage);
+      if (data2.delta?.stop_reason && !state2.finishReasonSent) {
+        const finishReason = mapStopReason(data2.delta.stop_reason);
         state2.finishReasonSent = true;
-        return makeChunk(state2, {}, finishReason, {
-          prompt_tokens: state2.inputTokens,
-          completion_tokens: state2.outputTokens,
-          total_tokens: state2.inputTokens + state2.outputTokens
-        });
+        return makeChunk(state2, {}, finishReason, anthropicUsageToOpenAI(state2.usage));
       }
       return null;
     }
     case "message_stop": {
       if (state2.finishReasonSent) return null;
-      return makeChunk(state2, {}, "stop", {
-        prompt_tokens: state2.inputTokens,
-        completion_tokens: state2.outputTokens,
-        total_tokens: state2.inputTokens + state2.outputTokens
-      });
+      state2.finishReasonSent = true;
+      return makeChunk(state2, {}, "stop", anthropicUsageToOpenAI(state2.usage));
     }
     case "ping":
     case "content_block_stop":
@@ -114863,9 +114965,9 @@ async function proxyRequest(clientReq, format, opts) {
     return errorResponse(503, "credential_unavailable", err.message);
   }
   const startPlan = config.plan === "start-plan";
-  const translateAnthropicToOpenAI = format === "anthropic" && startPlan;
-  const translateOpenAIToAnthropic = format === "openai" && !startPlan;
-  const upstreamFormat = startPlan ? "openai" : "anthropic";
+  const translateAnthropicToOpenAI = false;
+  const translateOpenAIToAnthropic = format === "openai";
+  const upstreamFormat = "anthropic";
   const clientSession = resolveSessionContext({ clientReq, body: body2, upstreamFormat, model: meta.model, config });
   if (debug && clientSession) {
     const shortSession = clientSession.sessionId ? clientSession.sessionId.slice(0, 10) : "-";
@@ -114946,7 +115048,22 @@ async function proxyRequest(clientReq, format, opts) {
   }
   let upstreamResp;
   try {
-    upstreamResp = await dispatch2(upstreamReq, upstreamHeaderPairs);
+    const maxConnectAttempts = 3;
+    for (let attempt = 1; ; attempt++) {
+      if (clientReq.signal.aborted) throw new Error("client aborted before upstream connect");
+      try {
+        upstreamResp = await dispatch2(upstreamReq, upstreamHeaderPairs);
+        break;
+      } catch (err) {
+        if (err.postWrite) throw err;
+        if (attempt >= maxConnectAttempts) throw err;
+        const backoffMs = 500 * attempt;
+        if (debug) debugError(reqId, "upstream_connect_retry", `attempt ${attempt}/${maxConnectAttempts - 1} failed (${err.message}), retrying in ${backoffMs}ms`);
+        console.log(`${reqId} upstream connect failed (${err.message}), retry ${attempt + 1}/${maxConnectAttempts} in ${backoffMs}ms`);
+        await new Promise((r2) => setTimeout(r2, backoffMs));
+        upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
+      }
+    }
   } catch (err) {
     if (debug) debugError(reqId, "upstream_unreachable", err.message);
     printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
@@ -114972,7 +115089,19 @@ async function proxyRequest(clientReq, format, opts) {
     return errorResponse(401, "start_plan_jwt_invalid", "Start-plan JWT was rejected. Re-run: zcode-proxy auth login");
   }
   const captcha = startPlan ? await loadCaptcha() : null;
-  const captchaChallenge = captcha ? captcha.detectCaptchaChallenge(upstreamResp) : null;
+  let captchaChallenge = captcha ? captcha.detectCaptchaChallenge(upstreamResp) : null;
+  if (!captchaChallenge && captcha && !upstreamResp.ok) {
+    const ctype = upstreamResp.headers.get("content-type") ?? "";
+    if (!ctype.includes("text/event-stream")) {
+      try {
+        const peek = await upstreamResp.clone().text();
+        if (peek.includes('"code":3007') || peek.includes('"code": 3007')) {
+          captchaChallenge = "in-body-3007";
+        }
+      } catch {
+      }
+    }
+  }
   if (captchaChallenge && captcha) {
     if (debug) debugLine(reqId, "captcha challenge \u2014 re-solving and retrying once");
     try {
@@ -116564,9 +116693,9 @@ async function handleResponses(clientReq, opts) {
   }
   const providerDef = resolveProviderDef(opts.config);
   const startPlan = opts.config.plan === "start-plan";
-  const upstreamFormat = startPlan ? "openai" : "anthropic";
+  const upstreamFormat = "anthropic";
   let upstreamRequestBody;
-  if (upstreamFormat === "anthropic") {
+  {
     let anthropicReq;
     try {
       anthropicReq = translateRequestOpenAIToAnthropic(chatRequest);
@@ -116576,14 +116705,8 @@ async function handleResponses(clientReq, opts) {
     upstreamRequestBody = transformRequestBody(JSON.stringify(anthropicReq), {
       format: "anthropic",
       userId: cred.userId,
-      startPlan: false
-    }) ?? JSON.stringify(anthropicReq);
-  } else {
-    upstreamRequestBody = transformRequestBody(JSON.stringify(chatRequest), {
-      format: "openai",
-      userId: void 0,
       startPlan
-    }) ?? JSON.stringify(chatRequest);
+    }) ?? JSON.stringify(anthropicReq);
   }
   const transformedBody = upstreamRequestBody;
   const upstreamHeaders = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, void 0, void 0);

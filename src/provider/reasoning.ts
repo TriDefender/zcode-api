@@ -10,8 +10,8 @@
  * setting both fields) plus live upstream verification.
  */
 
-/** The three legal `output_config.effort` levels for GLM-5.3 models. */
-export const GLM53_EFFORT_LEVELS = ["low", "high", "max"] as const;
+/** The three legal `output_config.effort` levels for GLM-5.3 models (module-local; the type below is the public contract). */
+const GLM53_EFFORT_LEVELS = ["low", "high", "max"] as const;
 
 /** One of the three legal GLM-5.3 effort levels. */
 export type Glm53Effort = (typeof GLM53_EFFORT_LEVELS)[number];

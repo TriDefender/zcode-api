@@ -58,8 +58,8 @@ models:
 identity:
   # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
   # Must be printable ASCII; non-conforming values fall back to the default.
-  # Default: "3.8.1" (current ZCode release). Override to match your real client.
-  appVersion: "3.8.1"
+  # Default: "3.10.0" (current ZCode release). Override to match your real client.
+  appVersion: "3.10.0"
   # X-Title suffix → "Z Code@{sourceTitle}". Default "cli".
   sourceTitle: "cli"
   # HTTP-Referer URL. Default "https://zcode.z.ai".
@@ -80,7 +80,8 @@ clientIdentity:
   maxSessions: 1024
 
 # Responses API (/v1/responses) — Codex CLI / OpenAI Agents SDK endpoint.
-# Translates Responses requests to the GLM Chat Completions upstream.
+# Translates Responses requests through Chat Completions to the Anthropic-format
+# upstream (both plans post Anthropic upstream).
 # State (previous_response_id) is held in-memory (cleared on restart, 24h TTL).
 responses:
   enabled: true
@@ -88,19 +89,22 @@ responses:
     maxEntries: 1000
     ttlMs: 86400000
 
-# GLM MCP hosted-tool integration.
-# Endpoints are derived from `provider`:
+# GLM MCP hosted-tool integration — NOT currently wired into production.
+# These keys are parsed but have no effect: hosted tools (`mcp`,
+# `web_search_preview`, ...) are silently stripped by the Responses
+# translator, and the MCP client subsystem (src/mcp) is retained for a
+# future function-injection design. Endpoints are derived from `provider`:
 #   zai      → https://api.z.ai/api/mcp/{tool}/mcp
 #   bigmodel → https://open.bigmodel.cn/api/mcp/{tool}/mcp
 # Auth reuses the upstream credential (auth.apiKey / OAuth) — no extra key needed.
 mcp:
   enabled: true
-  # Intercept `web_search`/`web_search_preview` hosted tools via GLM's
-  # `web_search_prime` MCP. Adds a one-shot agentic loop on /v1/responses.
+  # (planned) Intercept `web_search`/`web_search_preview` hosted tools via
+  # GLM's `web_search_prime` MCP.
   webSearch: true
-  # Inject `webReader` as a function tool the model can call directly.
+  # (planned) Inject `webReader` as a function tool the model can call directly.
   webReader: false
-  # Inject the three `zread` tools (search_doc/get_repo_structure/read_file).
+  # (planned) Inject the three `zread` tools (search_doc/get_repo_structure/read_file).
   zread: false
 
 # Async (off-peak / "idle plan") bridge.
@@ -128,6 +132,34 @@ async:
   # Optional model override; empty uses the request's `model`.
   defaultModel: ""
 
+# Manual claim ("weekend plan") — mirrors the ZCode 3.10 desktop client's
+# manualClaimPlan feature. When enabled, the proxy periodically lists claimable
+# trial plans ({origin}/api/v1/zcode-plan/billing/preview) and auto-claims the
+# highest-priority one ({origin}/api/v1/zcode-plan/billing/claim) using the
+# OAuth JWT + an Aliyun captcha token (same solver as start-plan). Weekend
+# campaigns are quota-limited first-come-first-served; claimed plans activate
+# at the campaign's `starts_at` and land as Start-Plan quota.
+#
+# IMPORTANT: requires `auth.mode: oauth` (claim uses the JWT from login), and
+# identity.appVersion must be >= the campaign's minimum client version
+# (default 3.10.0) or the server rejects with `ineligible`.
+#
+# Env overrides: ZCODE_CLAIM_ENABLED, ZCODE_CLAIM_AUTO, ZCODE_CLAIM_ORIGIN,
+# ZCODE_CLAIM_POLL_INTERVAL_MS.
+claim:
+  enabled: false
+  # Auto-claim in the background while serving. `false` = CLI-only
+  # (`zcode-proxy claim` still works when `enabled: true`).
+  auto: true
+  origin: "https://zcode.z.ai"
+  # Preview poll cadence (5 min default).
+  pollIntervalMs: 300000
+  # Backoff after failed attempts (10 min default); quota_exhausted /
+  # already_claimed back off to the server-provided next window instead.
+  cooldownMs: 600000
+  # Optional: claim a specific plan_id. Empty = highest-priority preview.
+  planId: ""
+
 # Server-controlled upstream URL remapping (mirrors the ZCode client's
 # ProviderEndpointRoutingService). The proxy periodically fetches
 # {origin}/api/v1/agent/configs and rewrites matching upstream URLs per the
@@ -138,7 +170,7 @@ endpointRouting:
   enabled: true
   origin: "https://zcode.z.ai"
 
-# Client request signing V4 (mirrors the ZCode 3.8.1 ClientRequestSigningV4Signer).
+# Client request signing V4 (mirrors the ZCode 3.9.1 ClientRequestSigningV4Signer).
 # When enabled, the proxy probes {origin}/api/v1/agent/configs (cached 1h) and,
 # only if the server sets data.codingPlanSignature.enable=true, signs coding-plan
 # requests: handshake against {provider}/api/paas/c1f3a7e2/v2/client, Ed25519

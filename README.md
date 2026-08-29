@@ -71,7 +71,7 @@ bun run src/index.ts auth login bigmodel --import
 |--------|------|-------------|
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions (streaming + non-streaming) |
 | `POST` | `/v1/messages` | Anthropic-format messages (streaming + non-streaming) |
-| `POST` | `/v1/responses` | OpenAI Responses API (Codex CLI / Agents SDK; translates to GLM Chat Completions) |
+| `POST` | `/v1/responses` | OpenAI Responses API (Codex CLI / Agents SDK; translates Responses → Chat → Anthropic upstream) |
 | `POST` | `/async/v1/messages` | **Async (off-peak)** Anthropic-format — routes to free idle-compute pool (oauth-only) |
 | `POST` | `/async/v1/chat/completions` | **Async (off-peak)** OpenAI-format — same backend, translates request/response |
 | `GET`  | `/async/v1/health` | Probe off-peak queue availability (oauth-only) |
@@ -94,7 +94,7 @@ takes a new ticket and resends the original request (up to `async.maxRetries`,
 default 3). Client disconnect triggers a fire-and-forget `/ticket/{id}/settle`
 call as the universal close-out signal.
 
-Streaming (`stream: true`) is the expected mode for coding harnesss; non-stream
+Streaming (`stream: true`) is the expected mode for coding harnesses; non-stream
 is supported as a fallback (the proxy internally still consumes upstream as a
 stream, then emits one aggregated JSON body).
 
@@ -259,7 +259,7 @@ Body Transformation (ZCode-equivalent mutations)
       ▼
 Auth + Identity Header Injection
   Anthropic upstream:      x-api-key: {credential} + anthropic-version
-  OpenAI upstream:         Authorization: Bearer {credential}
+  start-plan (oauth):      Authorization: Bearer {jwt}
   Both:                    User-Agent: ZCode/{version} + X-ZCode-* + trace headers
       │
       ▼
@@ -271,7 +271,7 @@ Client Signing V4 (gate-driven, fail-open)
   gate says codingPlanSignature.enable → handshake + Ed25519 + PoW headers per request
       │
       ▼
-Upstream Forward (Bun.fetch)
+Upstream Forward (fetch, or ordered raw-TCP transport for session affinity)
   Translation mode:   decompress enabled (proxy reads + translates body)
   Passthrough:        decompress disabled (raw gzip bytes stream through)
       │
@@ -365,6 +365,7 @@ The proxy lists these models on `GET /v1/models` (pinned to the GLM coding-plan 
 | `glm-5.1` | 200K | 128K |
 | `glm-5.2` | 1M | 128K |
 | `glm-5.3` | 1M | 128K |
+| `glm-5.3-flash` | 1M | 128K |
 
 Requests for models not in this list are still forwarded upstream — the listing is informational, not a gate.
 

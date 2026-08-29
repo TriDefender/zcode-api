@@ -2,9 +2,10 @@
  * Upstream request builder — constructs the forwarded HTTP request.
  *
  * **`format` semantics**: This is the *upstream* format — the format used to
- * talk to the upstream LLM provider, not the client's inbound format. Current
- * ZCode coding-plan and start-plan routes use an OpenAI-compatible upstream;
- * Anthropic clients are translated before this builder is called.
+ * talk to the upstream LLM provider, not the client's inbound format. Both
+ * ZCode coding-plan and start-plan routes post an Anthropic-format upstream
+ * (since PR #34, 2026-08-29 — start-plan's old OpenAI gateway is retired);
+ * OpenAI clients are translated before this builder is called.
  *
  * @see .omo/plans/zcode-proxy.md Task 6
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"

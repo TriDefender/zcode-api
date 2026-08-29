@@ -80,7 +80,8 @@ clientIdentity:
   maxSessions: 1024
 
 # Responses API (/v1/responses) — Codex CLI / OpenAI Agents SDK endpoint.
-# Translates Responses requests to the GLM Chat Completions upstream.
+# Translates Responses requests through Chat Completions to the Anthropic-format
+# upstream (both plans post Anthropic upstream).
 # State (previous_response_id) is held in-memory (cleared on restart, 24h TTL).
 responses:
   enabled: true
