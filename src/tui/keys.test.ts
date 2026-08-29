@@ -74,4 +74,35 @@ describe("KeyParser", () => {
     const actions = p.feed("日");
     expect(actions).toEqual([{ type: "char", key: "日" }]);
   });
+
+  test("SGR mouse press maps to a 0-based click", () => {
+    const p = new KeyParser();
+    expect(p.feed("\x1b[<0;10;5M")).toEqual([{ type: "click", x: 9, y: 4 }]);
+  });
+
+  test("mouse release and drag are ignored", () => {
+    const p = new KeyParser();
+    expect(types(p, "\x1b[<0;10;5m\x1b[<32;10;5M")).toEqual(["ignore", "ignore"]);
+  });
+
+  test("wheel buttons map to scroll actions", () => {
+    const p = new KeyParser();
+    expect(types(p, "\x1b[<64;1;1M\x1b[<65;1;1M")).toEqual(["wheel-up", "wheel-down"]);
+  });
+
+  test("right/middle button presses are ignored", () => {
+    const p = new KeyParser();
+    expect(types(p, "\x1b[<1;3;3M\x1b[<2;3;3M")).toEqual(["ignore", "ignore"]);
+  });
+
+  test("mouse sequence split across chunks still completes", () => {
+    const p = new KeyParser();
+    expect(p.feed("\x1b[<0;")).toEqual([]);
+    expect(p.feed("12;7M")).toEqual([{ type: "click", x: 11, y: 6 }]);
+  });
+
+  test("malformed mouse params are ignored", () => {
+    const p = new KeyParser();
+    expect(types(p, "\x1b[<;5M")).toEqual(["ignore"]);
+  });
 });

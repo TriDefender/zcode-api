@@ -27,7 +27,7 @@ import type { ProxyConfig } from "../config/types.js";
 import type { ProviderId } from "../provider/types.js";
 import { LogPane } from "./log-pane.js";
 import { KeyParser, type KeyAction } from "./keys.js";
-import { buildFrame } from "./frame.js";
+import { buildFrame, findRegion, type ClickAction, type ClickRegion } from "./frame.js";
 
 type PlanTier = "coding-plan" | "start-plan";
 type ServerStatus = "stopped" | "starting" | "running" | "error";
@@ -76,10 +76,11 @@ export async function runTui(args: ServeArgs): Promise<void> {
   // --- terminal setup ------------------------------------------------------
   const stdout = process.stdout;
   const stdin = process.stdin;
-  stdout.write("\x1b[?1049h\x1b[?25l\x1b[2J");
+  // Alt screen + hide cursor + SGR mouse tracking (buttons clickable, wheel scrolls).
+  stdout.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[2J");
 
   const restore = (): void => {
-    try { stdout.write("\x1b[0m\x1b[?25h\x1b[?1049l"); } catch { /* terminal gone */ }
+    try { stdout.write("\x1b[0m\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l"); } catch { /* terminal gone */ }
   };
 
   // --- console interception → log pane (Android-entry pattern) ------------
@@ -100,6 +101,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
 
   // --- rendering -----------------------------------------------------------
   let renderTimer: ReturnType<typeof setTimeout> | null = null;
+  let activeRegions: ClickRegion[] = [];
   function renderNow(): void {
     renderTimer = null;
     const width = stdout.columns || 80;
@@ -129,7 +131,8 @@ export async function runTui(args: ServeArgs): Promise<void> {
       width,
       height,
     });
-    try { stdout.write("\x1b[H" + frame); } catch { /* terminal gone */ }
+    activeRegions = frame.regions;
+    try { stdout.write("\x1b[H" + frame.text); } catch { /* terminal gone */ }
   }
   function scheduleRender(): void {
     if (renderTimer) return;
@@ -229,26 +232,20 @@ export async function runTui(args: ServeArgs): Promise<void> {
 
   // --- provider / plan switching (mirrors the Android setConfig command) ---
   function switchProvider(): void {
-    if (!ensureProxyStoppedForConfigChange()) return;
     const next: ProviderId = state.provider === "zai" ? "bigmodel" : "zai";
     applyConfigChange(next, state.plan, `provider → ${next}`);
   }
 
   function switchPlan(): void {
-    if (!ensureProxyStoppedForConfigChange()) return;
     const next: PlanTier = state.plan === "coding-plan" ? "start-plan" : "coding-plan";
     applyConfigChange(state.provider, next, `plan → ${next}`);
   }
 
-  function ensureProxyStoppedForConfigChange(): boolean {
+  function applyConfigChange(provider: ProviderId, plan: PlanTier, message: string): void {
     if (state.serverStatus === "running" || state.serverStatus === "starting") {
       setToast("stop the proxy before switching (press s)", "err");
-      return false;
+      return;
     }
-    return true;
-  }
-
-  function applyConfigChange(provider: ProviderId, plan: PlanTier, message: string): void {
     config.provider = provider;
     config.plan = plan;
     auth = newAuthManager(config);
@@ -360,6 +357,17 @@ export async function runTui(args: ServeArgs): Promise<void> {
       case "ctrl-c":
         quit();
         return;
+      case "click": {
+        const hit = findRegion(activeRegions, action.y, action.x);
+        if (hit) dispatchClick(hit);
+        return;
+      }
+      case "wheel-up":
+        scrollUp(3);
+        return;
+      case "wheel-down":
+        scrollDown(3);
+        return;
       case "char": {
         switch (action.key.toLowerCase()) {
           case "q": quit(); return;
@@ -382,6 +390,25 @@ export async function runTui(args: ServeArgs): Promise<void> {
       case "home": scrollUp(pane.count); return;
       case "end": pane.followBottom(); scheduleRender(); return;
       default: return;
+    }
+  }
+
+  /** Mouse clicks hit the same actions as their keyboard shortcuts. */
+  function dispatchClick(action: ClickAction): void {
+    switch (action.kind) {
+      case "key":
+        handleKey({ type: "char", key: action.key });
+        return;
+      case "provider":
+        applyConfigChange(action.value, state.plan, `provider → ${action.value}`);
+        return;
+      case "plan":
+        applyConfigChange(state.provider, action.value, `plan → ${action.value}`);
+        return;
+      case "follow":
+        pane.followBottom();
+        scheduleRender();
+        return;
     }
   }
 

@@ -6,6 +6,12 @@
  * sequence (lone `\x1b` before more bytes arrive), so unconsumed input is
  * buffered until the sequence completes on a later chunk. Works identically
  * under Bun and Node — no readline keypress events involved.
+ *
+ * Mouse: with SGR mouse tracking enabled (`\x1b[?1000h\x1b[?1006h`), the
+ * terminal reports presses/releases as `ESC [ < b ; x ; y M/m` and wheel
+ * events as button codes 64/65 — parsed into click/wheel actions so TUI
+ * buttons are directly clickable (coordinates arrive 1-based, converted
+ * to 0-based terminal cells).
  */
 
 export type KeyAction =
@@ -16,8 +22,11 @@ export type KeyAction =
   | { type: "pagedown" }
   | { type: "home" }
   | { type: "end" }
+  | { type: "click"; x: number; y: number }
+  | { type: "wheel-up" }
+  | { type: "wheel-down" }
   | { type: "ctrl-c" }
-  /** Recognized but without a binding (Enter, Tab, bare Esc, Alt+key, …). */
+  /** Recognized but without a binding (Enter, Tab, bare Esc, Alt+key, drag/release, …). */
   | { type: "ignore" };
 
 export class KeyParser {
@@ -77,6 +86,7 @@ export class KeyParser {
 }
 
 function csiAction(final: string, params: string): KeyAction {
+  if (params.startsWith("<")) return mouseAction(params.slice(1), final);
   switch (final) {
     case "A":
       return { type: "up" };
@@ -95,4 +105,20 @@ function csiAction(final: string, params: string): KeyAction {
     default:
       return { type: "ignore" };
   }
+}
+
+/** SGR mouse event: `<button;column;row` + `M` (press) or `m` (release). */
+function mouseAction(params: string, final: string): KeyAction {
+  if (final !== "M") return { type: "ignore" }; // releases and motion don't click
+  const parts = params.split(";");
+  const button = Number(parts[0]);
+  const x = Number(parts[1]);
+  const y = Number(parts[2]);
+  if (!Number.isFinite(button) || !Number.isFinite(x) || !Number.isFinite(y)) {
+    return { type: "ignore" };
+  }
+  if (button === 0) return { type: "click", x: x - 1, y: y - 1 };
+  if (button === 64) return { type: "wheel-up" };
+  if (button === 65) return { type: "wheel-down" };
+  return { type: "ignore" }; // right/middle buttons, drag modifiers
 }
