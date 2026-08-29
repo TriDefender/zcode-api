@@ -466,6 +466,249 @@ describe("translateRequestOpenAIToAnthropic", () => {
 
     expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 1024 });
   });
+
+  describe("GLM-5.3 reasoning-effort bug: reasoning_effort alone must produce output_config.effort AND a matching thinking.budget_tokens", () => {
+    // Before the fix, `translateThinking()` only special-cased
+    // `reasoning_effort:"none"`; every other value (e.g. "high") degraded to
+    // `{type:"enabled"}` with no budget_tokens and no output_config. Captured
+    // live upstream body: {"model":"glm-5.3","max_tokens":40000,"thinking":{"type":"enabled"}}
+    // — which produced 1 character of thinking instead of ~244.
+
+    it("glm-5.3: reasoning_effort:'high' sets BOTH output_config.effort and thinking.budget_tokens", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "high",
+        max_tokens: 40_000,
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.output_config).toEqual({ effort: "high" });
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 16_000 });
+    });
+
+    it("glm-5.3-flash: reasoning_effort:'high' also sets BOTH fields (previously got no thinking field at all)", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3-flash",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "high",
+        max_tokens: 40_000,
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.output_config).toEqual({ effort: "high" });
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 16_000 });
+    });
+
+    it("glm-5.3: absent reasoning_effort defaults to 'max' (ZCode catalog defaultLevel), not near-zero", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Hi" }],
+        max_tokens: 40_000,
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.output_config).toEqual({ effort: "max" });
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 32_000 });
+    });
+
+    it("glm-5.3: reasoning_effort:'medium' rounds UP to 'high' effort/budget, not down to 'low'", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "medium",
+        max_tokens: 40_000,
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.output_config).toEqual({ effort: "high" });
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 16_000 });
+    });
+
+    it("glm-5.3: reasoning_effort:'none' routes through the effort channel as 'low' rather than {type:'disabled'} (disabling is a no-op upstream)", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "none",
+        max_tokens: 40_000,
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.output_config).toEqual({ effort: "low" });
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 8_000 });
+    });
+
+    it("glm-5.3: explicit thinking.budget_tokens is respected over the effort-level default budget, but output_config.effort is still attached", () => {
+      const req = {
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "high",
+        max_tokens: 40_000,
+        thinking: { type: "enabled", budget_tokens: 5000 },
+      } as OpenAIChatRequest;
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.output_config).toEqual({ effort: "high" });
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 5000 });
+    });
+
+    // A JSON body may carry a fractional budget. Testing `> 0` before flooring
+    // lets 0.5 through as a floored 0, which `fitGlm53Budget` passes straight
+    // out again whenever max_tokens is not a finite number.
+    it("glm-5.3: a sub-1 fractional explicit budget is ignored in favour of the effort default, never sent as 0", () => {
+      const req = {
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "low",
+        max_tokens: 40_000,
+        thinking: { type: "enabled", budget_tokens: 0.5 },
+      } as OpenAIChatRequest;
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 8_000 });
+    });
+
+    it("glm-5.3: a fractional explicit budget above 1 is floored, not rounded", () => {
+      const req = {
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "high",
+        max_tokens: 40_000,
+        thinking: { type: "enabled", budget_tokens: 5000.7 },
+      } as OpenAIChatRequest;
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 5000 });
+    });
+
+    it("glm-5.3: thinking budget is clamped to fit under max_tokens, reserving headroom for the answer", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "max",
+        max_tokens: 20_000,
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.max_tokens).toBe(20_000);
+      // Not 19_999 (max_tokens - 1) — that would leave only 1 token for the
+      // answer. 1_024 tokens (GLM53_ANSWER_RESERVE) are reserved instead.
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 18_976 });
+      expect(result.output_config).toEqual({ effort: "max" });
+    });
+
+    it("client omits max_tokens on glm-5.3: defaults to the model's catalog maxOutputTokens (128,000), not the generic 4096, so the max-effort thinking budget survives untouched", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "max",
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      // Before this fix, the generic DEFAULT_MAX_TOKENS (4096) fallback meant
+      // fitGlm53Budget(32_000, 4096) clamped the thinking budget down to
+      // 4095 — nearly the entire response allowance, leaving ~1 token for
+      // the answer. A model-aware default fixes that at the source.
+      expect(result.max_tokens).toBe(128_000);
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 32_000 });
+      expect(result.output_config).toEqual({ effort: "max" });
+    });
+
+    // The effort channel is keyed off the model id, not off catalog membership,
+    // so it keeps working for a family member the pinned catalog does not list
+    // (glm-5.3-flash used to be one until master pinned it). Only the
+    // max_tokens fallback consults the catalog, and it degrades to the generic
+    // default rather than failing.
+    it("an unlisted GLM-5.3-family id still gets the effort channel, with the generic max_tokens fallback", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3-air",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "max",
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.output_config).toEqual({ effort: "max" });
+      expect(result.max_tokens).toBe(4096);
+      // max effort's 32_000 budget is clamped under the small fallback.
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 4096 - 1024 });
+    });
+
+    it("glm-5.3-flash (pinned since master advertised it) gets the same model-aware default as glm-5.3", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3-flash",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "max",
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.output_config).toEqual({ effort: "max" });
+      expect(result.max_tokens).toBe(128_000);
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 32_000 });
+    });
+
+    it("a GLM-5.3-family id absent from the catalog falls back to the generic 4096 default, not a crash", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3-unlisted-variant",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "low",
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.max_tokens).toBe(4096);
+      // low effort's 8_000 budget is clamped down under the small fallback.
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 4096 - 1024 });
+    });
+
+    it("non-GLM-5.3 models keep the generic 4096 default max_tokens (scoped change, not global)", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-4.7",
+        messages: [{ role: "user", content: "Hi" }],
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.max_tokens).toBe(4096);
+    });
+
+    it("glm-5.3: explicit thinking:{type:'disabled'} is forwarded as-is, not overridden to an effort level", () => {
+      const req = {
+        model: "glm-5.3",
+        messages: [{ role: "user", content: "Hi" }],
+        thinking: { type: "disabled" },
+      } as OpenAIChatRequest;
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.thinking).toEqual({ type: "disabled" });
+      expect(result.output_config).toBeUndefined();
+    });
+
+    it("glm-4.7 (non-GLM-5.3 reasoning model) is unchanged: no output_config, plain {type:'enabled'} thinking", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-4.7",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "high",
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.thinking).toEqual({ type: "enabled" });
+      expect(result.output_config).toBeUndefined();
+    });
+  });
 });
 
 describe("anthropicUsageToOpenAI", () => {

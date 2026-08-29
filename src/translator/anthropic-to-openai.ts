@@ -15,6 +15,7 @@ import type {
   AnthropicContentBlock,
   AnthropicUsage,
 } from "./types.js";
+import { isGlm53Model } from "../provider/reasoning.js";
 
 /** Translate an Anthropic messages request into an OpenAI chat request. */
 export function translateRequestAnthropicToOpenAI(req: AnthropicMessagesRequest): OpenAIChatRequest {
@@ -46,6 +47,18 @@ export function translateRequestAnthropicToOpenAI(req: AnthropicMessagesRequest)
 
   if (req.thinking) {
     result.thinking = req.thinking;
+  }
+
+  // GLM-5.3+ Anthropic clients set reasoning effort via `output_config.effort`
+  // (the Anthropic upstream ignores `reasoning_effort`); the OpenAI-format
+  // upstream on start-plan reads `reasoning_effort` instead, so carry it over.
+  //
+  // Scoped to the GLM-5.3 family, which is the only one that defines
+  // `output_config`. Carrying it over unconditionally would let a client that
+  // sends `output_config` on any other model silently change that model's
+  // reasoning behaviour through a channel it never opted into.
+  if (isGlm53Model(req.model) && req.output_config?.effort) {
+    result.reasoning_effort = req.output_config.effort as OpenAIChatRequest["reasoning_effort"];
   }
 
   if (req.tools?.length) {

@@ -15,8 +15,15 @@ import type {
   AnthropicToolDefinition,
   AnthropicThinkingConfig,
   AnthropicUsage,
+  AnthropicOutputConfig,
 } from "./types.js";
 import { MODELS } from "../provider/models.js";
+import {
+  isGlm53Model,
+  normalizeGlm53Effort,
+  buildGlm53Reasoning,
+  fitGlm53Budget,
+} from "../provider/reasoning.js";
 
 /** Default max_tokens if the OpenAI request doesn't specify one. */
 const DEFAULT_MAX_TOKENS = 4096;
@@ -35,7 +42,7 @@ export function translateRequestOpenAIToAnthropic(req: OpenAIChatRequest): Anthr
   const result: AnthropicMessagesRequest = {
     model: req.model,
     messages: anthropicMessages,
-    max_tokens: req.max_tokens ?? DEFAULT_MAX_TOKENS,
+    max_tokens: req.max_tokens ?? resolveDefaultMaxTokens(req.model),
   };
 
   if (system) result.system = system;
@@ -43,8 +50,14 @@ export function translateRequestOpenAIToAnthropic(req: OpenAIChatRequest): Anthr
   if (req.top_p !== undefined) result.top_p = req.top_p;
   if (req.stream !== undefined) result.stream = req.stream;
   if (req.stop) result.stop_sequences = Array.isArray(req.stop) ? req.stop : [req.stop];
-  const thinking = translateThinking(req);
-  if (thinking) result.thinking = thinking;
+  if (isGlm53Model(req.model)) {
+    const { thinking, output_config } = translateGlm53Reasoning(req, result.max_tokens);
+    result.thinking = thinking;
+    if (output_config) result.output_config = output_config;
+  } else {
+    const thinking = translateThinking(req);
+    if (thinking) result.thinking = thinking;
+  }
   if (req.tools?.length && req.tool_choice !== "none") {
     result.tools = req.tools.map(translateToolOpenAIToAnthropic);
   }
@@ -80,6 +93,77 @@ function translateThinking(req: OpenAIChatRequest): AnthropicThinkingConfig | un
 
 function isReasoningModel(model: string): boolean {
   return MODELS.some((m) => m.id === model && m.reasoning === true);
+}
+
+/**
+ * Resolve the max_tokens fallback when the OpenAI client omits it.
+ *
+ * The generic `DEFAULT_MAX_TOKENS` (4096) is too small to coexist with the
+ * GLM-5.3 effort-based thinking budgets `translateGlm53Reasoning` attaches
+ * below (up to 32,000) — `fitGlm53Budget` would clamp nearly the entire
+ * allowance into thinking, leaving almost nothing for the answer. ZCode's own
+ * clamp is written against the *model's* maxOutputTokens ceiling (128,000 for
+ * glm-5.3), not a generic request-level fallback, so for this family look up
+ * that ceiling in the catalog instead. Falls back to the generic default if
+ * the model id isn't in the catalog. Every other model's default is
+ * untouched — this is deliberately scoped to GLM-5.3 only.
+ */
+function resolveDefaultMaxTokens(model: string): number {
+  if (!isGlm53Model(model)) return DEFAULT_MAX_TOKENS;
+  const catalogEntry = MODELS.find((m) => m.id === model);
+  return catalogEntry?.maxOutputTokens ?? DEFAULT_MAX_TOKENS;
+}
+
+/**
+ * Build the `thinking` + `output_config` pair for a GLM-5.3 family request.
+ *
+ * `output_config.effort` is the only channel the Anthropic upstream honors
+ * for this family — bare `reasoning_effort` is silently ignored — so every
+ * GLM-5.3 request gets an explicit effort level, defaulting to ZCode's
+ * catalog default (`max`) rather than falling through to a near-zero
+ * upstream default. `reasoning_effort:"none"` maps to `"low"` here (via
+ * `normalizeGlm53Effort`) instead of `{type:"disabled"}`: disabling does not
+ * actually work for plain glm-5.3 (54 chars of thinking still came back in
+ * live testing), so routing it through the effort channel is the closer
+ * approximation across the whole family.
+ *
+ * An explicit `req.thinking:{type:"disabled"}` is still forwarded as-is
+ * (rather than overridden to an effort level) since it does work for
+ * glm-5.3-flash, and is the closest available signal for plain glm-5.3.
+ * An explicit `req.thinking` budget is respected over the effort-level
+ * default budget, but `output_config.effort` is still attached — without it
+ * the upstream runs at its own near-zero default regardless of budget.
+ */
+function translateGlm53Reasoning(
+  req: OpenAIChatRequest,
+  maxTokens: number,
+): { thinking: AnthropicThinkingConfig; output_config?: AnthropicOutputConfig } {
+  const explicit = req.thinking;
+  if (explicit && typeof explicit === "object" && explicit.type === "disabled") {
+    return { thinking: { type: "disabled" } };
+  }
+
+  const effort = normalizeGlm53Effort(req.reasoning_effort);
+  const base = buildGlm53Reasoning(effort);
+
+  let budget: number = base.thinking.budget_tokens;
+  if (explicit && typeof explicit === "object" && (explicit.type === "enabled" || explicit.type === "adaptive")) {
+    const explicitBudget = explicit.budget_tokens ?? explicit.budgetTokens;
+    if (typeof explicitBudget === "number" && Number.isFinite(explicitBudget)) {
+      // Floor before the positivity test, not after: JSON permits a fractional
+      // budget, and a value like 0.5 passes `> 0` yet floors to 0 — which then
+      // survives `fitGlm53Budget` untouched whenever `max_tokens` is not a
+      // finite number, handing the upstream `budget_tokens: 0`.
+      const floored = Math.floor(explicitBudget);
+      if (floored > 0) budget = floored;
+    }
+  }
+
+  const fitted = fitGlm53Budget(budget, maxTokens);
+  return {
+    thinking: fitted !== undefined ? { type: "enabled", budget_tokens: fitted } : { type: "enabled" },
+    output_config: base.output_config,
+  };
 }
 
 function translateToolChoice(

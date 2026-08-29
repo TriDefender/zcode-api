@@ -198,6 +198,14 @@ export interface AnthropicMessagesRequest {
   tools?: AnthropicToolDefinition[];
   tool_choice?: { type: "auto" | "any" | "tool"; name?: string };
   thinking?: AnthropicThinkingConfig;
+  /** GLM-5.3+ reasoning-effort channel; the Anthropic upstream ignores `reasoning_effort`. */
+  output_config?: AnthropicOutputConfig;
+}
+
+/** GLM-5.3+ reasoning-effort control (Anthropic upstream extension). */
+export interface AnthropicOutputConfig {
+  effort?: string;
+  task_budget?: { type: string; [k: string]: unknown };
 }
 
 /** Anthropic thinking/reasoning control. */
