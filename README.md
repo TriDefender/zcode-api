@@ -38,15 +38,16 @@ provider: zai  # or bigmodel
 ### Option 2: OAuth Login (browser-based, both providers)
 
 ```bash
-# Z.AI auth-code flow (chat.z.ai authorize → zcode.z.ai token exchange)
+# Z.AI server-mediated CLI login (3.10 parity: init/poll at zcode.z.ai, no local callback)
 bun run src/index.ts auth login zai
 
-# Bigmodel auth-code flow (bigmodel.cn authorize → zcode.z.ai token exchange)
+# Bigmodel auth-code flow (bigmodel.cn authorize → localhost callback → zcode.z.ai token exchange)
 bun run src/index.ts auth login bigmodel
 
 # This will:
 # 1. Print an authorize URL and open your browser
-# 2. Exchange the auth code for upstream credentials
+# 2. Z.AI: poll the server until authorization completes;
+#    Bigmodel: receive the browser callback and exchange the auth code
 # 3. Resolve your coding-plan API key automatically
 # 4. Save encrypted credentials to ~/.zcode-proxy/credentials.json
 
