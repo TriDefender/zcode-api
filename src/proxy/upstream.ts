@@ -32,7 +32,7 @@ export type UpstreamHeaderPair = [string, string];
 
 const ANTHROPIC_VERSION = "2023-06-01";
 
-const STARTPLAN_OPENAI_BASE = "https://zcode.z.ai/api/v1/zcode-plan";
+const STARTPLAN_ANTHROPIC_BASE = "https://zcode.z.ai/api/v1/zcode-plan";
 
 const STRIP_HEADERS = new Set([
   "host",
@@ -70,7 +70,12 @@ const STRIP_HEADERS = new Set([
  */
 export function buildUpstreamURL(format: Format, provider: ProviderDef, plan: "coding-plan" | "start-plan" = "coding-plan"): string {
   if (plan === "start-plan") {
-    return `${STARTPLAN_OPENAI_BASE}/chat/completions`;
+    // Anthropic-messages gateway used by the live ZCode desktop client for
+    // start-plan (incl. claimed trial plans like the weekend package).
+    // The legacy OpenAI route `${STARTPLAN_ANTHROPIC_BASE}/chat/completions`
+    // returns "404 page not found" since the server-side rollout of this
+    // endpoint (observed 2026-08-28).
+    return `${STARTPLAN_ANTHROPIC_BASE}/anthropic/v1/messages`;
   }
   if (format === "anthropic") {
     return `${provider.anthropicBaseURL}/v1/messages`;
