@@ -3,8 +3,9 @@
  * @see .omo/plans/zcode-proxy.md Task 12
  * @see https://docs.anthropic.com/en/api/messages-streaming
  */
-import type { AnthropicStreamEvent, OpenAIStreamChunk, OpenAIStreamToolCall, OpenAIUsage } from "./types.js";
+import type { AnthropicStreamEvent, AnthropicUsage, OpenAIStreamChunk, OpenAIStreamToolCall, OpenAIUsage } from "./types.js";
 import { openaiUsageToAnthropic } from "./anthropic-to-openai.js";
+import { anthropicUsageToOpenAI } from "./openai-to-anthropic.js";
 
 /** Parse a raw SSE chunk string into event type + JSON data. */
 export interface ParsedSSE {
@@ -47,8 +48,8 @@ export interface TranslationState {
   messageId: string;
   model: string;
   roleSent: boolean;
-  inputTokens: number;
-  outputTokens: number;
+  /** Running Anthropic usage snapshot; the upstream reports it incrementally. */
+  usage: AnthropicUsage;
   toolCallIndex: number;
   blockIndexToToolCallIndex: Map<number, number>;
   finishReasonSent: boolean;
@@ -59,21 +60,34 @@ export function initState(model: string): TranslationState {
     messageId: "",
     model,
     roleSent: false,
-    inputTokens: 0,
-    outputTokens: 0,
+    usage: { input_tokens: 0, output_tokens: 0 },
     toolCallIndex: 0,
     blockIndexToToolCallIndex: new Map(),
     finishReasonSent: false,
   };
 }
 
+/**
+ * Fold an incremental usage report into the running snapshot, field by field.
+ * Overwrite (not accumulate) semantics: the upstream re-reports absolute
+ * totals, so a later 0 must win over an earlier non-zero, while a field the
+ * event omits keeps its previous value.
+ */
+function mergeAnthropicUsage(target: AnthropicUsage, patch: Partial<AnthropicUsage> | undefined): void {
+  if (!patch) return;
+  if (patch.input_tokens != null) target.input_tokens = patch.input_tokens;
+  if (patch.output_tokens != null) target.output_tokens = patch.output_tokens;
+  if (patch.cache_read_input_tokens != null) target.cache_read_input_tokens = patch.cache_read_input_tokens;
+  if (patch.cache_creation_input_tokens != null) target.cache_creation_input_tokens = patch.cache_creation_input_tokens;
+}
+
 function makeChunk(
   state: TranslationState,
   delta: Record<string, unknown>,
   finishReason: string | null = null,
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number },
+  usage?: OpenAIUsage,
 ): string {
-  const chunk: OpenAIStreamChunk & { usage?: typeof usage } = {
+  const chunk: OpenAIStreamChunk = {
     id: state.messageId || "chatcmpl-stream",
     object: "chat.completion.chunk",
     created: Math.floor(Date.now() / 1000),
@@ -160,7 +174,7 @@ export function translateEvent(state: TranslationState, sse: ParsedSSE): string 
       const msg = (data as any).message;
       state.messageId = msg?.id ?? "msg_stream";
       state.model = msg?.model ?? state.model;
-      state.inputTokens = msg?.usage?.input_tokens ?? 0;
+      mergeAnthropicUsage(state.usage, msg?.usage);
       if (!state.roleSent) {
         state.roleSent = true;
         return makeChunk(state, { role: "assistant" });
@@ -214,30 +228,25 @@ export function translateEvent(state: TranslationState, sse: ParsedSSE): string 
     }
 
     case "message_delta": {
-      const dataAny = data as any;
-      const delta = dataAny.delta;
-      if (dataAny?.usage?.output_tokens !== undefined) {
-        state.outputTokens = dataAny.usage.output_tokens;
-      }
-      if (delta?.stop_reason) {
-        const finishReason = mapStopReason(delta.stop_reason);
+      // Fold usage in *before* the stop_reason branch: the upstream carries
+      // both in the same event, and this is the only place the real input and
+      // cache counts ever arrive. Usage that lands only *after* the finish
+      // chunk was emitted updates the snapshot but is not re-announced — the
+      // alternative is a trailing `choices: []` usage chunk, which some clients
+      // index into blindly. No observed upstream orders the events that way.
+      mergeAnthropicUsage(state.usage, data.usage);
+      if (data.delta?.stop_reason && !state.finishReasonSent) {
+        const finishReason = mapStopReason(data.delta.stop_reason);
         state.finishReasonSent = true;
-        return makeChunk(state, {}, finishReason, {
-          prompt_tokens: state.inputTokens,
-          completion_tokens: state.outputTokens,
-          total_tokens: state.inputTokens + state.outputTokens,
-        });
+        return makeChunk(state, {}, finishReason, anthropicUsageToOpenAI(state.usage));
       }
       return null;
     }
 
     case "message_stop": {
       if (state.finishReasonSent) return null;
-      return makeChunk(state, {}, "stop", {
-        prompt_tokens: state.inputTokens,
-        completion_tokens: state.outputTokens,
-        total_tokens: state.inputTokens + state.outputTokens,
-      });
+      state.finishReasonSent = true;
+      return makeChunk(state, {}, "stop", anthropicUsageToOpenAI(state.usage));
     }
 
     case "ping":
