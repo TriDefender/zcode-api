@@ -42,6 +42,12 @@ interface ParsedChunk {
     };
     finish_reason: string | null;
   }>;
+  usage?: {
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
 }
 
 function parseChunks(output: string): ParsedChunk[] {
@@ -185,6 +191,187 @@ describe("anthropicSseToOpenaiSse", () => {
     expect(output).toContain('"prompt_tokens":10');
     expect(output).toContain('"completion_tokens":5');
     expect(output).toContain('"total_tokens":15');
+  });
+
+  it("takes the real usage from message_delta when message_start reports zeros", async () => {
+    const sse = [
+      'event: message_start',
+      `data: ${JSON.stringify({
+        type: "message_start",
+        message: { id: "msg_1", model: "glm-4.6", usage: { input_tokens: 0, output_tokens: 0 } },
+      })}`,
+      '',
+      'event: message_delta',
+      `data: ${JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: {
+          input_tokens: 8,
+          output_tokens: 3,
+          cache_read_input_tokens: 1216,
+          server_tool_use: { web_search_requests: 0 },
+          service_tier: "standard",
+        },
+      })}`,
+      '',
+      'event: message_stop',
+      `data: ${JSON.stringify({ type: "message_stop" })}`,
+      '',
+    ].join('\n');
+
+    const output = await collectStream(anthropicSseToOpenaiSse(makeStream(sse), "glm-4.6"));
+    const usageChunks = parseChunks(output).filter((c) => c.usage);
+
+    expect(usageChunks).toHaveLength(1);
+    expect(usageChunks[0].choices[0].finish_reason).toBe("stop");
+    expect(usageChunks[0].usage).toEqual({
+      prompt_tokens: 1224,
+      completion_tokens: 3,
+      total_tokens: 1227,
+      prompt_tokens_details: { cached_tokens: 1216 },
+    });
+  });
+
+  it("merges successive usage deltas per field, last write wins", async () => {
+    const sse = [
+      'event: message_start',
+      `data: ${JSON.stringify({
+        type: "message_start",
+        message: { id: "msg_1", model: "glm-4.6", usage: { input_tokens: 0, output_tokens: 0 } },
+      })}`,
+      '',
+      'event: message_delta',
+      `data: ${JSON.stringify({
+        type: "message_delta",
+        delta: {},
+        usage: { input_tokens: 10, cache_read_input_tokens: 1216, cache_creation_input_tokens: 4 },
+      })}`,
+      '',
+      'event: message_delta',
+      `data: ${JSON.stringify({ type: "message_delta", delta: {}, usage: { input_tokens: 8 } })}`,
+      '',
+      'event: message_delta',
+      `data: ${JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 3, cache_read_input_tokens: 0 },
+      })}`,
+      '',
+      'event: message_stop',
+      `data: ${JSON.stringify({ type: "message_stop" })}`,
+      '',
+    ].join('\n');
+
+    const output = await collectStream(anthropicSseToOpenaiSse(makeStream(sse), "glm-4.6"));
+    const usageChunk = parseChunks(output).find((c) => c.usage);
+
+    // input 8 (overwritten), cache_read 0 (a later zero wins), cache_creation 4 (retained).
+    expect(usageChunk?.usage).toEqual({
+      prompt_tokens: 12,
+      completion_tokens: 3,
+      total_tokens: 15,
+      prompt_tokens_details: { cached_tokens: 0 },
+    });
+  });
+
+  it("falls back to message_start usage when no message_delta arrives", async () => {
+    const sse = [
+      'event: message_start',
+      `data: ${JSON.stringify({
+        type: "message_start",
+        message: {
+          id: "msg_1",
+          model: "glm-4.6",
+          usage: {
+            input_tokens: 10,
+            output_tokens: 5,
+            cache_read_input_tokens: 20,
+            cache_creation_input_tokens: 2,
+          },
+        },
+      })}`,
+      '',
+      'event: message_stop',
+      `data: ${JSON.stringify({ type: "message_stop" })}`,
+      '',
+    ].join('\n');
+
+    const output = await collectStream(anthropicSseToOpenaiSse(makeStream(sse), "glm-4.6"));
+    const usageChunk = parseChunks(output).find((c) => c.usage);
+
+    expect(usageChunk?.usage).toEqual({
+      prompt_tokens: 32,
+      completion_tokens: 5,
+      total_tokens: 37,
+      prompt_tokens_details: { cached_tokens: 20 },
+    });
+  });
+
+  it("accepts a usage-only message_delta that carries no delta member at all", async () => {
+    const sse = [
+      'event: message_start',
+      `data: ${JSON.stringify({ type: "message_start", message: { id: "msg_1", model: "glm-4.6" } })}`,
+      '',
+      'event: message_delta',
+      `data: ${JSON.stringify({ type: "message_delta", usage: { input_tokens: 40, output_tokens: 7 } })}`,
+      '',
+      'event: message_stop',
+      `data: ${JSON.stringify({ type: "message_stop" })}`,
+      '',
+    ].join('\n');
+
+    const output = await collectStream(anthropicSseToOpenaiSse(makeStream(sse), "glm-4.6"));
+    const usageChunk = parseChunks(output).find((c) => c.usage);
+
+    expect(usageChunk?.usage).toEqual({ prompt_tokens: 40, completion_tokens: 7, total_tokens: 47 });
+  });
+
+  it("emits a single finish chunk when two message_delta events both carry a stop_reason", async () => {
+    const sse = [
+      'event: message_start',
+      `data: ${JSON.stringify({ type: "message_start", message: { id: "msg_1", model: "glm-4.6" } })}`,
+      '',
+      'event: message_delta',
+      `data: ${JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { input_tokens: 40, output_tokens: 7 },
+      })}`,
+      '',
+      'event: message_delta',
+      `data: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "max_tokens" } })}`,
+      '',
+      'event: message_stop',
+      `data: ${JSON.stringify({ type: "message_stop" })}`,
+      '',
+    ].join('\n');
+
+    const output = await collectStream(anthropicSseToOpenaiSse(makeStream(sse), "glm-4.6"));
+    const finishChunks = parseChunks(output).filter((c) => c.choices[0]?.finish_reason);
+
+    expect(finishChunks).toHaveLength(1);
+    expect(finishChunks[0].choices[0].finish_reason).toBe("stop");
+    expect(finishChunks[0].usage).toEqual({ prompt_tokens: 40, completion_tokens: 7, total_tokens: 47 });
+  });
+
+  it("still emits a zeroed usage block when the upstream reports none", async () => {
+    const sse = [
+      'event: message_start',
+      `data: ${JSON.stringify({ type: "message_start", message: { id: "msg_1", model: "glm-4.6" } })}`,
+      '',
+      'event: message_stop',
+      `data: ${JSON.stringify({ type: "message_stop" })}`,
+      '',
+    ].join('\n');
+
+    const output = await collectStream(anthropicSseToOpenaiSse(makeStream(sse), "glm-4.6"));
+    const usageChunk = parseChunks(output).find((c) => c.usage);
+
+    expect(usageChunk?.usage).toEqual({
+      prompt_tokens: 0,
+      completion_tokens: 0,
+      total_tokens: 0,
+    });
   });
 
   it("handles max_tokens stop reason", async () => {
