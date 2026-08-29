@@ -626,11 +626,12 @@ describe("translateRequestOpenAIToAnthropic", () => {
 
     // The effort channel is keyed off the model id, not off catalog membership,
     // so it keeps working for a family member the pinned catalog does not list
-    // (glm-5.3-flash is one today). Only the max_tokens fallback consults the
-    // catalog, and it degrades to the generic default rather than failing.
-    it("glm-5.3-flash (absent from the pinned catalog) still gets the effort channel, with the generic max_tokens fallback", () => {
+    // (glm-5.3-flash used to be one until master pinned it). Only the
+    // max_tokens fallback consults the catalog, and it degrades to the generic
+    // default rather than failing.
+    it("an unlisted GLM-5.3-family id still gets the effort channel, with the generic max_tokens fallback", () => {
       const req: OpenAIChatRequest = {
-        model: "glm-5.3-flash",
+        model: "glm-5.3-air",
         messages: [{ role: "user", content: "Hi" }],
         reasoning_effort: "max",
       };
@@ -641,6 +642,20 @@ describe("translateRequestOpenAIToAnthropic", () => {
       expect(result.max_tokens).toBe(4096);
       // max effort's 32_000 budget is clamped under the small fallback.
       expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 4096 - 1024 });
+    });
+
+    it("glm-5.3-flash (pinned since master advertised it) gets the same model-aware default as glm-5.3", () => {
+      const req: OpenAIChatRequest = {
+        model: "glm-5.3-flash",
+        messages: [{ role: "user", content: "Hi" }],
+        reasoning_effort: "max",
+      };
+
+      const result = translateRequestOpenAIToAnthropic(req);
+
+      expect(result.output_config).toEqual({ effort: "max" });
+      expect(result.max_tokens).toBe(128_000);
+      expect(result.thinking).toEqual({ type: "enabled", budget_tokens: 32_000 });
     });
 
     it("a GLM-5.3-family id absent from the catalog falls back to the generic 4096 default, not a crash", () => {
