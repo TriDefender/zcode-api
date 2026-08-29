@@ -10,7 +10,10 @@ bun install
 
 # Copy and edit config
 cp config.example.yaml config.yaml
-# Edit config.yaml — set your API key
+# Default auth is OAuth — log in first (see Authentication below)
+
+# Log in (OAuth, browser-based)
+bun run src/index.ts auth login zai        # or: bigmodel
 
 # Start the proxy
 bun run src/index.ts
@@ -19,14 +22,17 @@ bun run src/index.ts
 bun run src/index.ts /path/to/config.yaml
 ```
 
+Prefer a plain API key? Set `auth.mode: apikey` in `config.yaml` and fill in
+`auth.apiKey` instead — see Option 1 under Authentication.
+
 ## Authentication
 
-### Option 1: Direct API Key (simplest)
+### Option 1: Direct API Key (opt-in)
 
 1. Get an API key from [Z.AI](https://z.ai) or [Bigmodel](https://bigmodel.cn)
 2. For Z.AI you need `{apiKey}.{secretKey}` format
 3. For Bigmodel you need `{apiKey}` format
-4. Set it in `config.yaml`:
+4. Set it in `config.yaml` (`mode: apikey` must be explicit — OAuth is the default):
 
 ```yaml
 auth:
@@ -35,7 +41,10 @@ auth:
 provider: zai  # or bigmodel
 ```
 
-### Option 2: OAuth Login (browser-based, both providers)
+### Option 2: OAuth Login (browser-based, both providers) — default
+
+This is the default mode (`auth.mode: oauth` in `config.example.yaml`); the
+`mode` line below can be omitted.
 
 ```bash
 # Z.AI server-mediated CLI login (3.10 parity: init/poll at zcode.z.ai, no local callback)
@@ -207,6 +216,34 @@ Features: streaming responses (SSE), model picker (auto-populated from
 upload (auto-enabled for models whose id contains `v`), MCP HTTP servers,
 markdown + code-highlight rendering, light/dark theme, and per-browser
 multi-session autosave (localStorage). Open Settings (⚙) to configure.
+
+### Terminal UI (TUI)
+
+```bash
+bun run src/index.ts tui            # same as serve, plus an interactive panel
+bun run src/index.ts tui debug      # with per-request debug diagnostics
+```
+
+A PC terminal control panel mirroring the Android app's layout — three cards
+(Settings & Login / Proxy Server / Logs) rendered in the alternate screen with
+zero extra dependencies. The proxy auto-starts on launch when credentials are
+available; the log card shows live per-request rows (console output is
+captured in-process) with scrollback and tail-following.
+
+| Key | Action |
+|-----|--------|
+| `s` | Start / stop the proxy server |
+| `l` | OAuth login for the current provider (opens the browser) |
+| `o` | Logout (cancels an in-flight login and releases its callback port) |
+| `p` / `t` | Switch provider (`zai` ↔ `bigmodel`) / plan (`coding-plan` ↔ `start-plan`) — requires the proxy stopped, persisted to `config.yaml` |
+| `↑↓` / `PgUp`/`PgDn` / `Home`/`End` | Scroll the log pane |
+| `g` | Jump back to the tail (re-enable following) |
+| `c` | Clear the log pane |
+| `q` / `Ctrl+C` | Quit |
+
+Set `ZCODE_TUI_LOGFILE=/path/to/file.log` to also tee every captured line to a
+file (best-effort; never affects handling). Requires a TTY with at least
+40x14 cells; Windows Terminal, mintty and common Unix terminals are supported.
 
 ## Configuration
 

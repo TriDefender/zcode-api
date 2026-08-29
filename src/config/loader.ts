@@ -32,6 +32,7 @@ const DEFAULTS = {
   HOST: "0.0.0.0",
   PROVIDER: "zai" as const,
   PLAN: "coding-plan" as const,
+  AUTH_MODE: "oauth" as const,
   DEFAULT_MODEL: "glm-4.6",
   LOG_LEVEL: "info" as const,
   ZAI_ANTHROPIC_BASE: "https://api.z.ai/api/anthropic",
@@ -93,7 +94,9 @@ export function loadConfig(path: string): ProxyConfig {
 
   // --- auth ---
   const proxyApiKey = process.env[ENV.PROXY_API_KEY] ?? parsed?.auth?.proxyApiKey;
-  const mode = parsed?.auth?.mode === "oauth" ? "oauth" : "apikey";
+  // OAuth is the default (mirrors the ZCode client's connection modes);
+  // apikey is the explicit opt-out for pre-obtained keys.
+  const mode = parsed?.auth?.mode === "apikey" ? "apikey" : DEFAULTS.AUTH_MODE;
   const apiKey = process.env[ENV.API_KEY] ?? parsed?.auth?.apiKey;
   const oauthCredentialsPath = parsed?.auth?.oauthCredentialsPath;
 

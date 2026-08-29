@@ -12,14 +12,14 @@ export const EXAMPLE_CONFIG_YAML: string = `server:
   host: "0.0.0.0"
 
 auth:
+  # "oauth"   = use OAuth login flow (run \`bun run src/index.ts auth login\` first) — default
   # "apikey"  = use a pre-obtained API key directly
-  # "oauth"   = use OAuth login flow (run \`bun run src/index.ts auth login\` first)
-  mode: apikey
+  mode: oauth
 
-  # For apikey mode:
+  # Only used in apikey mode (ignored in oauth mode):
   #   Z.AI:     "yourApiKey.yourSecretKey"
   #   Bigmodel: "yourApiKey"
-  apiKey: "YOUR_API_KEY_HERE"
+  # apiKey: "YOUR_API_KEY_HERE"
 
   # Key that clients must provide to use the proxy.
   # Set to null/omit to disable client auth.

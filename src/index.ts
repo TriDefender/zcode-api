@@ -7,22 +7,22 @@ import { EXAMPLE_CONFIG_YAML } from "./config/template.js";
 import { AuthManager } from "./auth/manager.js";
 import { startServer, type ProxyServer } from "./server/server.js";
 import { startControlListener, LogBuffer, type ControlState } from "./android/control.js";
-import { ResponseStore } from "./responses/store.js";
 import { loadCredential, saveCredential, clearCredential, getStorePath } from "./auth/store.js";
 import { ZaiOAuthClient, BigmodelOAuthClient } from "./auth/oauth.js";
 import { KeyResolver } from "./auth/resolver.js";
 import type { Credential } from "./auth/types.js";
 import type { ProviderId } from "./provider/types.js";
 import type { ProxyConfig } from "./config/types.js";
-import { parse, stringify } from "yaml";
-import { spawn } from "node:child_process";
+import { updateConfigYaml } from "./config/edit.js";
+import { openBrowser } from "./runtime/open-browser.js";
+import { buildServerOptions } from "./server/server-options.js";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { ensureNodeFetchNoTimeouts } from "./runtime/node-fetch-compat.js";
 
-const VERSION = "2.6.0";
+export const VERSION = "2.6.0";
 
 if (require.main === module) main();
 
@@ -74,6 +74,16 @@ function runCli(): void {
       process.stderr.write(`zcode-proxy: android entry failed: ${(err as Error).stack ?? String(err)}\n`);
       process.exit(1);
     });
+  } else if (cmd === "tui") {
+    // Dynamic import: the TUI module imports helpers back from this file, so a
+    // static edge would create a load-time cycle (same pattern as claimCommand).
+    const tuiArgs = parseServeArgs(args.slice(1));
+    import("./tui/app.js")
+      .then((m) => m.runTui(tuiArgs))
+      .catch((err: unknown) => {
+        process.stderr.write(`zcode-proxy: tui failed: ${(err as Error).stack ?? String(err)}\n`);
+        process.exit(1);
+      });
   } else if (cmd === "serve" || cmd.endsWith(".yaml") || cmd.endsWith(".yml")) {
     const serveArgs = cmd === "serve"
       ? parseServeArgs(args.slice(1))
@@ -97,6 +107,7 @@ Usage:
   zcode-proxy serve [config.yaml]   Start the proxy server (default)
   zcode-proxy serve debug [config.yaml]
                                     Start with verbose per-request diagnostics
+  zcode-proxy tui [config.yaml]     Interactive terminal UI (login / start-stop / live logs)
   zcode-proxy android               Android entry: proxy + localhost control listener
   zcode-proxy auth login <provider> Login via OAuth (provider: zai | bigmodel)
   zcode-proxy auth login <provider> --import
@@ -110,6 +121,7 @@ Usage:
 Examples:
   zcode-proxy                       Start server with default config.yaml
   zcode-proxy serve debug           Start with extra debug logging
+  zcode-proxy tui                   Terminal UI: login, start/stop, live logs
   zcode-proxy auth login bigmodel   OAuth login for Bigmodel
   zcode-proxy auth login bigmodel --import
                                     Import existing key from ZCode config
@@ -123,7 +135,7 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
     writeFileSync(path, EXAMPLE_CONFIG_YAML, "utf-8");
     ensureDeviceMidInConfig(path);
     console.log(`Created ${path} from bundled template.`);
-    console.log(`Edit auth.apiKey, or run: zcode-proxy auth login <zai|bigmodel>\n`);
+    console.log(`Run: zcode-proxy auth login <zai|bigmodel> (or set auth.mode: "apikey" + auth.apiKey in the config)\n`);
   }
   const config = loadConfig(path);
 
@@ -176,15 +188,6 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   process.on("SIGTERM", () => {
     server.stop(true);
   });
-}
-
-/** Build `startServer` options, wiring the Responses store and MCP pool when their config gates are on. */
-function buildServerOptions(config: ProxyConfig, auth: AuthManager, debug: boolean): { config: ProxyConfig; auth: AuthManager; debug: boolean; responseStore?: ResponseStore } {
-  const opts: { config: ProxyConfig; auth: AuthManager; debug: boolean; responseStore?: ResponseStore } = { config, auth, debug };
-  if (config.responses.enabled) {
-    opts.responseStore = new ResponseStore({ maxEntries: config.responses.storeMaxEntries, ttlMs: config.responses.storeTtlMs });
-  }
-  return opts;
 }
 
 /**
@@ -320,15 +323,6 @@ async function runAndroid(): Promise<void> {
   process.on("SIGTERM", () => {
     void controlListener.close().then(() => serverRef.current?.stop(true));
   });
-}
-
-/** Targeted YAML update of top-level `provider` and `plan` keys. */
-function updateConfigYaml(path: string, fields: { provider: ProviderId; plan: "coding-plan" | "start-plan" }): void {
-  const raw = readFileSync(path, "utf-8");
-  const parsed = parse(raw) ?? {};
-  parsed.provider = fields.provider;
-  parsed.plan = fields.plan;
-  writeFileSync(path, stringify(parsed), "utf-8");
 }
 
 function printDebugBanner(config: ProxyConfig, path: string): void {
@@ -546,18 +540,4 @@ function importFromZCodeConfig(provider: ProviderId): Credential {
   console.log(`Imported from ${configPath}`);
   if (jwt) console.log(`  Start-plan JWT: ${jwt.slice(0, 12)}...`);
   return { apiKey, provider, jwt };
-}
-
-function openBrowser(url: string): void {
-  try {
-    if (process.platform === "win32") {
-      spawn("cmd.exe", ["/c", `start "" "${url}"`], {
-        detached: true, stdio: "ignore", windowsHide: true, windowsVerbatimArguments: true,
-      }).unref();
-    } else if (process.platform === "darwin") {
-      spawn("open", [url], { detached: true, stdio: "ignore" }).unref();
-    } else {
-      spawn("xdg-open", [url], { detached: true, stdio: "ignore" }).unref();
-    }
-  } catch { /* user copies URL manually */ }
 }

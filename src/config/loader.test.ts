@@ -410,6 +410,25 @@ auth:
     expect(cfg.auth.apiKey).toBeUndefined();
   });
 
+  it("defaults to oauth mode when auth.mode is unset", () => {
+    const path = writeYaml(`
+auth:
+  proxyApiKey: "client-secret"
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.auth.mode).toBe("oauth");
+    expect(cfg.auth.apiKey).toBeUndefined();
+  });
+
+  it("falls back to oauth mode for unknown auth.mode values", () => {
+    const path = writeYaml(`
+auth:
+  mode: ApiKey
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.auth.mode).toBe("oauth");
+  });
+
   it("throws when config file not found", () => {
     expect(() => loadConfig("/nonexistent/path/config.yaml")).toThrow(/not found/);
   });
