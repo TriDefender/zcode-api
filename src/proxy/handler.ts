@@ -230,8 +230,15 @@ export async function proxyRequest(
     // connect") happen a few times a day against the gateway. Retry the
     // CONNECT twice with a short backoff before surfacing a 502 — the
     // request never reached upstream, so resending is side-effect-free.
+    // Guard rails (review P1/P2 + nits): skip retry when the client already
+    // aborted, and re-dispatch a FRESH Request each attempt — a reused
+    // Request has its body stream marked used after the first fetch, so
+    // attempt 2+ would throw "Request body already used" before any I/O
+    // (start-plan hits the plain pass-through path where dispatch does NOT
+    // rebuild the Request).
     const maxConnectAttempts = 3;
     for (let attempt = 1; ; attempt++) {
+      if (clientReq.signal.aborted) throw new Error("client aborted before upstream connect");
       try {
         upstreamResp = await dispatch(upstreamReq, upstreamHeaderPairs);
         break;
@@ -241,6 +248,10 @@ export async function proxyRequest(
         if (debug) debugError(reqId, "upstream_connect_retry", `attempt ${attempt}/${maxConnectAttempts - 1} failed (${(err as Error).message}), retrying in ${backoffMs}ms`);
         console.log(`${reqId} upstream connect failed (${(err as Error).message}), retry ${attempt + 1}/${maxConnectAttempts} in ${backoffMs}ms`);
         await new Promise((r) => setTimeout(r, backoffMs));
+        // Rebuild the Request so the body stream is fresh for the next
+        // dispatch (mirrors the captcha retry, which already constructs a
+        // new Request per attempt).
+        upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
       }
     }
   } catch (err) {
