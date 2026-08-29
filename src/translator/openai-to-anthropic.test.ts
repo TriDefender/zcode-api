@@ -6,10 +6,12 @@ import { describe, it, expect } from "bun:test";
 import {
   translateRequestOpenAIToAnthropic,
   translateResponseAnthropicToOpenAI,
+  anthropicUsageToOpenAI,
 } from "./openai-to-anthropic.js";
 import {
   translateRequestAnthropicToOpenAI,
   translateResponseOpenAIToAnthropic,
+  openaiUsageToAnthropic,
 } from "./anthropic-to-openai.js";
 import type {
   OpenAIChatRequest,
@@ -466,6 +468,76 @@ describe("translateRequestOpenAIToAnthropic", () => {
   });
 });
 
+describe("anthropicUsageToOpenAI", () => {
+  it("folds cache reads into prompt_tokens and reports them as cached_tokens", () => {
+    expect(anthropicUsageToOpenAI({
+      input_tokens: 8,
+      output_tokens: 3,
+      cache_read_input_tokens: 1216,
+      cache_creation_input_tokens: 0,
+    })).toEqual({
+      prompt_tokens: 1224,
+      completion_tokens: 3,
+      total_tokens: 1227,
+      prompt_tokens_details: { cached_tokens: 1216 },
+    });
+  });
+
+  it("counts both cache buckets but exposes only the read bucket", () => {
+    const usage = anthropicUsageToOpenAI({
+      input_tokens: 100,
+      output_tokens: 5,
+      cache_read_input_tokens: 20,
+      cache_creation_input_tokens: 30,
+    });
+
+    expect(usage).toEqual({
+      prompt_tokens: 150,
+      completion_tokens: 5,
+      total_tokens: 155,
+      prompt_tokens_details: { cached_tokens: 20 },
+    });
+    expect(usage).not.toHaveProperty("cache_read_input_tokens");
+    expect(usage).not.toHaveProperty("cache_creation_input_tokens");
+  });
+
+  it("does not fabricate prompt_tokens_details when no cache bucket is reported", () => {
+    expect(anthropicUsageToOpenAI({ input_tokens: 10, output_tokens: 2 })).toEqual({
+      prompt_tokens: 10,
+      completion_tokens: 2,
+      total_tokens: 12,
+    });
+  });
+
+  it("preserves an explicitly reported zero cache read", () => {
+    expect(anthropicUsageToOpenAI({
+      input_tokens: 10,
+      output_tokens: 2,
+      cache_read_input_tokens: 0,
+    }).prompt_tokens_details).toEqual({ cached_tokens: 0 });
+  });
+
+  it("round-trips fresh input and cache reads through openaiUsageToAnthropic", () => {
+    const anthropic = { input_tokens: 8, output_tokens: 3, cache_read_input_tokens: 1216 };
+    expect(openaiUsageToAnthropic(anthropicUsageToOpenAI(anthropic))).toEqual(anthropic);
+  });
+
+  it("round-trips totals but not the cache-creation bucket, which OpenAI cannot express", () => {
+    const anthropic = {
+      input_tokens: 8,
+      output_tokens: 3,
+      cache_read_input_tokens: 100,
+      cache_creation_input_tokens: 20,
+    };
+    const back = openaiUsageToAnthropic(anthropicUsageToOpenAI(anthropic));
+
+    expect(back.input_tokens + (back.cache_read_input_tokens ?? 0) + (back.cache_creation_input_tokens ?? 0))
+      .toBe(128);
+    expect(back.cache_creation_input_tokens).toBeUndefined();
+    expect(back.input_tokens).toBe(28);
+  });
+});
+
 describe("translateResponseAnthropicToOpenAI", () => {
   it("extracts text content from response", () => {
     const resp: AnthropicMessagesResponse = {
@@ -533,6 +605,31 @@ describe("translateResponseAnthropicToOpenAI", () => {
     expect(result.usage!.prompt_tokens).toBe(100);
     expect(result.usage!.completion_tokens).toBe(50);
     expect(result.usage!.total_tokens).toBe(150);
+  });
+
+  it("reports cache-inclusive prompt_tokens for a cached response", () => {
+    const resp: AnthropicMessagesResponse = {
+      id: "msg_1",
+      type: "message",
+      role: "assistant",
+      content: [{ type: "text", text: "Hi" }],
+      model: "glm-4.6",
+      stop_reason: "end_turn",
+      stop_sequence: null,
+      usage: {
+        input_tokens: 8,
+        output_tokens: 3,
+        cache_read_input_tokens: 1216,
+        cache_creation_input_tokens: 0,
+      },
+    };
+
+    expect(translateResponseAnthropicToOpenAI(resp, "glm-4.6").usage).toEqual({
+      prompt_tokens: 1224,
+      completion_tokens: 3,
+      total_tokens: 1227,
+      prompt_tokens_details: { cached_tokens: 1216 },
+    });
   });
 
   it("preserves thinking blocks as OpenAI reasoning_content", () => {
