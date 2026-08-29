@@ -1044,7 +1044,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
     expect(body.content[0]).toEqual({ type: "text", text: "Hi" });
   });
 
-  it("start-plan OpenAI request uses ZCode OpenAI-compatible gateway", async () => {
+  it("start-plan OpenAI request translates to the live Anthropic gateway (Bearer JWT)", async () => {
     const startPlanConfig: ProxyConfig = {
       ...testConfig,
       plan: "start-plan",
@@ -1062,20 +1062,22 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
 
     try {
       const fetchMock = mock(async (req: Request): Promise<Response> => {
-        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages");
         expect(req.headers.get("authorization")).toBe("Bearer jwt-mock");
-        expect(req.headers.get("anthropic-version")).toBeNull();
+        expect(req.headers.get("anthropic-version")).toBe("2023-06-01");
         const reqBody = JSON.parse(await req.text());
-        expect(reqBody.messages[0].role).toBe("system");
-        expect(reqBody.messages[0].content).toBe("You are ZCode, an interactive coding agent");
-        expect(reqBody.messages.at(-1)).toEqual({ role: "user", content: "hi" });
+        expect(reqBody.system[0].text).toBe("You are ZCode, an interactive coding agent");
+        expect(reqBody.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }]);
+        expect(reqBody.max_tokens).toBe(4096);
         return new Response(JSON.stringify({
-          id: "chatcmpl_sp",
-          object: "chat.completion",
-          created: 1,
+          id: "msg_sp",
+          type: "message",
+          role: "assistant",
           model: "glm-4.6",
-          choices: [{ index: 0, message: { role: "assistant", content: "start-plan reply" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+          content: [{ type: "text", text: "start-plan reply" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 3 },
         }), { status: 200, headers: { "content-type": "application/json" } });
       });
 
@@ -1117,18 +1119,20 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
 
     try {
       const fetchMock = mock(async (req: Request): Promise<Response> => {
-        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages");
         expect(req.headers.get("x-request-id")).toBe("req_start_1");
         expect(req.headers.get("x-zcode-trace-id")).toBe("trace_start_1");
         expect(req.headers.get("x-query-id")).toBe("start_query_1");
         expect(req.headers.get("x-session-id")).toBe("start_session_1");
         return new Response(JSON.stringify({
-          id: "chatcmpl_sp",
-          object: "chat.completion",
-          created: 1,
+          id: "msg_sp",
+          type: "message",
+          role: "assistant",
           model: "glm-4.6",
-          choices: [{ index: 0, message: { role: "assistant", content: "start-plan reply" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+          content: [{ type: "text", text: "start-plan reply" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 3 },
         }), { status: 200, headers: { "content-type": "application/json" } });
       });
 
@@ -1177,15 +1181,17 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
     try {
       const seenSessions: string[] = [];
       const fetchMock = mock(async (req: Request): Promise<Response> => {
-        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages");
         seenSessions.push(req.headers.get("x-session-id") ?? "");
         return new Response(JSON.stringify({
-          id: "chatcmpl_sp",
-          object: "chat.completion",
-          created: 1,
+          id: "msg_sp",
+          type: "message",
+          role: "assistant",
           model: "glm-4.6",
-          choices: [{ index: 0, message: { role: "assistant", content: "start-plan reply" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+          content: [{ type: "text", text: "start-plan reply" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 3 },
         }), { status: 200, headers: { "content-type": "application/json" } });
       });
 
@@ -1213,7 +1219,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
     }
   });
 
-  it("start-plan Anthropic request translates through ZCode OpenAI-compatible gateway", async () => {
+  it("start-plan Anthropic request passes through to the live gateway with start-plan system blocks", async () => {
     const startPlanConfig: ProxyConfig = {
       ...testConfig,
       plan: "start-plan",
@@ -1232,18 +1238,21 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
     try {
       const fetchMock: typeof fetch = Object.assign(async (req: RequestInfo | URL): Promise<Response> => {
         if (!(req instanceof Request)) throw new Error("expected Request");
-        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages");
         expect(req.headers.get("authorization")).toBe("Bearer jwt-mock");
         const reqBody = JSON.parse(await req.text());
-        expect(reqBody.messages[0].role).toBe("system");
-        expect(reqBody.messages.at(-1)).toEqual({ role: "user", content: "hi" });
+        expect(reqBody.system[0].text).toBe("You are ZCode, an interactive coding agent");
+        expect(reqBody.messages).toEqual([{ role: "user", content: [{ type: "text", text: "hi", cache_control: { type: "ephemeral" } }] }]);
+        expect(reqBody.max_tokens).toBe(1024);
         return new Response(JSON.stringify({
-          id: "chatcmpl_sp",
-          object: "chat.completion",
-          created: 1,
+          id: "msg_sp",
+          type: "message",
+          role: "assistant",
           model: "glm-4.6",
-          choices: [{ index: 0, message: { role: "assistant", content: "start-plan reply" }, finish_reason: "stop" }],
-          usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 },
+          content: [{ type: "text", text: "start-plan reply" }],
+          stop_reason: "end_turn",
+          stop_sequence: null,
+          usage: { input_tokens: 5, output_tokens: 3 },
         }), { status: 200, headers: { "content-type": "application/json" } });
       }, { preconnect: originalFetch.preconnect });
 
@@ -1299,7 +1308,12 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
 
       const resp = await proxyRequest(clientReq, "openai", { config: startPlanConfig, auth, fetchImpl: fetchMock as any });
       expect(fetchMock).toHaveBeenCalledTimes(1);
-      expect(resp.status).toBe(403);
+      // Upstream errors are wrapped: openai→anthropic translation mode reports
+      // them as 502 translation_failed (same convention as coding-plan).
+      expect(resp.status).toBe(502);
+      const body = await resp.json();
+      expect(body.error.type).toBe("translation_failed");
+      expect(body.error.message).toContain("403");
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -1564,24 +1578,6 @@ describe("proxyRequest — thinking endpoint matrix", () => {
     });
   }
 
-  function openAIThinkingResponse(): string {
-    return JSON.stringify({
-      id: "chatcmpl_thinking",
-      object: "chat.completion",
-      created: 1,
-      model: "glm-4.6",
-      choices: [{
-        index: 0,
-        message: {
-          role: "assistant",
-          reasoning_content: "First step. Second step.",
-          content: "Final answer.",
-        },
-        finish_reason: "stop",
-      }],
-      usage: { prompt_tokens: 10, completion_tokens: 7, total_tokens: 17 },
-    });
-  }
 
   function anthropicThinkingSse(): string {
     return [
@@ -1621,22 +1617,6 @@ describe("proxyRequest — thinking endpoint matrix", () => {
     ].join("\n");
   }
 
-  function openAIThinkingSse(): string {
-    return [
-      'data: {"id":"chatcmpl_thinking","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}',
-      '',
-      'data: {"id":"chatcmpl_thinking","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"reasoning_content":"First step. "},"finish_reason":null}]}',
-      '',
-      'data: {"id":"chatcmpl_thinking","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"reasoning_content":"Second step."},"finish_reason":null}]}',
-      '',
-      'data: {"id":"chatcmpl_thinking","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{"content":"Final answer."},"finish_reason":null}]}',
-      '',
-      'data: {"id":"chatcmpl_thinking","object":"chat.completion.chunk","created":1,"model":"glm-4.6","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}',
-      '',
-      'data: [DONE]',
-      '',
-    ].join("\n");
-  }
 
   function openAIReasoningDeltas(sse: string): string[] {
     return sse
@@ -1753,11 +1733,11 @@ describe("proxyRequest — thinking endpoint matrix", () => {
     expect(text).toContain('"text":"Final answer."');
   });
 
-  it("start-plan OpenAI endpoint non-streaming passes through OpenAI upstream reasoning_content", async () => {
+  it("start-plan OpenAI endpoint non-streaming surfaces Anthropic upstream thinking as OpenAI reasoning_content", async () => {
     await withDisabledCaptcha(async () => {
       const fetchMock = mock(async (req: Request): Promise<Response> => {
-        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
-        return new Response(openAIThinkingResponse(), {
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages");
+        return new Response(anthropicThinkingResponse(), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -1776,11 +1756,11 @@ describe("proxyRequest — thinking endpoint matrix", () => {
     });
   });
 
-  it("start-plan OpenAI endpoint streaming passes through OpenAI upstream reasoning_content deltas", async () => {
+  it("start-plan OpenAI endpoint streaming surfaces Anthropic upstream thinking deltas as reasoning_content", async () => {
     await withDisabledCaptcha(async () => {
       const fetchMock = mock(async (req: Request): Promise<Response> => {
-        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
-        return new Response(openAIThinkingSse(), {
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages");
+        return new Response(anthropicThinkingSse(), {
           status: 200,
           headers: { "content-type": "text/event-stream" },
         });
@@ -1797,11 +1777,11 @@ describe("proxyRequest — thinking endpoint matrix", () => {
     });
   });
 
-  it("start-plan Anthropic endpoint non-streaming translates OpenAI upstream reasoning_content into thinking blocks", async () => {
+  it("start-plan Anthropic endpoint passes Anthropic upstream thinking through natively (non-streaming)", async () => {
     await withDisabledCaptcha(async () => {
       const fetchMock = mock(async (req: Request): Promise<Response> => {
-        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
-        return new Response(openAIThinkingResponse(), {
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages");
+        return new Response(anthropicThinkingResponse(), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -1815,16 +1795,16 @@ describe("proxyRequest — thinking endpoint matrix", () => {
 
       expect(resp.status).toBe(200);
       const body = await resp.json();
-      expect(body.content[0]).toEqual({ type: "thinking", thinking: "First step. Second step." });
+      expect(body.content[0]).toEqual({ type: "thinking", thinking: "First step. Second step.", signature: "sig_real" });
       expect(body.content[1]).toEqual({ type: "text", text: "Final answer." });
     });
   });
 
-  it("start-plan Anthropic endpoint streaming translates OpenAI upstream reasoning_content into one thinking block", async () => {
+  it("start-plan Anthropic endpoint passes Anthropic upstream thinking through natively (streaming)", async () => {
     await withDisabledCaptcha(async () => {
       const fetchMock = mock(async (req: Request): Promise<Response> => {
-        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/chat/completions");
-        return new Response(openAIThinkingSse(), {
+        expect(req.url).toBe("https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages");
+        return new Response(anthropicThinkingSse(), {
           status: 200,
           headers: { "content-type": "text/event-stream" },
         });

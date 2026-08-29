@@ -1751,7 +1751,14 @@ async function createDom(region, prefix) {
 const HOST_CRITICAL_GLOBALS = new Set([
   "process", "Bun", "console", "performance", "crypto", "fetch",
   "queueMicrotask", "structuredClone", "TextEncoder", "TextDecoder",
-  "requestAnimationFrame", "cancelAnimationFrame", "print",
+  "requestAnimationFrame", "cancelAnimationFrame",
+  // NOTE: `print` was removed from this list (2026-08-29). The polyfill
+  // defines a harmless no-op on the window, but the alias pass skipped it,
+  // so under Bun (guest scripts run in the HOST realm) the Aliyun pe risk
+  // engine hit a bare `print` reference → ReferenceError → broken
+  // fingerprint chain → degraded solve success rate (711 WINDOW-ERRORs in
+  // one day). Bun's host global has no native `print`, so aliasing the
+  // stub shadows nothing critical.
   "URL", "URLSearchParams", "AbortController", "AbortSignal",
   "ReadableStream", "WritableStream", "TransformStream", "Blob", "File",
   "FormData", "Headers", "Request", "Response", "Event", "EventTarget",
