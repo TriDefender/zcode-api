@@ -122,7 +122,7 @@ export async function proxyRequest(
     return errorResponse(503, "credential_unavailable", (err as Error).message);
   }
 
-  // v2.4: both plans use the Anthropic upstream. coding-plan mirrors the real
+  // v2.6: both plans use the Anthropic upstream. coding-plan mirrors the real
   // ZCode client (api.z.ai/api/anthropic → ultra via endpoint routing);
   // start-plan's old OpenAI gateway (/api/v1/zcode-plan/chat/completions) was
   // retired server-side (404 as of 2026-08-28) — the live desktop client now
