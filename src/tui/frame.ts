@@ -184,22 +184,26 @@ function composeRow(
   };
 }
 
-/** Radio-style option buttons: selected as a filled chip, other gray; both clickable unless disabled. */
-function optionParts(current: string, other: string, makeAction: (v: string) => ClickAction, disabled: boolean): Part[] {
-  if (disabled) {
-    return [
-      { t: ` ${current} `, c: DIM },
-      { t: "  " },
-      { t: ` ${other} `, c: DIM },
-      { t: "  " },
-      { t: "(stop to switch)", c: AMBER },
-    ];
-  }
-  return [
-    { t: ` ${current} `, c: BTN_SELECTED, action: makeAction(current) },
-    { t: "  " },
-    { t: ` ${other} `, c: BTN_GRAY, action: makeAction(other) },
-  ];
+/** Radio-style option buttons rendered in FIXED slot order — selection only
+ * changes colors, never positions, so clicking the same spot twice always
+ * hits the same button. */
+function optionParts(
+  slots: readonly [string, string],
+  selected: string,
+  makeAction: (v: string) => ClickAction,
+  disabled: boolean,
+): Part[] {
+  const parts: Part[] = [];
+  slots.forEach((v, i) => {
+    if (i > 0) parts.push({ t: "  " });
+    parts.push({
+      t: ` ${v} `,
+      c: disabled ? DIM : v === selected ? BTN_SELECTED : BTN_GRAY,
+      action: disabled ? undefined : makeAction(v),
+    });
+  });
+  if (disabled) parts.push({ t: "  " }, { t: "(stop to switch)", c: AMBER });
+  return parts;
 }
 
 function logLineCode(level: string): string | undefined {
@@ -236,12 +240,11 @@ export function buildFrame(s: FrameState): Frame {
   // --- Settings & Login card ---------------------------------------------
   emit(renderTopBorder(w, [{ t: "Settings & Login", c: BOLD }], pill));
 
-  const otherProvider = s.provider === "zai" ? "bigmodel" : "zai";
   const providerRow = composeRow(
     w, lines.length, "Provider",
     optionParts(
+      ["zai", "bigmodel"],
       s.provider,
-      otherProvider,
       (v) => ({ kind: "provider", value: v as "zai" | "bigmodel" }),
       busy,
     ),
@@ -249,12 +252,11 @@ export function buildFrame(s: FrameState): Frame {
   emit(providerRow.line);
   regions.push(...providerRow.regions);
 
-  const otherPlan = s.plan === "coding-plan" ? "start-plan" : "coding-plan";
   const planRow = composeRow(
     w, lines.length, "Plan",
     optionParts(
+      ["coding-plan", "start-plan"],
       s.plan,
-      otherPlan,
       (v) => ({ kind: "plan", value: v as "coding-plan" | "start-plan" }),
       busy,
     ),

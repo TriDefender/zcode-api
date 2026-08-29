@@ -187,6 +187,26 @@ describe("buildFrame", () => {
     expect(follow!.row).toBeGreaterThan(0);
   });
 
+  test("buttons keep their slots when the selection changes (no jumping)", () => {
+    // zai is always the first slot, bigmodel the second — regardless of which
+    // is selected (the user's mouse must not hit a different button twice).
+    for (const provider of ["zai", "bigmodel"] as const) {
+      const { text, regions } = buildFrame(baseState({ provider }));
+      const lines = text.split("\n").map((l) => stripAnsi(l.replace(/\x1b\[K$/, "")));
+      const row = lines.findIndex((l) => l.includes(" zai "));
+      expect(lines[row]!.indexOf(" zai ")).toBeLessThan(lines[row]!.indexOf(" bigmodel "));
+      const bigmodelCol = lines[row]!.indexOf(" bigmodel ");
+      expect(findRegion(regions, row, bigmodelCol + 2)).toEqual({ kind: "provider", value: "bigmodel" });
+      expect(findRegion(regions, row, lines[row]!.indexOf(" zai ") + 2)).toEqual({ kind: "provider", value: "zai" });
+    }
+    for (const plan of ["coding-plan", "start-plan"] as const) {
+      const { text } = buildFrame(baseState({ plan }));
+      const lines = text.split("\n").map((l) => stripAnsi(l.replace(/\x1b\[K$/, "")));
+      const row = lines.findIndex((l) => l.includes(" coding-plan "));
+      expect(lines[row]!.indexOf(" coding-plan ")).toBeLessThan(lines[row]!.indexOf(" start-plan "));
+    }
+  });
+
   test("no line exceeds the terminal width (CJK logs included)", () => {
     const state = baseState({
       logTotal: 2,
