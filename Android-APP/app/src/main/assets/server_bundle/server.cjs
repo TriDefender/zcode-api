@@ -7369,6 +7369,80 @@ var require_dist = __commonJS({
   }
 });
 
+// src/proxy/identity.ts
+function resolveAppVersion(raw) {
+  if (typeof raw !== "string") return void 0;
+  const v = raw.trim();
+  return v.length > 0 && ASCII_PRINTABLE2.test(v) ? v : void 0;
+}
+function normalizePrintableHeaderValue(raw) {
+  if (typeof raw !== "string") return void 0;
+  const v = raw.trim();
+  return v.length > 0 && ASCII_PRINTABLE2.test(v) ? v : void 0;
+}
+function normalizeOsCategory(platform) {
+  switch (platform) {
+    case "darwin":
+      return "macos";
+    case "win32":
+      return "windows";
+    default:
+      return "linux";
+  }
+}
+function resolveClientLanguage() {
+  const override = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_CLIENT_LANGUAGE);
+  if (override) return override;
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().locale || void 0;
+  } catch {
+    return void 0;
+  }
+}
+function resolveClientTimezone() {
+  const override = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_CLIENT_TIMEZONE);
+  if (override) return override;
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || void 0;
+  } catch {
+    return void 0;
+  }
+}
+function buildIdentityHeaders(id2) {
+  const n = resolveAppVersion(id2.appVersion);
+  const platform = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform);
+  const arch = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH ?? import_node_os.default.arch());
+  const release = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE ?? import_node_os.default.release());
+  const platformForCategory = process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform;
+  const releaseChannel = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE_CHANNEL) ?? (process.env.ZCODE_ENV?.trim().toLowerCase() === "test" ? "test" : "production");
+  const clientLanguage = resolveClientLanguage();
+  const clientTimezone = resolveClientTimezone();
+  const deviceMid = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_DEVICE_MID) ?? normalizePrintableHeaderValue(id2.deviceMid);
+  const headers2 = {
+    "HTTP-Referer": id2.refererOrigin,
+    "User-Agent": `ZCode/${n ?? "unknown"}`,
+    ...n ? { "X-ZCode-App-Version": n } : {},
+    "X-Title": `Z Code@${id2.sourceTitle}`,
+    "X-ZCode-Agent": "glm",
+    ...platform && arch ? { "X-Platform": `${platform}-${arch}` } : {},
+    ...releaseChannel ? { "X-Release-Channel": releaseChannel } : {},
+    ...clientLanguage ? { "X-Client-Language": clientLanguage } : {},
+    ...clientTimezone ? { "X-Client-Timezone": clientTimezone } : {},
+    ...platform ? { "X-Os-Category": normalizeOsCategory(platformForCategory) } : {},
+    ...release ? { "X-Os-Version": release } : {},
+    ...deviceMid ? { "X-Device-Mid": deviceMid } : {}
+  };
+  return headers2;
+}
+var import_node_os, ASCII_PRINTABLE2;
+var init_identity = __esm({
+  "src/proxy/identity.ts"() {
+    "use strict";
+    import_node_os = __toESM(require("node:os"), 1);
+    ASCII_PRINTABLE2 = /^[\x20-\x7e]+$/;
+  }
+});
+
 // node_modules/happy-dom/lib/PropertySymbol.js
 var PropertySymbol_exports = {};
 __export(PropertySymbol_exports, {
@@ -110084,6 +110158,9 @@ function createClaimClient(opts) {
   const jwt = opts.jwt?.trim() || void 0;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+  const identityHeaders = opts.identity ? Object.fromEntries(
+    Object.entries(buildIdentityHeaders(opts.identity)).filter(([name2]) => name2 !== "X-ZCode-Agent")
+  ) : { "X-ZCode-App-Version": opts.appVersion, "X-Platform": opts.platform };
   function parseEntitlement(c) {
     const entitlementId = c.entitlement_id?.trim() ?? "";
     if (!entitlementId) return null;
@@ -110155,7 +110232,7 @@ function createClaimClient(opts) {
   return {
     async getPreviews(signal2) {
       const url2 = `/api/v1/zcode-plan/billing/preview?app_version=${encodeURIComponent(opts.appVersion)}&platform=${encodeURIComponent(opts.platform)}`;
-      const headers2 = {};
+      const headers2 = { ...identityHeaders };
       if (jwt) headers2.authorization = `Bearer ${jwt}`;
       const { status, json, text } = await request("GET", url2, { headers: headers2, signal: signal2 });
       if (status < 200 || status >= 300 || json?.code !== void 0 && json.code !== 0 || json?.data === void 0) {
@@ -110171,13 +110248,12 @@ function createClaimClient(opts) {
     async claim(planId, captcha, signal2) {
       if (!jwt) return { ok: false, planId, failureKind: "login_required", code: 401, message: "manual_claim_login_required" };
       const headers2 = {
+        ...identityHeaders,
         authorization: `Bearer ${jwt}`,
         "content-type": "application/json",
-        "x-aliyun-captcha-verify-param": captcha.verifyParam,
-        "x-zcode-app-version": opts.appVersion,
-        "x-platform": opts.platform
+        "X-Aliyun-Captcha-Verify-Param": captcha.verifyParam
       };
-      if (captcha.region) headers2["x-aliyun-captcha-verify-region"] = captcha.region;
+      if (captcha.region) headers2["X-Aliyun-Captcha-Verify-Region"] = captcha.region;
       const { status, json, text } = await request("POST", "/api/v1/zcode-plan/billing/claim", { body: { plan_id: planId }, headers: headers2, signal: signal2 });
       const data2 = json?.data;
       const bizCode = json?.code !== void 0 ? json.code : void 0;
@@ -110207,6 +110283,7 @@ var init_client = __esm({
   "src/claim/client.ts"() {
     "use strict";
     init_types();
+    init_identity();
     DEFAULT_TIMEOUT_MS = 15e3;
     ClaimPreviewError = class extends Error {
       status;
@@ -110375,7 +110452,8 @@ function startAutoClaim(config, auth) {
       origin: config.claim.origin,
       jwt,
       appVersion: config.identity.appVersion,
-      platform: claimPlatform()
+      platform: claimPlatform(),
+      identity: config.identity
     }),
     getCaptcha: async () => {
       const { verifyParam, region } = await getCaptchaToken(config.identity.appVersion);
@@ -110402,7 +110480,8 @@ async function runClaimCli(config, mode2) {
     origin: config.claim.origin,
     jwt,
     appVersion: config.identity.appVersion,
-    platform: claimPlatform()
+    platform: claimPlatform(),
+    identity: config.identity
   });
   let plans;
   try {
@@ -112439,73 +112518,8 @@ function credentialString(cred) {
   return cred.apiKey;
 }
 
-// src/proxy/identity.ts
-var import_node_os = __toESM(require("node:os"), 1);
-var ASCII_PRINTABLE2 = /^[\x20-\x7e]+$/;
-function resolveAppVersion(raw) {
-  if (typeof raw !== "string") return void 0;
-  const v = raw.trim();
-  return v.length > 0 && ASCII_PRINTABLE2.test(v) ? v : void 0;
-}
-function normalizePrintableHeaderValue(raw) {
-  if (typeof raw !== "string") return void 0;
-  const v = raw.trim();
-  return v.length > 0 && ASCII_PRINTABLE2.test(v) ? v : void 0;
-}
-function normalizeOsCategory(platform) {
-  switch (platform) {
-    case "darwin":
-      return "macos";
-    case "win32":
-      return "windows";
-    default:
-      return "linux";
-  }
-}
-function resolveClientLanguage() {
-  const override = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_CLIENT_LANGUAGE);
-  if (override) return override;
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().locale || void 0;
-  } catch {
-    return void 0;
-  }
-}
-function resolveClientTimezone() {
-  const override = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_CLIENT_TIMEZONE);
-  if (override) return override;
-  try {
-    return Intl.DateTimeFormat().resolvedOptions().timeZone || void 0;
-  } catch {
-    return void 0;
-  }
-}
-function buildIdentityHeaders(id2) {
-  const n = resolveAppVersion(id2.appVersion);
-  const platform = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform);
-  const arch = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH ?? import_node_os.default.arch());
-  const release = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE ?? import_node_os.default.release());
-  const platformForCategory = process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform;
-  const releaseChannel = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE_CHANNEL) ?? (process.env.ZCODE_ENV?.trim().toLowerCase() === "test" ? "test" : "production");
-  const clientLanguage = resolveClientLanguage();
-  const clientTimezone = resolveClientTimezone();
-  const deviceMid = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_DEVICE_MID) ?? normalizePrintableHeaderValue(id2.deviceMid);
-  const headers2 = {
-    "HTTP-Referer": id2.refererOrigin,
-    "User-Agent": `ZCode/${n ?? "unknown"}`,
-    ...n ? { "X-ZCode-App-Version": n } : {},
-    "X-Title": `Z Code@${id2.sourceTitle}`,
-    "X-ZCode-Agent": "glm",
-    ...platform && arch ? { "X-Platform": `${platform}-${arch}` } : {},
-    ...releaseChannel ? { "X-Release-Channel": releaseChannel } : {},
-    ...clientLanguage ? { "X-Client-Language": clientLanguage } : {},
-    ...clientTimezone ? { "X-Client-Timezone": clientTimezone } : {},
-    ...platform ? { "X-Os-Category": normalizeOsCategory(platformForCategory) } : {},
-    ...release ? { "X-Os-Version": release } : {},
-    ...deviceMid ? { "X-Device-Mid": deviceMid } : {}
-  };
-  return headers2;
-}
+// src/proxy/upstream.ts
+init_identity();
 
 // src/proxy/trace-headers.ts
 var QUERY_PREFIX = "query_";
@@ -112860,6 +112874,7 @@ function buildUpstreamRequest(clientReq, format, provider, cred, body2, identity
 }
 
 // src/proxy/endpoint-routing.ts
+init_identity();
 var DEFAULT_ORIGIN = "https://zcode.z.ai";
 var CONFIG_PATH = "/api/v1/agent/configs";
 var SUCCESS_TTL_MS = 3e5;
@@ -113014,6 +113029,7 @@ ${identityCacheKey(config.identity)}`;
 }
 
 // src/proxy/client-signing.ts
+init_identity();
 var DEFAULT_ORIGIN2 = "https://zcode.z.ai";
 var GATE_PATH = "/api/v1/agent/configs";
 var HANDSHAKE_PATH = "/api/paas/c1f3a7e2/v2/client";
@@ -117063,6 +117079,7 @@ function keepaliveFrame(text = "keepalive") {
 }
 
 // src/async/bridge.ts
+init_identity();
 var EXPIRED_MARKER = "off-peak-ticket-expired";
 function runAsyncBridge(opts) {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
@@ -118033,27 +118050,121 @@ var import_node_http3 = require("node:http");
 // src/auth/oauth.ts
 var import_node_http2 = require("node:http");
 var import_node_crypto3 = require("node:crypto");
-var ZCODE_TOKEN_ENDPOINT = "https://zcode.z.ai/api/v1/oauth/token";
+var ZCODE_API_BASE = "https://zcode.z.ai/api/v1";
+var ZCODE_TOKEN_ENDPOINT = `${ZCODE_API_BASE}/oauth/token`;
 var BIGMODEL_HOST = "https://bigmodel.cn";
 var BIGMODEL_APP_ID = "zcode";
-var AuthCodeOAuthClient = class {
-  constructor(config, fetchImpl = fetch) {
-    this.config = config;
+var LOGIN_TIMEOUT_MS = 3e5;
+var OAuthFlowClient = class {
+  constructor(provider, fetchImpl) {
+    this.provider = provider;
     this.fetchImpl = fetchImpl;
   }
-  config;
+  provider;
   fetchImpl;
+  /** Run the full flow end-to-end: surface authorize URL, wait, close. */
+  async authorize(onAuthorizeUrl, timeoutMs = LOGIN_TIMEOUT_MS) {
+    const started = await this.start();
+    onAuthorizeUrl?.(started.authorizeUrl);
+    try {
+      const tokens = await this.complete(started, timeoutMs);
+      return { accessToken: tokens.accessToken, provider: this.provider, userId: tokens.userId, jwt: tokens.jwt };
+    } finally {
+      await this.close();
+    }
+  }
+};
+async function requestZcodeEnvelope(fetchImpl, url2, init, label2) {
+  const resp = await fetchImpl(url2, init);
+  const raw = safeJsonParse(await resp.text());
+  if (!raw || typeof raw.code !== "number") {
+    throw new Error(`${label2}: invalid response envelope (status=${resp.status})`);
+  }
+  if (!resp.ok || raw.code !== 0) {
+    throw new Error(`${label2} failed: status=${resp.status} msg=${raw.msg ?? "(none)"}`);
+  }
+  return raw.data;
+}
+var ZaiOAuthClient = class extends OAuthFlowClient {
+  constructor(fetchImpl = fetch, sleep2 = defaultSleep) {
+    super("zai", fetchImpl);
+    this.sleep = sleep2;
+  }
+  sleep;
+  flow = null;
+  pollToken = "";
+  start() {
+    this.flow = null;
+    this.pollToken = (0, import_node_crypto3.randomBytes)(32).toString("hex");
+    return (async () => {
+      const data2 = await requestZcodeEnvelope(
+        this.fetchImpl,
+        `${ZCODE_API_BASE}/oauth/cli/init`,
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${this.pollToken}`, "content-type": "application/json" },
+          body: JSON.stringify({ provider: this.provider })
+        },
+        "Z.AI login init"
+      );
+      if (!data2 || typeof data2.flow_id !== "string" || typeof data2.authorize_url !== "string" || typeof data2.expires_at !== "number" || typeof data2.poll_interval_sec !== "number") {
+        throw new Error("Z.AI login init: invalid response data");
+      }
+      this.flow = data2;
+      return { authorizeUrl: this.flow.authorize_url, callbackUrl: "", state: this.flow.flow_id };
+    })();
+  }
+  async complete(_started, timeoutMs = LOGIN_TIMEOUT_MS) {
+    const flow = this.flow;
+    if (!flow) throw new Error("Z.AI login not started");
+    const deadlineMs = Math.min(Date.now() + timeoutMs, flow.expires_at * 1e3);
+    const intervalMs = Math.max(1e3, flow.poll_interval_sec * 1e3);
+    for (; ; ) {
+      if (Date.now() >= deadlineMs) {
+        throw new Error("Authorization timed out. Please retry login.");
+      }
+      const data2 = await requestZcodeEnvelope(
+        this.fetchImpl,
+        `${ZCODE_API_BASE}/oauth/cli/poll/${encodeURIComponent(flow.flow_id)}`,
+        { method: "GET", headers: { authorization: `Bearer ${this.pollToken}` } },
+        "Z.AI login poll"
+      );
+      if (data2?.status === "ready") {
+        const accessToken = typeof data2.zai?.access_token === "string" ? data2.zai.access_token.trim() : "";
+        if (!accessToken) {
+          throw new Error("Z.AI login poll: response missing data.zai.access_token");
+        }
+        return {
+          accessToken,
+          jwt: typeof data2.token === "string" ? data2.token.trim() : void 0,
+          userId: typeof data2.user?.user_id === "string" ? data2.user.user_id : void 0
+        };
+      }
+      if (data2?.status === "failed") {
+        throw new Error("Authorization failed. Please retry login.");
+      }
+      if (data2?.status !== "pending") {
+        throw new Error(`Z.AI login poll: unexpected status ${String(data2?.status ?? "(none)")}`);
+      }
+      await this.sleep(Math.min(intervalMs, Math.max(0, deadlineMs - Date.now())));
+    }
+  }
+  async close() {
+    this.flow = null;
+  }
+};
+var AuthCodeOAuthClient = class extends OAuthFlowClient {
   server = null;
   callbackResult = null;
   callbackWaiters = [];
+  constructor(config, fetchImpl = fetch) {
+    super(config.provider, fetchImpl);
+    this.config = config;
+  }
+  config;
   /** Build the provider authorize URL with the localhost redirect + state. */
   buildAuthorizeUrl(callbackUrl, state2) {
-    const params = this.config.authorizeParamStyle === "oauth2" ? new URLSearchParams({
-      redirect_uri: callbackUrl,
-      response_type: "code",
-      client_id: this.config.appId,
-      state: state2
-    }) : new URLSearchParams({
+    const params = new URLSearchParams({
       appId: this.config.appId,
       redirect: callbackUrl,
       state: state2
@@ -118066,7 +118177,7 @@ var AuthCodeOAuthClient = class {
    *
    * The bind port is `0` (OS-assigned random) unless the env var
    * `ZCODE_OAUTH_CALLBACK_PORT` is set, in which case that exact port is used.
-   * The Android entry sets the env var so the WebView redirect URL is
+   * The Android entry sets the env var so the Custom Tabs redirect URL is
    * predictable across launches.
    */
   start() {
@@ -118118,7 +118229,7 @@ var AuthCodeOAuthClient = class {
     }
   }
   /** Wait for the OAuth callback redirect. Resolves with the auth code. */
-  waitForCallback(timeoutMs = 3e5) {
+  waitForCallback(timeoutMs = LOGIN_TIMEOUT_MS) {
     if (this.callbackResult?.code) {
       return Promise.resolve(this.callbackResult.code);
     }
@@ -118171,17 +118282,10 @@ var AuthCodeOAuthClient = class {
     const jwt = raw?.data?.token?.trim() ?? void 0;
     return { accessToken, userId: typeof userId === "string" ? userId : void 0, jwt };
   }
-  /** Run the full flow: start server, surface authorize URL, exchange code. */
-  async authorize(onAuthorizeUrl, timeoutMs = 3e5) {
-    const { authorizeUrl, callbackUrl, state: state2 } = await this.start();
-    onAuthorizeUrl?.(authorizeUrl);
-    try {
-      const authCode = await this.waitForCallback(timeoutMs);
-      const { accessToken, userId, jwt } = await this.exchangeCode(authCode, callbackUrl, state2);
-      return { accessToken, provider: this.config.provider, userId, jwt };
-    } finally {
-      await this.close();
-    }
+  /** Wait for the browser callback, then exchange the code. */
+  async complete(started, timeoutMs = LOGIN_TIMEOUT_MS) {
+    const code = await this.waitForCallback(timeoutMs);
+    return this.exchangeCode(code, started.callbackUrl, started.state);
   }
   async close() {
     if (this.server) {
@@ -118194,28 +118298,13 @@ var AuthCodeOAuthClient = class {
     }
   }
 };
-var ZAI_AUTH_CODE_CONFIG = {
-  provider: "zai",
-  authorizeUrl: "https://chat.z.ai/api/oauth/authorize",
-  appId: "client_P8X5CMWmlaRO9gyO-KSqtg",
-  tokenUrl: ZCODE_TOKEN_ENDPOINT,
-  callbackPath: "/oauth/callback/zai",
-  accessTokenField: "zai",
-  authorizeParamStyle: "oauth2"
-};
 var BIGMODEL_AUTH_CODE_CONFIG = {
   provider: "bigmodel",
   authorizeUrl: `${BIGMODEL_HOST}/login`,
   appId: BIGMODEL_APP_ID,
   tokenUrl: ZCODE_TOKEN_ENDPOINT,
   callbackPath: "/oauth/callback/bigmodel",
-  accessTokenField: "bigmodel",
-  authorizeParamStyle: "zcode"
-};
-var ZaiOAuthClient = class extends AuthCodeOAuthClient {
-  constructor(fetchImpl = fetch) {
-    super(ZAI_AUTH_CODE_CONFIG, fetchImpl);
-  }
+  accessTokenField: "bigmodel"
 };
 var BigmodelOAuthClient = class extends AuthCodeOAuthClient {
   constructor(fetchImpl = fetch, host2 = BIGMODEL_HOST, appId = BIGMODEL_APP_ID) {
@@ -118225,6 +118314,9 @@ var BigmodelOAuthClient = class extends AuthCodeOAuthClient {
     );
   }
 };
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 function safeJsonParse(text) {
   try {
     return JSON.parse(text);
@@ -118450,20 +118542,18 @@ async function dispatch(cmd, state2, ctx) {
       }
       const client = cmd.provider === "bigmodel" ? new BigmodelOAuthClient() : new ZaiOAuthClient();
       const started = await client.start();
-      const callbackUrlObj = new URL(started.callbackUrl);
-      const callbackPort = callbackUrlObj.port ? Number(callbackUrlObj.port) : 80;
+      const callbackPort = started.callbackUrl ? Number(new URL(started.callbackUrl).port) || 80 : 0;
       state2.activeOauth = {
         client,
         callbackUrl: started.callbackUrl,
         state: started.state
       };
-      client.waitForCallback().then(async (code) => {
-        const { accessToken, userId, jwt } = await client.exchangeCode(code, started.callbackUrl, started.state);
+      client.complete(started).then(async (tokens) => {
         const resolver = new KeyResolver();
-        const cred = await resolver.resolveCodingPlanCredential(accessToken, cmd.provider, userId);
-        if (jwt) cred.jwt = jwt;
+        const cred = await resolver.resolveCodingPlanCredential(tokens.accessToken, cmd.provider, tokens.userId);
+        if (tokens.jwt) cred.jwt = tokens.jwt;
         await saveCredential(cred);
-        console.log(`OAuth completed for ${cmd.provider} via browser callback`);
+        console.log(`OAuth completed for ${cmd.provider}`);
       }).catch((err) => {
         console.error(`OAuth flow ended without success: ${err?.message ?? String(err)}`);
       }).finally(() => {
@@ -118480,7 +118570,7 @@ async function dispatch(cmd, state2, ctx) {
     }
     case "deliverOAuthCode": {
       const active = state2.activeOauth;
-      if (!active || active.state !== cmd.state) {
+      if (!(active?.client instanceof AuthCodeOAuthClient) || active.state !== cmd.state) {
         return { ok: false, error: "no_matching_oauth_flow" };
       }
       try {
@@ -118925,6 +119015,7 @@ async function claimCommand(args) {
     console.error(`Config file not found: ${path2} (run serve once or create it).`);
     process.exit(1);
   }
+  ensureDeviceMidInConfig(path2);
   const config = loadConfig(path2);
   try {
     const { runClaimCli: runClaimCli2 } = await Promise.resolve().then(() => (init_runtime(), runtime_exports));

@@ -377,6 +377,9 @@ async function claimCommand(args: string[]): Promise<void> {
     console.error(`Config file not found: ${path} (run serve once or create it).`);
     process.exit(1);
   }
+  // The billing gateway requires a stable X-Device-Mid — self-heal configs
+  // created before the deviceMid feature (idempotent: reuses existing value).
+  ensureDeviceMidInConfig(path);
   const config = loadConfig(path);
   try {
     const { runClaimCli } = await import("./claim/runtime.js");

@@ -255,8 +255,13 @@ export type AnthropicStreamEvent =
   | { type: "content_block_stop"; index: number }
   | {
       type: "message_delta";
-      delta: { stop_reason: string; stop_sequence?: string | null };
-      usage?: { output_tokens: number };
+      delta?: { stop_reason?: string | null; stop_sequence?: string | null };
+      /**
+       * The upstream reports the real token counts here rather than in
+       * `message_start` — including the input and cache buckets. Extra vendor
+       * members (`server_tool_use`, `service_tier`) are left unmodelled.
+       */
+      usage?: Partial<AnthropicUsage>;
     }
   | { type: "message_stop" }
   | { type: "ping" };

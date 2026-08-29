@@ -10,10 +10,19 @@
  * verify param/region (same token source as the start-plan gateway),
  * `X-ZCode-App-Version` and `X-Platform` (part of server-side eligibility).
  *
+ * Since the 0828 weekend campaign the gateway REJECTS preview/claim with
+ * biz 3001 "parameter error" unless the request carries a UUID-format
+ * `X-Device-Mid` (empirically verified 2026-08-28: only that header is
+ * validated; non-UUID values still 3001). Pass `identity` so both calls
+ * carry the full identity set minus `X-ZCode-Agent` — same header set the
+ * endpoint-routing config fetch uses for zcode.z.ai control-plane calls.
+ *
  * @see _reverse/NOTEPAD.md "Manual Claim Plan" section.
  */
 import type { ClaimablePlan, ClaimOutcome, PlanEntitlement } from "./types.js";
 import { classifyClaimCode } from "./types.js";
+import { buildIdentityHeaders } from "../proxy/identity.js";
+import type { ProxyIdentity } from "../config/types.js";
 
 export interface ClaimClientOptions {
   origin: string;
@@ -22,6 +31,12 @@ export interface ClaimClientOptions {
   appVersion: string;
   /** `${process.platform}-${process.arch}` in the real client. */
   platform: string;
+  /**
+   * Identity block driving the zcode.z.ai control-plane header set
+   * (incl. the server-required `X-Device-Mid`). When omitted the client
+   * falls back to the minimal legacy set (version + platform headers only).
+   */
+  identity?: ProxyIdentity;
   /** Per-call timeout in ms. Default `15000`. */
   timeoutMs?: number;
   /** DI seam for tests. Default `globalThis.fetch`. */
@@ -74,6 +89,13 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
   const jwt = opts.jwt?.trim() || undefined;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+  // Identity set minus X-ZCode-Agent (zcode.z.ai control-plane precedent —
+  // see endpoint-routing.ts); the no-identity fallback keeps the legacy shape.
+  const identityHeaders: Record<string, string> = opts.identity
+    ? Object.fromEntries(
+        Object.entries(buildIdentityHeaders(opts.identity)).filter(([name]) => name !== "X-ZCode-Agent"),
+      )
+    : { "X-ZCode-App-Version": opts.appVersion, "X-Platform": opts.platform };
 
   function parseEntitlement(c: RawEntitlement): PlanEntitlement | null {
     const entitlementId = c.entitlement_id?.trim() ?? "";
@@ -153,7 +175,7 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
   return {
     async getPreviews(signal?: AbortSignal): Promise<ClaimablePlan[]> {
       const url = `/api/v1/zcode-plan/billing/preview?app_version=${encodeURIComponent(opts.appVersion)}&platform=${encodeURIComponent(opts.platform)}`;
-      const headers: Record<string, string> = {};
+      const headers: Record<string, string> = { ...identityHeaders };
       if (jwt) headers.authorization = `Bearer ${jwt}`;
       const { status, json, text } = await request("GET", url, { headers, signal });
       if (status < 200 || status >= 300 || (json?.code !== undefined && json.code !== 0) || json?.data === undefined) {
@@ -170,13 +192,12 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
     async claim(planId: string, captcha: { verifyParam: string; region?: string }, signal?: AbortSignal): Promise<ClaimOutcome> {
       if (!jwt) return { ok: false, planId, failureKind: "login_required", code: 401, message: "manual_claim_login_required" };
       const headers: Record<string, string> = {
+        ...identityHeaders,
         authorization: `Bearer ${jwt}`,
         "content-type": "application/json",
-        "x-aliyun-captcha-verify-param": captcha.verifyParam,
-        "x-zcode-app-version": opts.appVersion,
-        "x-platform": opts.platform,
+        "X-Aliyun-Captcha-Verify-Param": captcha.verifyParam,
       };
-      if (captcha.region) headers["x-aliyun-captcha-verify-region"] = captcha.region;
+      if (captcha.region) headers["X-Aliyun-Captcha-Verify-Region"] = captcha.region;
       const { status, json, text } = await request("POST", "/api/v1/zcode-plan/billing/claim", { body: { plan_id: planId }, headers, signal });
 
       const data = json?.data as { plan?: RawPlan } | undefined;

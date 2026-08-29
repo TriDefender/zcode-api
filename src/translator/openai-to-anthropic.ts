@@ -5,6 +5,7 @@
 import type {
   OpenAIChatRequest,
   OpenAIChatResponse,
+  OpenAIUsage,
   OpenAIMessage,
   OpenAIToolDefinition,
   AnthropicMessagesRequest,
@@ -13,6 +14,7 @@ import type {
   AnthropicContentBlock,
   AnthropicToolDefinition,
   AnthropicThinkingConfig,
+  AnthropicUsage,
 } from "./types.js";
 import { MODELS } from "../provider/models.js";
 
@@ -203,6 +205,40 @@ function imageUrlToAnthropicBlock(url: string): AnthropicContentBlock {
   return { type: "text", text: url };
 }
 
+/**
+ * Convert an Anthropic usage block into OpenAI's cache-inclusive usage
+ * semantics — the counterpart of `openaiUsageToAnthropic`.
+ *
+ * Anthropic reports the fresh (uncached) input in `input_tokens` and keeps the
+ * three buckets mutually exclusive; OpenAI's `prompt_tokens` is *inclusive* of
+ * cache hits. So prompt = input + cache_read + cache_creation, with the cache
+ * read additionally surfaced through the standard `prompt_tokens_details`.
+ * The Anthropic-style cache fields are deliberately not mirrored onto the
+ * OpenAI usage object — strict-schema clients reject unknown members.
+ *
+ * Totals round-trip exactly; buckets do not. OpenAI has no cache-creation
+ * member, so a converted-and-converted-back usage reclassifies those tokens as
+ * fresh input. `prompt_tokens` and `total_tokens` stay correct either way.
+ */
+export function anthropicUsageToOpenAI(usage: AnthropicUsage | undefined): OpenAIUsage {
+  const inputTokens = usage?.input_tokens ?? 0;
+  const outputTokens = usage?.output_tokens ?? 0;
+  const cacheRead = usage?.cache_read_input_tokens ?? 0;
+  const cacheCreation = usage?.cache_creation_input_tokens ?? 0;
+  const promptTokens = inputTokens + cacheRead + cacheCreation;
+
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: outputTokens,
+    total_tokens: promptTokens + outputTokens,
+    // Presence-preserving: an upstream explicitly reporting 0 cache reads stays
+    // distinguishable from one reporting no cache breakdown at all.
+    ...(usage?.cache_read_input_tokens != null
+      ? { prompt_tokens_details: { cached_tokens: cacheRead } }
+      : {}),
+  };
+}
+
 /** Translate an Anthropic messages response into an OpenAI chat completion response. */
 export function translateResponseAnthropicToOpenAI(
   resp: AnthropicMessagesResponse,
@@ -242,11 +278,7 @@ export function translateResponseAnthropicToOpenAI(
       },
       finish_reason: finishReason,
     }],
-    usage: {
-      prompt_tokens: resp.usage?.input_tokens ?? 0,
-      completion_tokens: resp.usage?.output_tokens ?? 0,
-      total_tokens: (resp.usage?.input_tokens ?? 0) + (resp.usage?.output_tokens ?? 0),
-    },
+    usage: anthropicUsageToOpenAI(resp.usage),
   };
 }
 

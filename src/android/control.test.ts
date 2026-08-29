@@ -277,15 +277,17 @@ describe("android control startOAuth callback-port lifecycle", () => {
   it("releases the callback port when the flow is rejected (abandoned login)", async () => {
     const port = await freePort();
     process.env.ZCODE_OAUTH_CALLBACK_PORT = String(port);
-    const state: ControlState = { provider: "zai", plan: "coding-plan", proxyPort: 0 };
+    // bigmodel is the provider with a local callback server (zai's cli login
+    // flow completes via server polling and binds nothing).
+    const state: ControlState = { provider: "bigmodel", plan: "coding-plan", proxyPort: 0 };
 
-    const started = await post({ cmd: "startOAuth", provider: "zai" }, state);
+    const started = await post({ cmd: "startOAuth", provider: "bigmodel" }, state);
     expect(started.body.ok).toBe(true);
     expect(state.activeOauth).toBeDefined();
 
     // Simulate the user abandoning the flow: a callback with a bad state
     // rejects every waitForCallback waiter.
-    const resp = await fetch(`http://127.0.0.1:${port}/oauth/callback/zai?state=bad&code=x`);
+    const resp = await fetch(`http://127.0.0.1:${port}/oauth/callback/bigmodel?state=bad&code=x`);
     expect(resp.status).toBe(400);
     await Bun.sleep(50);
 
@@ -296,14 +298,14 @@ describe("android control startOAuth callback-port lifecycle", () => {
   it("a second startOAuth tears down the previous flow instead of hitting EADDRINUSE", async () => {
     const port = await freePort();
     process.env.ZCODE_OAUTH_CALLBACK_PORT = String(port);
-    const state: ControlState = { provider: "zai", plan: "coding-plan", proxyPort: 0 };
+    const state: ControlState = { provider: "bigmodel", plan: "coding-plan", proxyPort: 0 };
 
-    const first = await post({ cmd: "startOAuth", provider: "zai" }, state);
+    const first = await post({ cmd: "startOAuth", provider: "bigmodel" }, state);
     expect(first.body.ok).toBe(true);
 
     // Previously this threw EADDRINUSE (500) because the first flow still
     // held the fixed callback port.
-    const second = await post({ cmd: "startOAuth", provider: "zai" }, state);
+    const second = await post({ cmd: "startOAuth", provider: "bigmodel" }, state);
     expect(second.body.ok).toBe(true);
 
     // Clean up the flow started by the second command.

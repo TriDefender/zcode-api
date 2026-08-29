@@ -27,6 +27,24 @@ describe("chatCompletionsToResponses (batch)", () => {
     expect((r.output[0] as { content: { type: string; text: string }[] }).content[0]).toEqual({ type: "output_text", text: "hello" });
   });
 
+  it("carries cache-inclusive Chat usage into the Responses usage details", () => {
+    const r = chatCompletionsToResponses(chatResp({
+      usage: {
+        prompt_tokens: 1224,
+        completion_tokens: 3,
+        total_tokens: 1227,
+        prompt_tokens_details: { cached_tokens: 1216 },
+      },
+    }), "glm-5.2");
+
+    expect(r.usage).toEqual({
+      input_tokens: 1224,
+      output_tokens: 3,
+      total_tokens: 1227,
+      input_tokens_details: { cached_tokens: 1216 },
+    });
+  });
+
   it("emits reasoning output item before message", () => {
     const r = chatCompletionsToResponses(chatResp({
       choices: [{
