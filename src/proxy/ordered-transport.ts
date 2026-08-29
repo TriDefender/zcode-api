@@ -26,6 +26,7 @@ export async function sendOrderedUpstreamRequest(req: OrderedUpstreamRequest): P
   return await new Promise<Response>((resolve, reject) => {
     let headerBuffer: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
     let responseStarted = false;
+    let postWrite = false;
     let bodyController: ReadableStreamDefaultController<Uint8Array> | null = null;
     let chunkedDecoder: ChunkedDecoder | null = null;
     let remainingContentLength: number | null = null;
@@ -40,6 +41,13 @@ export async function sendOrderedUpstreamRequest(req: OrderedUpstreamRequest): P
     });
 
     function fail(err: unknown): void {
+      if (!responseStarted && postWrite) {
+        // Review follow-up #2 (PR #34): the full request (head + body) was
+        // already written to the wire, so the upstream may have processed it
+        // — resending could duplicate the LLM call and consume quota twice.
+        // Flag it so the connect-retry loop in handler.ts skips this error.
+        try { (err as { postWrite?: boolean }).postWrite = true; } catch {}
+      }
       if (responseStarted) bodyController?.error(err);
       else reject(err);
       socket.destroy();
@@ -127,6 +135,7 @@ export async function sendOrderedUpstreamRequest(req: OrderedUpstreamRequest): P
 
     socket.write(requestHead);
     if (bodyBytes.byteLength > 0) socket.write(bodyBytes);
+    postWrite = true;
   });
 }
 

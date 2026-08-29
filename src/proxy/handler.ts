@@ -243,6 +243,11 @@ export async function proxyRequest(
         upstreamResp = await dispatch(upstreamReq, upstreamHeaderPairs);
         break;
       } catch (err) {
+        // Review follow-up #2 (PR #34): if the ordered transport already
+        // wrote the full request to the wire before failing, the upstream
+        // may have processed it — resending could consume quota twice. Skip
+        // the retry for those post-write failures.
+        if ((err as { postWrite?: boolean }).postWrite) throw err;
         if (attempt >= maxConnectAttempts) throw err;
         const backoffMs = 500 * attempt;
         if (debug) debugError(reqId, "upstream_connect_retry", `attempt ${attempt}/${maxConnectAttempts - 1} failed (${(err as Error).message}), retrying in ${backoffMs}ms`);

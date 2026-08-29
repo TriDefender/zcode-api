@@ -5,10 +5,10 @@
  *    HTTP 400 + {"code":3007,...} in the JSON body (no captcha header) must
  *    be treated as a captcha challenge and retried with a fresh token.
  * 2. Connect-retry freshness: after a connect-level failure, the retried
- *    dispatch must receive a FRESH Request (body not marked used). A mock
- *    fetch that throws-then-succeeds does NOT catch the bug (mocks don't
- *    enforce bodyUsed), so the mock asserts `req.bodyUsed === false` on
- *    every call per the review's test note.
+ *    dispatch must receive a FRESH Request. Review follow-up #1 (PR #34):
+ *    a `req.bodyUsed === false` assertion is vacuous in a mock (mock fetch
+ *    never consumes the body), so freshness is pinned by OBJECT IDENTITY —
+ *    the second call must receive a different Request instance.
  *
  * Both tests use the start-plan path with an injected captcha module via
  * `mock.module("./captcha.js")` (same technique as captcha-pool.test.ts).
@@ -117,20 +117,25 @@ describe("proxyRequest — start-plan resilience (PR #34 review P1/P3)", () => {
     expect(body.choices[0].message.content).toBe("resilience reply");
   });
 
-  it("retries a connect failure with a FRESH Request (body not marked used)", async () => {
+  it("retries a connect failure with a FRESH Request (identity-pinned)", async () => {
     // Upstream: first call = connect-level failure (the bug shape), second
-    // call = success. The mock asserts req.bodyUsed === false on EVERY call
-    // per the review's test note: mocks don't enforce bodyUsed the way real
-    // fetch does, so the freshness assertion must be explicit.
+    // call = success. Review follow-up #1 (PR #34): a mock fetch never
+    // consumes the Request body, so a `req.bodyUsed === false` assertion is
+    // vacuous — it passes even if the handler re-dispatches the SAME Request
+    // object. Pin freshness by OBJECT IDENTITY instead: the second call must
+    // receive a different Request instance than the first.
     let calls = 0;
+    let firstReq: Request | null = null;
     const fetchMock = mock(async (req: Request): Promise<Response> => {
       calls += 1;
-      // The freshness assertion: if the handler re-dispatched the SAME
-      // Request object, this would be true on the second call.
-      expect(req.bodyUsed).toBe(false);
       if (calls === 1) {
+        firstReq = req;
         throw new Error("Unable to connect. Is the computer able to access the url?");
       }
+      // The freshness assertion: re-dispatching the SAME Request object
+      // would fail this identity check.
+      expect(firstReq).not.toBeNull();
+      expect(req).not.toBe(firstReq);
       return new Response(ANTHROPIC_OK, { status: 200, headers: { "content-type": "application/json" } });
     });
 
@@ -144,8 +149,8 @@ describe("proxyRequest — start-plan resilience (PR #34 review P1/P3)", () => {
 
     const resp = await proxyRequest(clientReq, "openai", { config: TEST_CONFIG, auth, fetchImpl: fetchMock as any });
 
-    // The connect failure was retried with a FRESH Request (bodyUsed false
-    // on the second call — the freshness assertion inside the mock passed).
+    // The connect failure was retried with a FRESH Request (identity check
+    // inside the mock passed).
     expect(calls).toBe(2);
     expect(resp.status).toBe(200);
     const body = await resp.json();
