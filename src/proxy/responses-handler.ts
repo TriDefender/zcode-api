@@ -144,13 +144,13 @@ export async function handleResponses(
   const providerDef = resolveProviderDef(opts.config);
 
   // ── 5. body transform (start-plan system / anthropic cache_control + user_id) ──
+  // Both plans post Anthropic upstream (mirrors handler.ts): the start-plan
+  // OpenAI gateway was retired server-side (404 as of 2026-08-28), so the
+  // Responses → Chat → Anthropic translator chain runs unconditionally.
   const startPlan = opts.config.plan === "start-plan";
-  const upstreamFormat: "openai" | "anthropic" = startPlan ? "openai" : "anthropic";
+  const upstreamFormat: "openai" | "anthropic" = "anthropic";
   let upstreamRequestBody: string;
-  if (upstreamFormat === "anthropic") {
-    // v2.3: coding-plan upstream is Anthropic (mirrors the real client).
-    // Chain the existing translators: Responses → Chat → Anthropic request;
-    // Anthropic → Chat → Responses on the way back.
+  {
     let anthropicReq: AnthropicMessagesRequest;
     try {
       anthropicReq = translateRequestOpenAIToAnthropic(chatRequest);
@@ -160,14 +160,8 @@ export async function handleResponses(
     upstreamRequestBody = transformRequestBody(JSON.stringify(anthropicReq), {
       format: "anthropic",
       userId: cred.userId,
-      startPlan: false,
-    }) ?? JSON.stringify(anthropicReq);
-  } else {
-    upstreamRequestBody = transformRequestBody(JSON.stringify(chatRequest), {
-      format: "openai",
-      userId: undefined,
       startPlan,
-    }) ?? JSON.stringify(chatRequest);
+    }) ?? JSON.stringify(anthropicReq);
   }
   const transformedBody = upstreamRequestBody;
 

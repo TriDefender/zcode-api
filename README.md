@@ -238,22 +238,22 @@ Client Request
 Proxy API Key Auth (shared secret)
       │
       ▼
-Route Detection + Plan-aware Routing (v2.3: coding-plan mirrors the real ZCode client)
+Route Detection + Plan-aware Routing (both plans post Anthropic upstream, v2.4+)
   /v1/chat/completions (OpenAI client format)
     ├─ coding-plan → TRANSLATE OpenAI→Anthropic → provider's anthropic endpoint
     │                (remapped to zcode.z.ai ultra endpoints via server-controlled mapping)
-    └─ start-plan  → zcode.z.ai OpenAI-compatible gateway (JWT + captcha), passthrough
+    └─ start-plan  → TRANSLATE OpenAI→Anthropic → zcode.z.ai
+                     /api/v1/zcode-plan/anthropic/v1/messages (JWT + captcha)
   /v1/messages     (Anthropic client format)
     ├─ coding-plan → NATIVE PASSTHROUGH to the provider's anthropic endpoint (same format)
-    └─ start-plan  → TRANSLATE Anthropic→OpenAI → zcode.z.ai gateway
+    └─ start-plan  → NATIVE PASSTHROUGH → zcode.z.ai
+                     /api/v1/zcode-plan/anthropic/v1/messages (JWT + captcha)
   /v1/responses    (Responses client format)
-    ├─ coding-plan → TRANSLATE Responses→Chat→Anthropic → anthropic endpoint
-    └─ start-plan  → TRANSLATE Responses→Chat → gateway
+    ├─ both plans  → TRANSLATE Responses→Chat→Anthropic → plan's anthropic endpoint
       │
       ▼
 Body Transformation (ZCode-equivalent mutations)
   Anthropic upstream      → cache_control on last message + metadata.user_id (oauth)
-  OpenAI streaming        → inject stream_options.include_usage
   start-plan              → prepend ZCode system messages
       │
       ▼

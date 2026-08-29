@@ -122,13 +122,16 @@ export async function proxyRequest(
     return errorResponse(503, "credential_unavailable", (err as Error).message);
   }
 
-  // v2.3 shape alignment: coding-plan mirrors the real ZCode client — Anthropic
-  // upstream (api.z.ai/api/anthropic → ultra via endpoint routing). start-plan
-  // stays on the zcode.z.ai OpenAI gateway.
+  // v2.6: both plans use the Anthropic upstream. coding-plan mirrors the real
+  // ZCode client (api.z.ai/api/anthropic → ultra via endpoint routing);
+  // start-plan's old OpenAI gateway (/api/v1/zcode-plan/chat/completions) was
+  // retired server-side (404 as of 2026-08-28) — the live desktop client now
+  // posts Anthropic messages to /api/v1/zcode-plan/anthropic/v1/messages with
+  // the start-plan JWT, so we do the same (no OpenAI translation either way).
   const startPlan = config.plan === "start-plan";
-  const translateAnthropicToOpenAI = format === "anthropic" && startPlan;
-  const translateOpenAIToAnthropic = format === "openai" && !startPlan;
-  const upstreamFormat: Format = startPlan ? "openai" : "anthropic";
+  const translateAnthropicToOpenAI = false;
+  const translateOpenAIToAnthropic = format === "openai";
+  const upstreamFormat: Format = "anthropic";
   const clientSession = resolveSessionContext({ clientReq, body, upstreamFormat, model: meta.model, config });
   if (debug && clientSession) {
     const shortSession = clientSession.sessionId ? clientSession.sessionId.slice(0, 10) : "-";
@@ -223,7 +226,34 @@ export async function proxyRequest(
 
   let upstreamResp: Response;
   try {
-    upstreamResp = await dispatch(upstreamReq, upstreamHeaderPairs);
+    // Transient connect failures (DNS blip, TLS reset, Bun "Unable to
+    // connect") happen a few times a day against the gateway. Retry the
+    // CONNECT twice with a short backoff before surfacing a 502 — the
+    // request never reached upstream, so resending is side-effect-free.
+    // Guard rails (review P1/P2 + nits): skip retry when the client already
+    // aborted, and re-dispatch a FRESH Request each attempt — a reused
+    // Request has its body stream marked used after the first fetch, so
+    // attempt 2+ would throw "Request body already used" before any I/O
+    // (start-plan hits the plain pass-through path where dispatch does NOT
+    // rebuild the Request).
+    const maxConnectAttempts = 3;
+    for (let attempt = 1; ; attempt++) {
+      if (clientReq.signal.aborted) throw new Error("client aborted before upstream connect");
+      try {
+        upstreamResp = await dispatch(upstreamReq, upstreamHeaderPairs);
+        break;
+      } catch (err) {
+        if (attempt >= maxConnectAttempts) throw err;
+        const backoffMs = 500 * attempt;
+        if (debug) debugError(reqId, "upstream_connect_retry", `attempt ${attempt}/${maxConnectAttempts - 1} failed (${(err as Error).message}), retrying in ${backoffMs}ms`);
+        console.log(`${reqId} upstream connect failed (${(err as Error).message}), retry ${attempt + 1}/${maxConnectAttempts} in ${backoffMs}ms`);
+        await new Promise((r) => setTimeout(r, backoffMs));
+        // Rebuild the Request so the body stream is fresh for the next
+        // dispatch (mirrors the captcha retry, which already constructs a
+        // new Request per attempt).
+        upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
+      }
+    }
   } catch (err) {
     if (debug) debugError(reqId, "upstream_unreachable", (err as Error).message);
     printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
@@ -257,7 +287,24 @@ export async function proxyRequest(
   // getCaptchaToken takes the next pre-solved one). `&& captcha` looks
   // redundant but is required for TS null-narrowing.
   const captcha = startPlan ? await loadCaptcha() : null;
-  const captchaChallenge = captcha ? captcha.detectCaptchaChallenge(upstreamResp) : null;
+  let captchaChallenge = captcha ? captcha.detectCaptchaChallenge(upstreamResp) : null;
+  // In-body challenge variant (observed 2026-08-29): the gateway sometimes
+  // returns the challenge as HTTP 400 with {"code":3007,...} in the JSON body
+  // instead of the captcha response header, so detectCaptchaChallenge never
+  // fires and the client just gets a raw 502. Peek a clone of the body (error
+  // responses are small; the original body stays untouched for the retry or
+  // the error path) and treat it as a challenge too.
+  if (!captchaChallenge && captcha && !upstreamResp.ok) {
+    const ctype = upstreamResp.headers.get("content-type") ?? "";
+    if (!ctype.includes("text/event-stream")) {
+      try {
+        const peek = await upstreamResp.clone().text();
+        if (peek.includes('"code":3007') || peek.includes('"code": 3007')) {
+          captchaChallenge = "in-body-3007";
+        }
+      } catch {}
+    }
+  }
   if (captchaChallenge && captcha) {
     if (debug) debugLine(reqId, "captcha challenge — re-solving and retrying once");
     try { upstreamResp.body?.cancel(); } catch {}
