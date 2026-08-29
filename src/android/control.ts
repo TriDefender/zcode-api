@@ -18,7 +18,12 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import type { ProviderId } from "../provider/types.js";
 import type { Credential } from "../auth/types.js";
-import { ZaiOAuthClient, BigmodelOAuthClient } from "../auth/oauth.js";
+import {
+  ZaiOAuthClient,
+  BigmodelOAuthClient,
+  AuthCodeOAuthClient,
+  type OAuthFlowClient,
+} from "../auth/oauth.js";
 import { KeyResolver } from "../auth/resolver.js";
 import { saveCredential, clearCredential, loadCredential } from "../auth/store.js";
 
@@ -75,7 +80,7 @@ export interface ControlState {
   proxyPort: number;
   /** Active OAuth client while a flow is in flight; nulled on completion. */
   activeOauth?: {
-    client: ZaiOAuthClient | BigmodelOAuthClient;
+    client: OAuthFlowClient;
     callbackUrl: string;
     state: string;
   };
@@ -251,25 +256,28 @@ async function dispatch(
         await state.activeOauth.client.close().catch(() => {});
         state.activeOauth = undefined;
       }
-      const client = cmd.provider === "bigmodel" ? new BigmodelOAuthClient() : new ZaiOAuthClient();
+      // Z.AI uses the server-mediated cli login (no local callback); bigmodel
+      // keeps the classic localhost auth-code callback server.
+      const client: OAuthFlowClient =
+        cmd.provider === "bigmodel" ? new BigmodelOAuthClient() : new ZaiOAuthClient();
       const started = await client.start();
-      const callbackUrlObj = new URL(started.callbackUrl);
-      const callbackPort = callbackUrlObj.port ? Number(callbackUrlObj.port) : 80;
+      const callbackPort = started.callbackUrl
+        ? Number(new URL(started.callbackUrl).port) || 80
+        : 0;
       state.activeOauth = {
         client,
         callbackUrl: started.callbackUrl,
         state: started.state,
       };
-      client.waitForCallback().then(async (code) => {
-        const { accessToken, userId, jwt } = await client.exchangeCode(code, started.callbackUrl, started.state);
+      client.complete(started).then(async (tokens) => {
         const resolver = new KeyResolver();
-        const cred: Credential = await resolver.resolveCodingPlanCredential(accessToken, cmd.provider, userId);
-        if (jwt) cred.jwt = jwt;
+        const cred: Credential = await resolver.resolveCodingPlanCredential(tokens.accessToken, cmd.provider, tokens.userId);
+        if (tokens.jwt) cred.jwt = tokens.jwt;
         await saveCredential(cred);
-        console.log(`OAuth completed for ${cmd.provider} via browser callback`);
+        console.log(`OAuth completed for ${cmd.provider}`);
       }).catch((err: unknown) => {
-        // Timeouts / callback rejections are expected when the user abandons
-        // the browser; nothing to surface beyond the log buffer.
+        // Timeouts / rejections are expected when the user abandons the
+        // browser; nothing to surface beyond the log buffer.
         console.error(`OAuth flow ended without success: ${(err as Error)?.message ?? String(err)}`);
       }).finally(() => {
         // MUST run on rejection too — otherwise the callback port leaks until
@@ -287,7 +295,9 @@ async function dispatch(
 
     case "deliverOAuthCode": {
       const active = state.activeOauth;
-      if (!active || active.state !== cmd.state) {
+      // Code delivery only applies to callback-based (auth-code) flows — the
+      // Z.AI cli login completes via server polling and has no code to deliver.
+      if (!(active?.client instanceof AuthCodeOAuthClient) || active.state !== cmd.state) {
         return { ok: false, error: "no_matching_oauth_flow" };
       }
       try {

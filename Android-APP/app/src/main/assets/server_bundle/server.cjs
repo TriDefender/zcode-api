@@ -118050,27 +118050,121 @@ var import_node_http3 = require("node:http");
 // src/auth/oauth.ts
 var import_node_http2 = require("node:http");
 var import_node_crypto3 = require("node:crypto");
-var ZCODE_TOKEN_ENDPOINT = "https://zcode.z.ai/api/v1/oauth/token";
+var ZCODE_API_BASE = "https://zcode.z.ai/api/v1";
+var ZCODE_TOKEN_ENDPOINT = `${ZCODE_API_BASE}/oauth/token`;
 var BIGMODEL_HOST = "https://bigmodel.cn";
 var BIGMODEL_APP_ID = "zcode";
-var AuthCodeOAuthClient = class {
-  constructor(config, fetchImpl = fetch) {
-    this.config = config;
+var LOGIN_TIMEOUT_MS = 3e5;
+var OAuthFlowClient = class {
+  constructor(provider, fetchImpl) {
+    this.provider = provider;
     this.fetchImpl = fetchImpl;
   }
-  config;
+  provider;
   fetchImpl;
+  /** Run the full flow end-to-end: surface authorize URL, wait, close. */
+  async authorize(onAuthorizeUrl, timeoutMs = LOGIN_TIMEOUT_MS) {
+    const started = await this.start();
+    onAuthorizeUrl?.(started.authorizeUrl);
+    try {
+      const tokens = await this.complete(started, timeoutMs);
+      return { accessToken: tokens.accessToken, provider: this.provider, userId: tokens.userId, jwt: tokens.jwt };
+    } finally {
+      await this.close();
+    }
+  }
+};
+async function requestZcodeEnvelope(fetchImpl, url2, init, label2) {
+  const resp = await fetchImpl(url2, init);
+  const raw = safeJsonParse(await resp.text());
+  if (!raw || typeof raw.code !== "number") {
+    throw new Error(`${label2}: invalid response envelope (status=${resp.status})`);
+  }
+  if (!resp.ok || raw.code !== 0) {
+    throw new Error(`${label2} failed: status=${resp.status} msg=${raw.msg ?? "(none)"}`);
+  }
+  return raw.data;
+}
+var ZaiOAuthClient = class extends OAuthFlowClient {
+  constructor(fetchImpl = fetch, sleep2 = defaultSleep) {
+    super("zai", fetchImpl);
+    this.sleep = sleep2;
+  }
+  sleep;
+  flow = null;
+  pollToken = "";
+  start() {
+    this.flow = null;
+    this.pollToken = (0, import_node_crypto3.randomBytes)(32).toString("hex");
+    return (async () => {
+      const data2 = await requestZcodeEnvelope(
+        this.fetchImpl,
+        `${ZCODE_API_BASE}/oauth/cli/init`,
+        {
+          method: "POST",
+          headers: { authorization: `Bearer ${this.pollToken}`, "content-type": "application/json" },
+          body: JSON.stringify({ provider: this.provider })
+        },
+        "Z.AI login init"
+      );
+      if (!data2 || typeof data2.flow_id !== "string" || typeof data2.authorize_url !== "string" || typeof data2.expires_at !== "number" || typeof data2.poll_interval_sec !== "number") {
+        throw new Error("Z.AI login init: invalid response data");
+      }
+      this.flow = data2;
+      return { authorizeUrl: this.flow.authorize_url, callbackUrl: "", state: this.flow.flow_id };
+    })();
+  }
+  async complete(_started, timeoutMs = LOGIN_TIMEOUT_MS) {
+    const flow = this.flow;
+    if (!flow) throw new Error("Z.AI login not started");
+    const deadlineMs = Math.min(Date.now() + timeoutMs, flow.expires_at * 1e3);
+    const intervalMs = Math.max(1e3, flow.poll_interval_sec * 1e3);
+    for (; ; ) {
+      if (Date.now() >= deadlineMs) {
+        throw new Error("Authorization timed out. Please retry login.");
+      }
+      const data2 = await requestZcodeEnvelope(
+        this.fetchImpl,
+        `${ZCODE_API_BASE}/oauth/cli/poll/${encodeURIComponent(flow.flow_id)}`,
+        { method: "GET", headers: { authorization: `Bearer ${this.pollToken}` } },
+        "Z.AI login poll"
+      );
+      if (data2?.status === "ready") {
+        const accessToken = typeof data2.zai?.access_token === "string" ? data2.zai.access_token.trim() : "";
+        if (!accessToken) {
+          throw new Error("Z.AI login poll: response missing data.zai.access_token");
+        }
+        return {
+          accessToken,
+          jwt: typeof data2.token === "string" ? data2.token.trim() : void 0,
+          userId: typeof data2.user?.user_id === "string" ? data2.user.user_id : void 0
+        };
+      }
+      if (data2?.status === "failed") {
+        throw new Error("Authorization failed. Please retry login.");
+      }
+      if (data2?.status !== "pending") {
+        throw new Error(`Z.AI login poll: unexpected status ${String(data2?.status ?? "(none)")}`);
+      }
+      await this.sleep(Math.min(intervalMs, Math.max(0, deadlineMs - Date.now())));
+    }
+  }
+  async close() {
+    this.flow = null;
+  }
+};
+var AuthCodeOAuthClient = class extends OAuthFlowClient {
   server = null;
   callbackResult = null;
   callbackWaiters = [];
+  constructor(config, fetchImpl = fetch) {
+    super(config.provider, fetchImpl);
+    this.config = config;
+  }
+  config;
   /** Build the provider authorize URL with the localhost redirect + state. */
   buildAuthorizeUrl(callbackUrl, state2) {
-    const params = this.config.authorizeParamStyle === "oauth2" ? new URLSearchParams({
-      redirect_uri: callbackUrl,
-      response_type: "code",
-      client_id: this.config.appId,
-      state: state2
-    }) : new URLSearchParams({
+    const params = new URLSearchParams({
       appId: this.config.appId,
       redirect: callbackUrl,
       state: state2
@@ -118083,7 +118177,7 @@ var AuthCodeOAuthClient = class {
    *
    * The bind port is `0` (OS-assigned random) unless the env var
    * `ZCODE_OAUTH_CALLBACK_PORT` is set, in which case that exact port is used.
-   * The Android entry sets the env var so the WebView redirect URL is
+   * The Android entry sets the env var so the Custom Tabs redirect URL is
    * predictable across launches.
    */
   start() {
@@ -118135,7 +118229,7 @@ var AuthCodeOAuthClient = class {
     }
   }
   /** Wait for the OAuth callback redirect. Resolves with the auth code. */
-  waitForCallback(timeoutMs = 3e5) {
+  waitForCallback(timeoutMs = LOGIN_TIMEOUT_MS) {
     if (this.callbackResult?.code) {
       return Promise.resolve(this.callbackResult.code);
     }
@@ -118188,17 +118282,10 @@ var AuthCodeOAuthClient = class {
     const jwt = raw?.data?.token?.trim() ?? void 0;
     return { accessToken, userId: typeof userId === "string" ? userId : void 0, jwt };
   }
-  /** Run the full flow: start server, surface authorize URL, exchange code. */
-  async authorize(onAuthorizeUrl, timeoutMs = 3e5) {
-    const { authorizeUrl, callbackUrl, state: state2 } = await this.start();
-    onAuthorizeUrl?.(authorizeUrl);
-    try {
-      const authCode = await this.waitForCallback(timeoutMs);
-      const { accessToken, userId, jwt } = await this.exchangeCode(authCode, callbackUrl, state2);
-      return { accessToken, provider: this.config.provider, userId, jwt };
-    } finally {
-      await this.close();
-    }
+  /** Wait for the browser callback, then exchange the code. */
+  async complete(started, timeoutMs = LOGIN_TIMEOUT_MS) {
+    const code = await this.waitForCallback(timeoutMs);
+    return this.exchangeCode(code, started.callbackUrl, started.state);
   }
   async close() {
     if (this.server) {
@@ -118211,28 +118298,13 @@ var AuthCodeOAuthClient = class {
     }
   }
 };
-var ZAI_AUTH_CODE_CONFIG = {
-  provider: "zai",
-  authorizeUrl: "https://chat.z.ai/api/oauth/authorize",
-  appId: "client_P8X5CMWmlaRO9gyO-KSqtg",
-  tokenUrl: ZCODE_TOKEN_ENDPOINT,
-  callbackPath: "/oauth/callback/zai",
-  accessTokenField: "zai",
-  authorizeParamStyle: "oauth2"
-};
 var BIGMODEL_AUTH_CODE_CONFIG = {
   provider: "bigmodel",
   authorizeUrl: `${BIGMODEL_HOST}/login`,
   appId: BIGMODEL_APP_ID,
   tokenUrl: ZCODE_TOKEN_ENDPOINT,
   callbackPath: "/oauth/callback/bigmodel",
-  accessTokenField: "bigmodel",
-  authorizeParamStyle: "zcode"
-};
-var ZaiOAuthClient = class extends AuthCodeOAuthClient {
-  constructor(fetchImpl = fetch) {
-    super(ZAI_AUTH_CODE_CONFIG, fetchImpl);
-  }
+  accessTokenField: "bigmodel"
 };
 var BigmodelOAuthClient = class extends AuthCodeOAuthClient {
   constructor(fetchImpl = fetch, host2 = BIGMODEL_HOST, appId = BIGMODEL_APP_ID) {
@@ -118242,6 +118314,9 @@ var BigmodelOAuthClient = class extends AuthCodeOAuthClient {
     );
   }
 };
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 function safeJsonParse(text) {
   try {
     return JSON.parse(text);
@@ -118467,20 +118542,18 @@ async function dispatch(cmd, state2, ctx) {
       }
       const client = cmd.provider === "bigmodel" ? new BigmodelOAuthClient() : new ZaiOAuthClient();
       const started = await client.start();
-      const callbackUrlObj = new URL(started.callbackUrl);
-      const callbackPort = callbackUrlObj.port ? Number(callbackUrlObj.port) : 80;
+      const callbackPort = started.callbackUrl ? Number(new URL(started.callbackUrl).port) || 80 : 0;
       state2.activeOauth = {
         client,
         callbackUrl: started.callbackUrl,
         state: started.state
       };
-      client.waitForCallback().then(async (code) => {
-        const { accessToken, userId, jwt } = await client.exchangeCode(code, started.callbackUrl, started.state);
+      client.complete(started).then(async (tokens) => {
         const resolver = new KeyResolver();
-        const cred = await resolver.resolveCodingPlanCredential(accessToken, cmd.provider, userId);
-        if (jwt) cred.jwt = jwt;
+        const cred = await resolver.resolveCodingPlanCredential(tokens.accessToken, cmd.provider, tokens.userId);
+        if (tokens.jwt) cred.jwt = tokens.jwt;
         await saveCredential(cred);
-        console.log(`OAuth completed for ${cmd.provider} via browser callback`);
+        console.log(`OAuth completed for ${cmd.provider}`);
       }).catch((err) => {
         console.error(`OAuth flow ended without success: ${err?.message ?? String(err)}`);
       }).finally(() => {
@@ -118497,7 +118570,7 @@ async function dispatch(cmd, state2, ctx) {
     }
     case "deliverOAuthCode": {
       const active = state2.activeOauth;
-      if (!active || active.state !== cmd.state) {
+      if (!(active?.client instanceof AuthCodeOAuthClient) || active.state !== cmd.state) {
         return { ok: false, error: "no_matching_oauth_flow" };
       }
       try {
