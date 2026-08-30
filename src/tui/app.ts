@@ -56,7 +56,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
     process.exit(1);
   }
 
-  let auth = newAuthManager(config);
+  const auth = new AuthManager();
   const pane = new LogPane(2000);
   const serverRef: { current: ProxyServer | null } = { current: null };
 
@@ -126,7 +126,6 @@ export async function runTui(args: ServeArgs): Promise<void> {
       configPath: path,
       provider: state.provider,
       plan: state.plan,
-      authMode: config.auth.mode,
       loggedIn: state.loggedIn,
       apiKeyPreview: state.apiKeyPreview,
       loginInFlight: state.loginInFlight,
@@ -180,15 +179,13 @@ export async function runTui(args: ServeArgs): Promise<void> {
     state.serverStatus = "starting";
     state.serverError = "";
     scheduleRender();
-    if (config.auth.mode === "oauth") {
-      const cred = await loadCredential().catch(() => null);
-      if (!cred) {
-        state.serverStatus = "stopped";
-        setToast("not logged in — press l to login", "err");
-        return;
-      }
-      auth.setOAuthCredential(cred);
+    const cred = await loadCredential().catch(() => null);
+    if (!cred) {
+      state.serverStatus = "stopped";
+      setToast("not logged in — press l to login", "err");
+      return;
     }
+    auth.setOAuthCredential(cred);
     try {
       const s = await startServer(buildServerOptions(config, auth, args.debug));
       serverRef.current = s;
@@ -234,7 +231,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
         .then((m) => m.startCaptchaPool(config.identity.appVersion))
         .catch((err) => console.error(`[captcha] pool warmup failed: ${(err as Error).message}`));
     }
-    if (config.claim.enabled && config.claim.auto && config.auth.mode === "oauth") {
+    if (config.claim.enabled && config.claim.auto) {
       import("../claim/runtime.js")
         .then((m) => {
           m.startAutoClaim(config, auth);
@@ -262,7 +259,6 @@ export async function runTui(args: ServeArgs): Promise<void> {
     }
     config.provider = provider;
     config.plan = plan;
-    auth = newAuthManager(config);
     try {
       updateConfigYaml(path, { provider, plan });
       state.provider = provider;
@@ -279,10 +275,6 @@ export async function runTui(args: ServeArgs): Promise<void> {
   let activeOauth: { client: OAuthFlowClient; provider: ProviderId } | null = null;
 
   async function startLogin(): Promise<void> {
-    if (config.auth.mode !== "oauth") {
-      setToast("apikey mode — set auth.apiKey in config.yaml", "info");
-      return;
-    }
     if (state.loginInFlight) {
       setToast("login already in progress", "info");
       return;
@@ -310,7 +302,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
       const cred = await resolver.resolveCodingPlanCredential(tokens.accessToken, provider, tokens.userId);
       if (tokens.jwt) cred.jwt = tokens.jwt;
       await saveCredential(cred);
-      if (serverRef.current && config.auth.mode === "oauth") auth.setOAuthCredential(cred);
+      if (serverRef.current) auth.setOAuthCredential(cred);
       console.log(`OAuth completed for ${provider}`);
       setToast("logged in", "ok");
     }).catch((err: unknown) => {
@@ -448,20 +440,12 @@ export async function runTui(args: ServeArgs): Promise<void> {
 
   // --- boot ---------------------------------------------------------------------
   console.log(`zcode-proxy TUI — config: ${path}`);
-  console.log(`provider: ${state.provider} · plan: ${state.plan} · auth mode: ${config.auth.mode}`);
+  console.log(`provider: ${state.provider} · plan: ${state.plan}`);
   await refreshAuth();
   renderNow();
-  if (config.auth.mode === "oauth" && !state.loggedIn) {
+  if (!state.loggedIn) {
     setToast("not logged in — press l to login", "err");
   } else {
     await startProxy();
   }
-}
-
-function newAuthManager(config: ProxyConfig): AuthManager {
-  return new AuthManager({
-    mode: config.auth.mode,
-    provider: config.provider,
-    apiKey: config.auth.apiKey ?? config.providers[config.provider].credential,
-  });
 }

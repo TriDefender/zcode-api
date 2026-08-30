@@ -8,7 +8,6 @@ function baseState(overrides: Partial<FrameState> = {}): FrameState {
     configPath: "config.yaml",
     provider: "zai",
     plan: "coding-plan",
-    authMode: "oauth",
     loggedIn: false,
     apiKeyPreview: "",
     loginInFlight: false,
@@ -111,12 +110,6 @@ describe("buildFrame", () => {
     ).join("\n");
     expect(text).toContain("waiting for browser authorization…");
     expect(text).toContain("● logging in…");
-  });
-
-  test("apikey mode hides the logged-out warning", () => {
-    const text = plainLines(baseState({ authMode: "apikey", loggedIn: false })).join("\n");
-    expect(text).toContain("apikey mode (config.yaml)");
-    expect(text).not.toContain("not logged in");
   });
 
   test("provider switch is locked while the proxy runs", () => {

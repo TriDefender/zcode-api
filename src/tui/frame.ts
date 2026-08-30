@@ -48,7 +48,6 @@ export interface FrameState {
   configPath: string;
   provider: string;
   plan: string;
-  authMode: string;
   loggedIn: boolean;
   apiKeyPreview: string;
   loginInFlight: boolean;
@@ -267,11 +266,9 @@ export function buildFrame(s: FrameState): Frame {
   emit(planRow.line);
   regions.push(...planRow.regions);
 
-  const authSegs: Seg[] = s.authMode === "oauth"
-    ? s.loggedIn
-      ? [{ t: "● ", c: GREEN }, { t: `logged in · ${s.apiKeyPreview}` }]
-      : [{ t: "○ not logged in", c: AMBER }]
-    : [{ t: "apikey mode (config.yaml)", c: DIM }];
+  const authSegs: Seg[] = s.loggedIn
+    ? [{ t: "● ", c: GREEN }, { t: `logged in · ${s.apiKeyPreview}` }]
+    : [{ t: "○ not logged in", c: AMBER }];
   emit((composeRow(w, lines.length, "Auth", authSegs.map((g) => ({ t: g.t, c: g.c })))).line);
 
   const loginRow = composeRow(w, lines.length, "", s.loginInFlight
