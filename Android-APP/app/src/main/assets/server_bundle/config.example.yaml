@@ -9,7 +9,8 @@ auth:
 
   # Upstream credentials come from the OAuth login flow — run this first:
   #   bun run src/index.ts auth login <zai|bigmodel>
-  # Path to the stored credentials (default shown):
+  # Parsed but currently not honored — the credential store path is fixed at
+  # ~/.zcode-proxy/credentials.json:
   # oauthCredentialsPath: "~/.zcode-proxy/credentials.json"
 
 # Which upstream provider to use: "zai" or "bigmodel"
@@ -41,6 +42,7 @@ models:
   - glm-5.1
   - glm-5.2
   - glm-5.3
+  - glm-5.3-flash
 
 # Configurable identity headers injected on every upstream request to mimic the
 # ZCode desktop client (User-Agent, X-ZCode-App-Version, X-Title,
@@ -134,9 +136,9 @@ async:
 # campaigns are quota-limited first-come-first-served; claimed plans activate
 # at the campaign's `starts_at` and land as Start-Plan quota.
 #
-# IMPORTANT: requires `auth.mode: oauth` (claim uses the JWT from login), and
-# identity.appVersion must be >= the campaign's minimum client version
-# (default 3.10.0) or the server rejects with `ineligible`.
+# IMPORTANT: requires a logged-in credential (claim uses the JWT from
+# `auth login`), and identity.appVersion must be >= the campaign's minimum
+# client version (default 3.10.0) or the server rejects with `ineligible`.
 #
 # Env overrides: ZCODE_CLAIM_ENABLED, ZCODE_CLAIM_AUTO, ZCODE_CLAIM_ORIGIN,
 # ZCODE_CLAIM_POLL_INTERVAL_MS.

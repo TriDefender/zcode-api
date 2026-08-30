@@ -18,7 +18,8 @@ auth:
 
   # Upstream credentials come from the OAuth login flow — run this first:
   #   bun run src/index.ts auth login <zai|bigmodel>
-  # Path to the stored credentials (default shown):
+  # Parsed but currently not honored — the credential store path is fixed at
+  # ~/.zcode-proxy/credentials.json:
   # oauthCredentialsPath: "~/.zcode-proxy/credentials.json"
 
 # Which upstream provider to use: "zai" or "bigmodel"
@@ -50,6 +51,7 @@ models:
   - glm-5.1
   - glm-5.2
   - glm-5.3
+  - glm-5.3-flash
 
 # Configurable identity headers injected on every upstream request to mimic the
 # ZCode desktop client (User-Agent, X-ZCode-App-Version, X-Title,

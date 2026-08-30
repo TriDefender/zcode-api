@@ -10,13 +10,8 @@ bun install
 
 # Copy and edit config
 cp config.example.yaml config.yaml
-<<<<<<< Updated upstream
-
 # Log in (OAuth, browser-based)
 bun run src/index.ts auth login zai        # or: bigmodel
-=======
-# Log in first via OAuth (see Authentication below)
->>>>>>> Stashed changes
 
 # Start the proxy
 bun run src/index.ts
@@ -245,7 +240,7 @@ file (best-effort; never affects handling). Requires a TTY with at least
 |-------|---------|---------|-------------|
 | `server.port` | `ZCODE_PROXY_PORT` | `8080` | Listen port |
 | `auth.proxyApiKey` | `ZCODE_PROXY_API_KEY` | — | Client auth key |
-| `auth.oauthCredentialsPath` | — | `~/.zcode-proxy/credentials.json` | Encrypted credential store from `auth login` |
+| `auth.oauthCredentialsPath` | — | — | Parsed but currently not honored — the credential store path is fixed at `~/.zcode-proxy/credentials.json` |
 | `provider` | `ZCODE_PROVIDER` | `zai` | Upstream provider |
 | `plan` | — | `coding-plan` | Plan tier: `coding-plan` (direct upstream) or `start-plan` (zcode.z.ai gateway + JWT + captcha) |
 | `identity.appVersion` | `ZCODE_APP_VERSION` | `3.10.0` | `User-Agent: ZCode/{version}` |
@@ -268,7 +263,7 @@ Client Request
 Proxy API Key Auth (shared secret)
       │
       ▼
-Route Detection + Plan-aware Routing (both plans post Anthropic upstream, v2.4+)
+Route Detection + Plan-aware Routing (both plans post Anthropic upstream, v4.5.0+)
   /v1/chat/completions (OpenAI client format)
     ├─ coding-plan → TRANSLATE OpenAI→Anthropic → provider's anthropic endpoint
     │                (remapped to zcode.z.ai ultra endpoints via server-controlled mapping)
@@ -344,10 +339,11 @@ encrypted credential store. Log in on the host with a fixed encryption seed
 ZCODE_PROXY_CREDENTIAL_SECRET="a-long-random-secret" \
   bun run src/index.ts auth login zai
 
-# 2. Point auth.oauthCredentialsPath in config.yaml at the mounted store, then run:
+# 2. Mount the store at the path the proxy reads. The image runs as user `bun`
+#    (home /home/bun) and the store path is fixed, not configurable:
 docker run --rm -p 8080:8080 \
   -v "$(pwd)/config.yaml:/data/config.yaml:ro" \
-  -v "$(HOME)/.zcode-proxy/credentials.json:/data/credentials.json:ro" \
+  -v "$(HOME)/.zcode-proxy/credentials.json:/home/bun/.zcode-proxy/credentials.json:ro" \
   -e ZCODE_PROXY_CREDENTIAL_SECRET="a-long-random-secret" \
   ghcr.io/tridefender/zcode-proxy:latest
 ```
@@ -373,7 +369,7 @@ services:
       - "8080:8080"
     volumes:
       - ./config.yaml:/data/config.yaml:ro
-      - ./credentials.json:/data/credentials.json:ro
+      - ./credentials.json:/home/bun/.zcode-proxy/credentials.json:ro
     environment:
       ZCODE_PROVIDER: zai
       ZCODE_PROXY_API_KEY: "your-proxy-secret"
