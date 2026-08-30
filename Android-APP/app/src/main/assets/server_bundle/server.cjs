@@ -7369,6 +7369,1923 @@ var require_dist = __commonJS({
   }
 });
 
+// src/config/loader.ts
+function loadConfig(path2) {
+  if (!(0, import_node_fs.existsSync)(path2)) {
+    throw new Error(`Config file not found: ${path2}`);
+  }
+  const raw = (0, import_node_fs.readFileSync)(path2, "utf-8");
+  const parsed = (0, import_yaml.parse)(raw) ?? {};
+  const port = resolvePort(process.env[ENV.PORT] ?? parsed?.server?.port);
+  const host2 = typeof parsed?.server?.host === "string" ? parsed.server.host : DEFAULTS.HOST;
+  const proxyApiKey = process.env[ENV.PROXY_API_KEY] ?? parsed?.auth?.proxyApiKey;
+  const oauthCredentialsPath = parsed?.auth?.oauthCredentialsPath;
+  const provider = resolveProvider(process.env[ENV.PROVIDER] ?? parsed?.provider);
+  const plan = resolvePlan(parsed?.plan);
+  const zai = {
+    anthropicBase: parsed?.providers?.zai?.anthropicBase ?? DEFAULTS.ZAI_ANTHROPIC_BASE,
+    openaiBase: parsed?.providers?.zai?.openaiBase ?? DEFAULTS.ZAI_OPENAI_BASE
+  };
+  const bigmodel = {
+    anthropicBase: parsed?.providers?.bigmodel?.anthropicBase ?? DEFAULTS.BIGMODEL_ANTHROPIC_BASE,
+    openaiBase: parsed?.providers?.bigmodel?.openaiBase ?? DEFAULTS.BIGMODEL_OPENAI_BASE
+  };
+  const defaultModel = typeof parsed?.defaultModel === "string" ? parsed.defaultModel : DEFAULTS.DEFAULT_MODEL;
+  const models = Array.isArray(parsed?.models) ? parsed.models : [defaultModel];
+  const logLevel = resolveLogLevel(parsed?.logging?.level);
+  const identity = resolveIdentity({
+    appVersionEnv: process.env[ENV.APP_VERSION],
+    appVersionYaml: parsed?.identity?.appVersion,
+    sourceTitleEnv: process.env[ENV.SOURCE_TITLE],
+    sourceTitleYaml: parsed?.identity?.sourceTitle,
+    refererEnv: process.env[ENV.REFERER_ORIGIN],
+    refererYaml: parsed?.identity?.refererOrigin,
+    deviceMidYaml: parsed?.identity?.deviceMid
+  });
+  const clientIdentity = resolveClientIdentity(parsed?.clientIdentity);
+  const responses = resolveResponsesConfig(parsed?.responses);
+  const mcp = resolveMcpConfig(parsed?.mcp);
+  const asyncCfg = resolveAsyncConfig(parsed?.async);
+  const claimCfg = resolveClaimConfig(parsed?.claim);
+  const endpointRouting = resolveEndpointRoutingConfig(parsed?.endpointRouting);
+  const clientSigning = resolveClientSigningConfig(parsed?.clientSigning);
+  const config = {
+    server: { port, host: host2 },
+    auth: { proxyApiKey, oauthCredentialsPath },
+    provider,
+    plan,
+    providers: { zai, bigmodel },
+    defaultModel,
+    models,
+    identity,
+    clientIdentity,
+    responses,
+    endpointRouting,
+    clientSigning,
+    mcp,
+    async: asyncCfg,
+    claim: claimCfg,
+    logging: { level: logLevel }
+  };
+  validate(config);
+  return config;
+}
+function resolveClientIdentity(raw) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  const mode2 = resolveClientIdentityMode(obj.mode);
+  const ttlSeconds = resolvePositiveInt(obj.ttlSeconds, DEFAULTS.CLIENT_IDENTITY_TTL_SECONDS, "clientIdentity.ttlSeconds");
+  const maxSessions = resolvePositiveInt(obj.maxSessions, DEFAULTS.CLIENT_IDENTITY_MAX_SESSIONS, "clientIdentity.maxSessions");
+  return { mode: mode2, ttlSeconds, maxSessions };
+}
+function resolveClientIdentityMode(raw) {
+  if (raw === void 0 || raw === null) return DEFAULTS.CLIENT_IDENTITY_MODE;
+  if (raw === "off" || raw === "observe" || raw === "enforce") return raw;
+  throw new Error(`Invalid clientIdentity.mode "${String(raw)}": must be "off", "observe", or "enforce"`);
+}
+function resolveResponsesConfig(raw) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  const storeRaw = obj.store && typeof obj.store === "object" ? obj.store : {};
+  return {
+    enabled: resolveBool(obj.enabled, DEFAULTS.RESPONSES_ENABLED),
+    storeMaxEntries: resolvePositiveInt(storeRaw.maxEntries, DEFAULTS.RESPONSES_STORE_MAX_ENTRIES, "responses.store.maxEntries"),
+    storeTtlMs: resolvePositiveInt(storeRaw.ttlMs, DEFAULTS.RESPONSES_STORE_TTL_MS, "responses.store.ttlMs")
+  };
+}
+function resolveMcpConfig(raw) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  return {
+    enabled: resolveBool(obj.enabled, DEFAULTS.MCP_ENABLED),
+    webSearch: resolveBool(obj.webSearch ?? obj.web_search, DEFAULTS.MCP_WEB_SEARCH),
+    webReader: resolveBool(obj.webReader ?? obj.web_reader, DEFAULTS.MCP_WEB_READER),
+    zread: resolveBool(obj.zread, DEFAULTS.MCP_ZREAD)
+  };
+}
+function resolveAsyncConfig(raw) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  const enabledEnv = process.env[ENV.ASYNC_ENABLED];
+  const originEnv = process.env[ENV.ASYNC_ORIGIN];
+  const maxRetriesEnv = process.env[ENV.ASYNC_MAX_RETRIES];
+  const maxWaitMsEnv = process.env[ENV.ASYNC_MAX_WAIT_MS];
+  const origin = (originEnv ?? (typeof obj.origin === "string" ? obj.origin : DEFAULTS.ASYNC_ORIGIN)).trim() || DEFAULTS.ASYNC_ORIGIN;
+  validateOrigin(origin, "async.origin");
+  return {
+    enabled: enabledEnv !== void 0 ? resolveBool(enabledEnv, DEFAULTS.ASYNC_ENABLED) : resolveBool(obj.enabled, DEFAULTS.ASYNC_ENABLED),
+    origin,
+    pollIntervalMs: resolvePositiveInt(obj.pollIntervalMs ?? obj.poll_interval_ms, DEFAULTS.ASYNC_POLL_INTERVAL_MS, "async.pollIntervalMs"),
+    keepAliveIntervalMs: resolvePositiveInt(obj.keepAliveIntervalMs ?? obj.keepalive_interval_ms, DEFAULTS.ASYNC_KEEPALIVE_INTERVAL_MS, "async.keepAliveIntervalMs"),
+    maxWaitMs: resolveNonNegativeInt(maxWaitMsEnv ?? obj.maxWaitMs ?? obj.max_wait_ms, DEFAULTS.ASYNC_MAX_WAIT_MS, "async.maxWaitMs"),
+    maxRetries: resolveNonNegativeInt(maxRetriesEnv ?? obj.maxRetries ?? obj.max_retries, DEFAULTS.ASYNC_MAX_RETRIES, "async.maxRetries"),
+    settleTimeoutMs: resolvePositiveInt(obj.settleTimeoutMs ?? obj.settle_timeout_ms, DEFAULTS.ASYNC_SETTLE_TIMEOUT_MS, "async.settleTimeoutMs"),
+    controlTimeoutMs: resolvePositiveInt(obj.controlTimeoutMs ?? obj.control_timeout_ms, DEFAULTS.ASYNC_CONTROL_TIMEOUT_MS, "async.controlTimeoutMs"),
+    defaultModel: typeof obj.defaultModel === "string" ? obj.defaultModel : DEFAULTS.ASYNC_DEFAULT_MODEL
+  };
+}
+function validateOrigin(origin, name2) {
+  let parsed;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw new Error(`${name2} "${origin}" is not a valid URL`);
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    throw new Error(`${name2} must use http: or https: scheme (got ${parsed.protocol})`);
+  }
+  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
+  const isLoopback2 = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
+  if (parsed.protocol === "http:" && !isLoopback2) {
+    throw new Error(`${name2} http:// is only allowed for loopback hosts (got ${hostname}). Use https:// for remote origins.`);
+  }
+  if (parsed.username || parsed.password) {
+    throw new Error(`${name2} must not contain userinfo`);
+  }
+  if (parsed.hash) {
+    throw new Error(`${name2} must not contain a fragment`);
+  }
+  if (parsed.pathname !== "/" && parsed.pathname !== "") {
+    throw new Error(`${name2} must not contain a path (got "${parsed.pathname}"); clients append their own paths`);
+  }
+  if (parsed.search) {
+    throw new Error(`${name2} must not contain a query string`);
+  }
+}
+function resolveEndpointRoutingConfig(raw) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  const enabledEnv = process.env[ENV.ENDPOINT_ROUTING_ENABLED];
+  const origin = (typeof obj.origin === "string" ? obj.origin : DEFAULTS.ENDPOINT_ROUTING_ORIGIN).trim() || DEFAULTS.ENDPOINT_ROUTING_ORIGIN;
+  validateOrigin(origin, "endpointRouting.origin");
+  return {
+    enabled: enabledEnv !== void 0 ? resolveBool(enabledEnv, DEFAULTS.ENDPOINT_ROUTING_ENABLED) : resolveBool(obj.enabled, DEFAULTS.ENDPOINT_ROUTING_ENABLED),
+    origin
+  };
+}
+function resolveClientSigningConfig(raw) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  const enabledEnv = process.env[ENV.CLIENT_SIGNING_ENABLED];
+  const origin = (typeof obj.origin === "string" ? obj.origin : DEFAULTS.CLIENT_SIGNING_ORIGIN).trim() || DEFAULTS.CLIENT_SIGNING_ORIGIN;
+  validateOrigin(origin, "clientSigning.origin");
+  return {
+    enabled: enabledEnv !== void 0 ? resolveBool(enabledEnv, DEFAULTS.CLIENT_SIGNING_ENABLED) : resolveBool(obj.enabled, DEFAULTS.CLIENT_SIGNING_ENABLED),
+    origin
+  };
+}
+function resolveBool(raw, fallback) {
+  if (typeof raw === "boolean") return raw;
+  if (typeof raw === "string") return raw === "true" || raw === "1";
+  return fallback;
+}
+function resolvePositiveInt(raw, fallback, name2) {
+  if (raw === void 0 || raw === null) return fallback;
+  const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new Error(`${name2} must be a positive integer`);
+  }
+  return n;
+}
+function resolveNonNegativeInt(raw, fallback, name2) {
+  if (raw === void 0 || raw === null) return fallback;
+  const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
+  if (!Number.isInteger(n) || n < 0) {
+    throw new Error(`${name2} must be a non-negative integer`);
+  }
+  return n;
+}
+function resolvePort(raw) {
+  if (raw === void 0 || raw === null) return DEFAULTS.PORT;
+  const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
+  if (!Number.isFinite(n)) {
+    throw new Error("server.port must be a valid number");
+  }
+  return n;
+}
+function resolveProvider(raw) {
+  const v = typeof raw === "string" ? raw : DEFAULTS.PROVIDER;
+  if (v !== "zai" && v !== "bigmodel") {
+    throw new Error(`Invalid provider "${v}": must be "zai" or "bigmodel"`);
+  }
+  return v;
+}
+function resolvePlan(raw) {
+  if (raw === "start-plan") return "start-plan";
+  return DEFAULTS.PLAN;
+}
+function resolveLogLevel(raw) {
+  const levels = ["debug", "info", "warn", "error"];
+  if (typeof raw === "string" && levels.includes(raw)) {
+    return raw;
+  }
+  return DEFAULTS.LOG_LEVEL;
+}
+function resolveIdentity(inp) {
+  const rawVersion = (inp.appVersionEnv ?? inp.appVersionYaml ?? DEFAULTS.APP_VERSION).trim();
+  const appVersion = ASCII_PRINTABLE.test(rawVersion) ? rawVersion : DEFAULTS.APP_VERSION;
+  const sourceTitle = (inp.sourceTitleEnv ?? inp.sourceTitleYaml ?? DEFAULTS.SOURCE_TITLE).trim() || DEFAULTS.SOURCE_TITLE;
+  const refererOrigin = (inp.refererEnv ?? inp.refererYaml ?? DEFAULTS.REFERER_ORIGIN).trim() || DEFAULTS.REFERER_ORIGIN;
+  const deviceMid = typeof inp.deviceMidYaml === "string" ? inp.deviceMidYaml.trim() : "";
+  return { appVersion, sourceTitle, refererOrigin, ...deviceMid ? { deviceMid } : {} };
+}
+function resolveClaimConfig(raw) {
+  const obj = raw && typeof raw === "object" ? raw : {};
+  const enabledEnv = process.env[ENV.CLAIM_ENABLED];
+  const autoEnv = process.env[ENV.CLAIM_AUTO];
+  const originEnv = process.env[ENV.CLAIM_ORIGIN];
+  const pollIntervalEnv = process.env[ENV.CLAIM_POLL_INTERVAL_MS];
+  const origin = (originEnv ?? (typeof obj.origin === "string" ? obj.origin : DEFAULTS.CLAIM_ORIGIN)).trim() || DEFAULTS.CLAIM_ORIGIN;
+  validateOrigin(origin, "claim.origin");
+  return {
+    enabled: enabledEnv !== void 0 ? resolveBool(enabledEnv, DEFAULTS.CLAIM_ENABLED) : resolveBool(obj.enabled, DEFAULTS.CLAIM_ENABLED),
+    auto: autoEnv !== void 0 ? resolveBool(autoEnv, DEFAULTS.CLAIM_AUTO) : resolveBool(obj.auto, DEFAULTS.CLAIM_AUTO),
+    origin,
+    pollIntervalMs: resolvePositiveInt(pollIntervalEnv ?? obj.pollIntervalMs ?? obj.poll_interval_ms, DEFAULTS.CLAIM_POLL_INTERVAL_MS, "claim.pollIntervalMs"),
+    cooldownMs: resolvePositiveInt(obj.cooldownMs ?? obj.cooldown_ms, DEFAULTS.CLAIM_COOLDOWN_MS, "claim.cooldownMs"),
+    planId: typeof obj.planId === "string" ? obj.planId.trim() : DEFAULTS.CLAIM_PLAN_ID
+  };
+}
+function validate(config) {
+  if (config.server.port < 1 || config.server.port > 65535) {
+    throw new Error(`server.port ${config.server.port} is out of range (1-65535)`);
+  }
+  if (!config.models.includes(config.defaultModel)) {
+    config.models.push(config.defaultModel);
+  }
+}
+var import_node_fs, import_yaml, ENV, DEFAULTS, ASCII_PRINTABLE;
+var init_loader = __esm({
+  "src/config/loader.ts"() {
+    "use strict";
+    import_node_fs = require("node:fs");
+    import_yaml = __toESM(require_dist(), 1);
+    ENV = {
+      PORT: "ZCODE_PROXY_PORT",
+      PROXY_API_KEY: "ZCODE_PROXY_API_KEY",
+      PROVIDER: "ZCODE_PROVIDER",
+      APP_VERSION: "ZCODE_APP_VERSION",
+      SOURCE_TITLE: "ZCODE_SOURCE_TITLE",
+      REFERER_ORIGIN: "ZCODE_REFERER_ORIGIN",
+      ASYNC_ENABLED: "ZCODE_ASYNC_ENABLED",
+      ASYNC_ORIGIN: "ZCODE_ASYNC_ORIGIN",
+      ASYNC_MAX_RETRIES: "ZCODE_ASYNC_MAX_RETRIES",
+      ASYNC_MAX_WAIT_MS: "ZCODE_ASYNC_MAX_WAIT_MS",
+      CLAIM_ENABLED: "ZCODE_CLAIM_ENABLED",
+      CLAIM_AUTO: "ZCODE_CLAIM_AUTO",
+      CLAIM_ORIGIN: "ZCODE_CLAIM_ORIGIN",
+      CLAIM_POLL_INTERVAL_MS: "ZCODE_CLAIM_POLL_INTERVAL_MS",
+      ENDPOINT_ROUTING_ENABLED: "ZCODE_ENDPOINT_ROUTING",
+      CLIENT_SIGNING_ENABLED: "ZCODE_CLIENT_SIGNING"
+    };
+    DEFAULTS = {
+      PORT: 8080,
+      HOST: "0.0.0.0",
+      PROVIDER: "zai",
+      PLAN: "coding-plan",
+      DEFAULT_MODEL: "glm-4.6",
+      LOG_LEVEL: "info",
+      ZAI_ANTHROPIC_BASE: "https://api.z.ai/api/anthropic",
+      ZAI_OPENAI_BASE: "https://api.z.ai/api/coding/paas/v4",
+      BIGMODEL_ANTHROPIC_BASE: "https://open.bigmodel.cn/api/anthropic",
+      BIGMODEL_OPENAI_BASE: "https://open.bigmodel.cn/api/coding/paas/v4",
+      APP_VERSION: "3.10.0",
+      SOURCE_TITLE: "cli",
+      REFERER_ORIGIN: "https://zcode.z.ai",
+      CLIENT_IDENTITY_MODE: "observe",
+      CLIENT_IDENTITY_TTL_SECONDS: 900,
+      CLIENT_IDENTITY_MAX_SESSIONS: 1024,
+      RESPONSES_ENABLED: true,
+      RESPONSES_STORE_MAX_ENTRIES: 1e3,
+      RESPONSES_STORE_TTL_MS: 24 * 60 * 60 * 1e3,
+      MCP_ENABLED: true,
+      MCP_WEB_SEARCH: true,
+      MCP_WEB_READER: false,
+      MCP_ZREAD: false,
+      ASYNC_ENABLED: false,
+      ASYNC_ORIGIN: "https://zcode.z.ai",
+      ASYNC_POLL_INTERVAL_MS: 5e3,
+      ASYNC_KEEPALIVE_INTERVAL_MS: 3e3,
+      ASYNC_MAX_WAIT_MS: 0,
+      ASYNC_MAX_RETRIES: 3,
+      ASYNC_SETTLE_TIMEOUT_MS: 8e3,
+      ASYNC_CONTROL_TIMEOUT_MS: 15e3,
+      ASYNC_DEFAULT_MODEL: "",
+      CLAIM_ENABLED: false,
+      CLAIM_AUTO: true,
+      CLAIM_ORIGIN: "https://zcode.z.ai",
+      CLAIM_POLL_INTERVAL_MS: 3e5,
+      CLAIM_COOLDOWN_MS: 6e5,
+      CLAIM_PLAN_ID: "",
+      ENDPOINT_ROUTING_ENABLED: true,
+      ENDPOINT_ROUTING_ORIGIN: "https://zcode.z.ai",
+      CLIENT_SIGNING_ENABLED: true,
+      CLIENT_SIGNING_ORIGIN: "https://zcode.z.ai"
+    };
+    ASCII_PRINTABLE = /^[\x20-\x7e]+$/;
+  }
+});
+
+// src/config/template.ts
+var EXAMPLE_CONFIG_YAML;
+var init_template = __esm({
+  "src/config/template.ts"() {
+    "use strict";
+    EXAMPLE_CONFIG_YAML = `server:
+  port: 8080
+  host: "0.0.0.0"
+
+auth:
+  # Key that clients must provide to use the proxy.
+  # Set to null/omit to disable client auth.
+  proxyApiKey: "your-proxy-secret"
+
+  # Upstream credentials come from the OAuth login flow \u2014 run this first:
+  #   bun run src/index.ts auth login <zai|bigmodel>
+  # Path to the stored credentials (default shown):
+  # oauthCredentialsPath: "~/.zcode-proxy/credentials.json"
+
+# Which upstream provider to use: "zai" or "bigmodel"
+provider: zai
+
+# Which plan tier to use:
+#   "coding-plan" (default) \u2014 direct upstream endpoints, permanent API key
+#   "start-plan"            \u2014 routes through zcode.z.ai with JWT auth (requires \`auth login\`)
+plan: coding-plan
+
+providers:
+  zai:
+    anthropicBase: "https://api.z.ai/api/anthropic"
+    openaiBase: "https://api.z.ai/api/coding/paas/v4"
+  bigmodel:
+    anthropicBase: "https://open.bigmodel.cn/api/anthropic"
+    openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4"
+
+defaultModel: glm-4.6
+
+models:
+  - glm-4.5-air
+  - glm-4.6
+  - glm-4.6v
+  - glm-4.7
+  - glm-5
+  - glm-5-turbo
+  - glm-5v-turbo
+  - glm-5.1
+  - glm-5.2
+  - glm-5.3
+
+# Configurable identity headers injected on every upstream request to mimic the
+# ZCode desktop client (User-Agent, X-ZCode-App-Version, X-Title,
+# X-ZCode-Agent, HTTP-Referer). Runtime platform headers (X-Platform,
+# X-Os-Category, X-Os-Version) are detected dynamically and are not configured
+# here. All fields below are optional; env vars override YAML, which overrides
+# defaults.
+identity:
+  # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
+  # Must be printable ASCII; non-conforming values fall back to the default.
+  # Default: "3.10.0" (current ZCode release). Override to match your real client.
+  appVersion: "3.10.0"
+  # X-Title suffix \u2192 "Z Code@{sourceTitle}". Default "cli".
+  sourceTitle: "cli"
+  # HTTP-Referer URL. Default "https://zcode.z.ai".
+  refererOrigin: "https://zcode.z.ai"
+  # Device identity (X-Device-Mid) \u2014 random UUIDv4, generated ONCE and reused
+  # forever (mirrors ZCode's telemetry deviceMid; no hardware values involved).
+  # Auto-generated into this file at first \`auth login\` or config creation.
+  # Leave empty on Android \u2014 the app injects ZCODE_IDENTITY_DEVICE_MID instead.
+  deviceMid: ""
+
+# Local client-session inference for cache-affinity experiments.
+# "observe" (default) logs inferred sessions in debug mode but does not change
+# upstream x-session-id. "enforce" reuses a stable x-session-id for inferred
+# coding-plan sessions. "off" disables inference entirely.
+clientIdentity:
+  mode: observe
+  ttlSeconds: 900
+  maxSessions: 1024
+
+# Server-controlled upstream URL remapping (mirrors the ZCode client's
+# ProviderEndpointRoutingService). The proxy periodically fetches
+# {origin}/api/v1/agent/configs and rewrites matching upstream URLs per the
+# returned proxyEndpoint.mapping table (currently the coding-plan Anthropic
+# endpoints -> zcode.z.ai ultra endpoints). Fail-open: any fetch/parse error
+# keeps the original URLs. Env override: ZCODE_ENDPOINT_ROUTING=false.
+endpointRouting:
+  enabled: true
+  origin: "https://zcode.z.ai"
+
+# Client request signing V4 (mirrors the ZCode 3.9.1 ClientRequestSigningV4Signer).
+# When enabled, the proxy probes {origin}/api/v1/agent/configs (cached 1h) and,
+# only if the server sets data.codingPlanSignature.enable=true, signs coding-plan
+# requests: handshake against {provider}/api/paas/c1f3a7e2/v2/client, Ed25519
+# signature + proof-of-work headers on every request, fail-open retry ladder
+# (two 401 VERIFY rejections -> permanent unsigned bypass). Start-plan and
+# off-peak paths are never signed. Env override: ZCODE_CLIENT_SIGNING=false.
+clientSigning:
+  enabled: true
+  origin: "https://zcode.z.ai"
+
+logging:
+  level: info
+`;
+  }
+});
+
+// src/auth/manager.ts
+var AuthManager;
+var init_manager = __esm({
+  "src/auth/manager.ts"() {
+    "use strict";
+    AuthManager = class {
+      oauthCred = null;
+      /** Returns the current credential, refreshing if necessary. */
+      async getCredential() {
+        if (this.oauthCred) {
+          if (this.oauthCred.expiresAt && Date.now() >= this.oauthCred.expiresAt) {
+            this.oauthCred = null;
+            throw new Error("OAuth credential expired; re-authentication required \u2014 run: zcode-proxy auth login");
+          }
+          return this.oauthCred;
+        }
+        throw new Error("OAuth credential not available \u2014 run: zcode-proxy auth login");
+      }
+      /** Set the OAuth credential (used by the `auth login` flow). */
+      setOAuthCredential(cred) {
+        this.oauthCred = cred;
+      }
+    };
+  }
+});
+
+// src/server/webui.txt
+var webui_default;
+var init_webui = __esm({
+  "src/server/webui.txt"() {
+    webui_default = `<!doctype html>\r
+<html lang="en">\r
+  <head>\r
+    <meta charset="utf-8" />\r
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />\r
+    <meta name="color-scheme" content="light dark" />\r
+    <title>zcode-proxy</title>\r
+    <!-- Markdown + sanitize + code highlight. All optional: the UI degrades to\r
+         escaped plaintext if the CDN is unreachable. -->\r
+    <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" defer></script>\r
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js" defer></script>\r
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>\r
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />\r
+    <style>\r
+      :root {\r
+        --accent: #6366f1;\r
+        --accent-strong: #4f46e5;\r
+        --radius: 12px;\r
+        --sidebar-w: 264px;\r
+      }\r
+      :root[data-theme="dark"] {\r
+        --bg: #212121;\r
+        --sidebar: #171717;\r
+        --elevated: #2f2f2f;\r
+        --elevated-hover: #383838;\r
+        --text: #ececec;\r
+        --muted: #9a9a9a;\r
+        --border: #3a3a3a;\r
+        --user-bubble: #2f2f2f;\r
+        --danger: #ef4444;\r
+      }\r
+      :root[data-theme="light"] {\r
+        --bg: #ffffff;\r
+        --sidebar: #f7f7f8;\r
+        --elevated: #f0f0f0;\r
+        --elevated-hover: #e6e6e6;\r
+        --text: #1a1a1a;\r
+        --muted: #6e6e6e;\r
+        --border: #e5e5e5;\r
+        --user-bubble: #f0f0f0;\r
+        --danger: #dc2626;\r
+      }\r
+      * { box-sizing: border-box; }\r
+      html, body { height: 100%; margin: 0; }\r
+      body {\r
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;\r
+        background: var(--bg);\r
+        color: var(--text);\r
+        font-size: 15px;\r
+        line-height: 1.6;\r
+        -webkit-font-smoothing: antialiased;\r
+        overflow: hidden;\r
+      }\r
+      button { font-family: inherit; cursor: pointer; }\r
+      input, textarea, select { font-family: inherit; font-size: inherit; color: inherit; }\r
+      ::-webkit-scrollbar { width: 10px; height: 10px; }\r
+      ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }\r
+      ::-webkit-scrollbar-thumb:hover { background: var(--muted); }\r
+\r
+      .app { display: flex; height: 100vh; width: 100vw; }\r
+\r
+      /* ---------- Sidebar ---------- */\r
+      .sidebar {\r
+        width: var(--sidebar-w);\r
+        flex: 0 0 var(--sidebar-w);\r
+        background: var(--sidebar);\r
+        border-right: 1px solid var(--border);\r
+        display: flex;\r
+        flex-direction: column;\r
+        transition: margin-left .2s ease;\r
+      }\r
+      .sidebar.collapsed { margin-left: calc(-1 * var(--sidebar-w)); }\r
+      .sidebar-head { padding: 12px; display: flex; gap: 8px; }\r
+      .btn-new {\r
+        flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;\r
+        padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius);\r
+        background: transparent; color: var(--text); font-weight: 500;\r
+      }\r
+      .btn-new:hover { background: var(--elevated); }\r
+      .conv-list { flex: 1; overflow-y: auto; padding: 4px 8px; }\r
+      .conv {\r
+        display: flex; align-items: center; gap: 8px; padding: 9px 10px; margin: 2px 0;\r
+        border-radius: 8px; cursor: pointer; color: var(--text); position: relative;\r
+        white-space: nowrap; overflow: hidden;\r
+      }\r
+      .conv .conv-title { flex: 1; overflow: hidden; text-overflow: ellipsis; }\r
+      .conv:hover { background: var(--elevated); }\r
+      .conv.active { background: var(--elevated); }\r
+      .conv .conv-del {\r
+        opacity: 0; border: none; background: transparent; color: var(--muted);\r
+        padding: 2px 6px; border-radius: 6px; flex: 0 0 auto;\r
+      }\r
+      .conv:hover .conv-del, .conv.active .conv-del { opacity: 1; }\r
+      .conv .conv-del:hover { color: var(--danger); background: var(--elevated-hover); }\r
+      .sidebar-foot { padding: 10px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; }\r
+      .icon-btn {\r
+        border: 1px solid var(--border); background: transparent; color: var(--text);\r
+        border-radius: var(--radius); padding: 8px 10px; display: inline-flex; align-items: center; gap: 6px;\r
+      }\r
+      .icon-btn:hover { background: var(--elevated); }\r
+      .sidebar-foot .icon-btn { flex: 1; justify-content: center; }\r
+\r
+      /* ---------- Main ---------- */\r
+      .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }\r
+      .topbar {\r
+        height: 52px; flex: 0 0 52px; display: flex; align-items: center; gap: 10px;\r
+        padding: 0 14px; border-bottom: 1px solid var(--border);\r
+      }\r
+      .topbar .model-wrap { display: flex; align-items: center; gap: 6px; }\r
+      .topbar select#model {\r
+        background: var(--elevated); border: 1px solid var(--border); border-radius: 8px;\r
+        padding: 7px 10px; color: var(--text); max-width: 220px;\r
+      }\r
+      .think-wrap { display: flex; align-items: center; gap: 6px; }\r
+      .think-wrap select#reasoning-effort {\r
+        background: var(--elevated); border: 1px solid var(--border); border-radius: 8px;\r
+        padding: 7px 8px; color: var(--text); font-size: 13px;\r
+      }\r
+      .think-wrap select#reasoning-effort:disabled { opacity: .5; }\r
+      .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: 0 0 9px; }\r
+      .status-dot.ok { background: #22c55e; }\r
+      .status-dot.err { background: var(--danger); }\r
+      .topbar .spacer { flex: 1; }\r
+      .messages { flex: 1; overflow-y: auto; padding: 20px 0 12px; scroll-behavior: smooth; }\r
+      .msg-list { max-width: 768px; margin: 0 auto; padding: 0 18px; display: flex; flex-direction: column; gap: 22px; }\r
+      .msg { display: flex; flex-direction: column; gap: 8px; }\r
+      .msg .role { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }\r
+      .msg.user .bubble {\r
+        background: var(--user-bubble); align-self: flex-end; max-width: 85%;\r
+        padding: 10px 14px; border-radius: var(--radius); border-top-right-radius: 4px;\r
+        white-space: pre-wrap; word-break: break-word;\r
+      }\r
+      .msg.assistant .content { color: var(--text); }\r
+      .msg-images { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }\r
+      .msg-images img { max-width: 200px; max-height: 200px; border-radius: 8px; border: 1px solid var(--border); }\r
+      .think {\r
+        border: 1px solid var(--border); border-radius: 10px; background: var(--elevated);\r
+        margin-bottom: 8px; overflow: hidden;\r
+      }\r
+      .think summary {\r
+        cursor: pointer; padding: 8px 12px; font-size: 13px; color: var(--muted);\r
+        list-style: none; display: flex; align-items: center; gap: 6px; user-select: none;\r
+      }\r
+      .think summary::-webkit-details-marker { display: none; }\r
+      .think summary::before { content: "\\25B6"; font-size: 9px; transition: transform .15s; }\r
+      .think[open] summary::before { transform: rotate(90deg); }\r
+      .think .think-body { padding: 0 12px 10px; font-size: 13px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }\r
+      .msg-meta { font-size: 12px; color: var(--muted); display: flex; gap: 10px; align-items: center; }\r
+      .msg-meta .regen { border: none; background: transparent; color: var(--muted); padding: 2px 6px; border-radius: 6px; }\r
+      .msg-meta .regen:hover { color: var(--text); background: var(--elevated); }\r
+\r
+      .empty { text-align: center; color: var(--muted); padding: 60px 20px; }\r
+      .empty h1 { font-size: 22px; margin: 0 0 6px; color: var(--text); font-weight: 600; }\r
+\r
+      /* markdown rendering */\r
+      .md p { margin: 0 0 12px; }\r
+      .md p:last-child { margin-bottom: 0; }\r
+      .md h1,.md h2,.md h3,.md h4 { margin: 18px 0 8px; line-height: 1.3; font-weight: 600; }\r
+      .md h1 { font-size: 1.5em; } .md h2 { font-size: 1.3em; } .md h3 { font-size: 1.15em; }\r
+      .md ul,.md ol { margin: 0 0 12px; padding-left: 24px; }\r
+      .md li { margin: 3px 0; }\r
+      .md a { color: var(--accent); }\r
+      .md blockquote { border-left: 3px solid var(--border); margin: 0 0 12px; padding: 2px 14px; color: var(--muted); }\r
+      .md code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: .9em; }\r
+      .md :not(pre) > code { background: var(--elevated); padding: 1px 5px; border-radius: 5px; }\r
+      .md pre { position: relative; margin: 0 0 12px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }\r
+      .md pre .code-head {\r
+        display: flex; justify-content: space-between; align-items: center;\r
+        padding: 6px 12px; font-size: 12px; color: #adbac7;\r
+        background: #2d333b; border-bottom: 1px solid var(--border);\r
+      }\r
+      .md pre code { display: block; padding: 12px 14px; overflow-x: auto; background: #0d1117; }\r
+      .md pre .copy-btn {\r
+        border: none; background: transparent; color: #adbac7; font-size: 12px; padding: 2px 6px; border-radius: 5px;\r
+      }\r
+      .md pre .copy-btn:hover { background: rgba(255,255,255,.1); color: #fff; }\r
+      .md pre .code-actions { display: flex; align-items: center; gap: 6px; }\r
+      .md pre .html-preview {\r
+        display: block; width: 100%; min-height: 200px; max-height: 80vh;\r
+        border: 0; background: #fff; resize: vertical;\r
+      }\r
+      .md table { border-collapse: collapse; margin: 0 0 12px; display: block; overflow-x: auto; }\r
+      .md th,.md td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; }\r
+      .md hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }\r
+      .md img { max-width: 100%; border-radius: 8px; }\r
+\r
+      /* ---------- Composer ---------- */\r
+      .composer-wrap { flex: 0 0 auto; padding: 10px 18px 18px; }\r
+      .composer {\r
+        max-width: 768px; margin: 0 auto; background: var(--elevated);\r
+        border: 1px solid var(--border); border-radius: 22px; padding: 8px 8px 8px 14px;\r
+        display: flex; align-items: flex-end; gap: 6px;\r
+      }\r
+      .composer textarea {\r
+        flex: 1; background: transparent; border: none; outline: none; resize: none;\r
+        max-height: 200px; padding: 8px 2px; line-height: 1.5; color: var(--text);\r
+      }\r
+      .composer .c-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }\r
+      .composer .think-bar { display: flex; align-items: center; gap: 4px; padding-right: 2px; }\r
+      .composer .pill {\r
+        border: 1px solid var(--border); background: var(--elevated-hover); color: var(--text);\r
+        border-radius: 14px; padding: 0 10px; font-size: 12px; height: 32px; white-space: nowrap;\r
+      }\r
+      .composer .pill.on { background: var(--accent); color: #fff; border-color: var(--accent); }\r
+      .composer select#reasoning-effort {\r
+        background: var(--elevated-hover); border: 1px solid var(--border); color: var(--text);\r
+        border-radius: 14px; padding: 0 6px; font-size: 12px; height: 32px; max-width: 84px;\r
+      }\r
+      .composer select#reasoning-effort:disabled { opacity: .45; }\r
+      .composer .c-btn {\r
+        width: 36px; height: 36px; border-radius: 50%; border: none;\r
+        background: var(--accent); color: #fff; display: inline-flex; align-items: center; justify-content: center;\r
+      }\r
+      .composer .c-btn:disabled { opacity: .5; }\r
+      .composer .c-btn.send:hover:not(:disabled) { background: var(--accent-strong); }\r
+      .composer .c-btn.stop { background: var(--danger); }\r
+      .composer .c-btn.attach { background: var(--elevated-hover); color: var(--text); }\r
+      .composer .c-btn.attach[hidden] { display: none; }\r
+      .composer .c-btn.attach.active { background: var(--accent); color: #fff; }\r
+      .attach-input { display: none; }\r
+      .attach-preview { max-width: 768px; margin: 0 auto 8px; display: flex; flex-wrap: wrap; gap: 8px; }\r
+      .attach-preview:empty { display: none; }\r
+      .attach-preview .ap { position: relative; }\r
+      .attach-preview img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }\r
+      .attach-preview .ap-rm {\r
+        position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border-radius: 50%;\r
+        background: var(--danger); color: #fff; border: none; font-size: 11px; line-height: 18px; padding: 0;\r
+      }\r
+      .composer-hint { max-width: 768px; margin: 6px auto 0; text-align: center; font-size: 12px; color: var(--muted); }\r
+\r
+      /* ---------- Settings modal ---------- */\r
+      .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; z-index: 50; }\r
+      .overlay.open { display: flex; align-items: center; justify-content: center; padding: 20px; }\r
+      .modal {\r
+        background: var(--bg); border: 1px solid var(--border); border-radius: 16px;\r
+        width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto; padding: 22px;\r
+      }\r
+      .modal h2 { margin: 0 0 4px; font-size: 18px; }\r
+      .modal .sub { color: var(--muted); font-size: 13px; margin: 0 0 18px; }\r
+      .field { margin-bottom: 16px; }\r
+      .field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; }\r
+      .field .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }\r
+      .field input[type=text], .field input[type=password], .field input[type=number],\r
+      .field textarea, .field select {\r
+        width: 100%; background: var(--elevated); border: 1px solid var(--border);\r
+        border-radius: 8px; padding: 9px 11px; color: var(--text); outline: none;\r
+      }\r
+      .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--accent); }\r
+      .field textarea { resize: vertical; min-height: 70px; }\r
+      .row { display: flex; gap: 12px; } .row .field { flex: 1; }\r
+      .range-row { display: flex; align-items: center; gap: 12px; }\r
+      .range-row input[type=range] { flex: 1; accent-color: var(--accent); }\r
+      .range-row .val { width: 52px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 13px; }\r
+      .switch { display: inline-flex; align-items: center; gap: 8px; }\r
+      .switch input { accent-color: var(--accent); width: 16px; height: 16px; }\r
+      .modal-foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; }\r
+      .btn { border: 1px solid var(--border); background: var(--elevated); color: var(--text); border-radius: 8px; padding: 9px 16px; }\r
+      .btn:hover { background: var(--elevated-hover); }\r
+      .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }\r
+      .btn.primary:hover { background: var(--accent-strong); }\r
+      .banner {\r
+        background: rgba(239,68,68,.12); border: 1px solid var(--danger); color: var(--text);\r
+        padding: 8px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; display: none;\r
+      }\r
+      .mcp-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }\r
+      .mcp-summary { color: var(--muted); font-size: 13px; }\r
+      .mcp-srv { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 13px; }\r
+      .mcp-srv .mcp-srv-head { display: flex; align-items: center; gap: 8px; }\r
+      .mcp-srv .mcp-label { font-weight: 600; }\r
+      .mcp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: 0 0 8px; }\r
+      .mcp-dot.ok { background: #22c55e; } .mcp-dot.err { background: var(--danger); } .mcp-dot.busy { background: #eab308; }\r
+      .mcp-srv .mcp-state { color: var(--muted); font-size: 12px; }\r
+      .mcp-srv .mcp-err { color: var(--danger); font-size: 12px; margin-top: 4px; word-break: break-word; }\r
+      .mcp-tools { margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }\r
+      .mcp-tool-chip { display: inline-block; background: var(--elevated); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; margin: 2px 2px 0 0; }\r
+      .msg.tool .tool-body {\r
+        background: var(--elevated); border: 1px dashed var(--border); border-radius: 8px;\r
+        padding: 8px 10px; font-size: 12px; color: var(--muted); white-space: pre-wrap; word-break: break-word;\r
+      }\r
+      .msg .toolcalls { font-size: 12px; color: var(--muted); margin-top: 4px; }\r
+      .toast {\r
+        position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);\r
+        background: var(--elevated); border: 1px solid var(--border); color: var(--text);\r
+        padding: 10px 16px; border-radius: 10px; font-size: 13px; opacity: 0;\r
+        transition: opacity .2s; z-index: 100; pointer-events: none;\r
+      }\r
+      .toast.show { opacity: 1; }\r
+\r
+      @media (max-width: 720px) {\r
+        .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 40; box-shadow: 2px 0 12px rgba(0,0,0,.3); }\r
+        .sidebar.collapsed { margin-left: calc(-1 * var(--sidebar-w)); }\r
+        .topbar select#model { max-width: 140px; }\r
+      }\r
+    </style>\r
+  </head>\r
+  <body>\r
+    <div class="app">\r
+      <!-- Sidebar -->\r
+      <aside class="sidebar" id="sidebar">\r
+        <div class="sidebar-head">\r
+          <button class="btn-new" id="btn-new" title="New chat">+ New chat</button>\r
+        </div>\r
+        <div class="conv-list" id="conv-list"></div>\r
+        <div class="sidebar-foot">\r
+          <button class="icon-btn" id="btn-settings" title="Settings">Settings</button>\r
+          <button class="icon-btn" id="btn-theme" title="Switch theme">Dark mode</button>\r
+        </div>\r
+      </aside>\r
+\r
+      <!-- Main -->\r
+      <main class="main">\r
+        <div class="topbar">\r
+          <button class="icon-btn" id="btn-menu" title="Toggle sidebar" style="flex:0 0 auto;width:38px;justify-content:center;">&#9776;</button>\r
+          <span class="status-dot" id="status-dot" title="Connection status"></span>\r
+          <div class="model-wrap">\r
+            <select id="model" title="Model"></select>\r
+          </div>\r
+          <div class="spacer"></div>\r
+        </div>\r
+\r
+        <div class="messages" id="messages">\r
+          <div class="msg-list" id="msg-list"></div>\r
+        </div>\r
+\r
+        <div class="composer-wrap">\r
+          <div class="attach-preview" id="attach-preview"></div>\r
+          <div class="composer">\r
+            <textarea id="input" rows="1" placeholder="Message the model&#8230;  (Enter to send, Shift+Enter for newline)"></textarea>\r
+            <div class="c-actions">\r
+              <div class="think-bar">\r
+                <button class="pill" id="btn-think" type="button" title="Toggle deep thinking">Think: on</button>\r
+                <select id="reasoning-effort" title="Reasoning effort (GLM-5.2+)"></select>\r
+              </div>\r
+              <button class="c-btn attach" id="btn-attach" title="Attach image (vision models)" hidden>&#128206;</button>\r
+              <button class="c-btn send" id="btn-send" title="Send">&#8593;</button>\r
+            </div>\r
+          </div>\r
+          <div class="composer-hint" id="hint"></div>\r
+          <input type="file" class="attach-input" id="attach-input" accept="image/*" multiple />\r
+        </div>\r
+      </main>\r
+    </div>\r
+\r
+    <!-- Settings modal -->\r
+    <div class="overlay" id="overlay">\r
+      <div class="modal" role="dialog" aria-modal="true">\r
+        <h2>Settings</h2>\r
+        <p class="sub">Auto-saved to this browser. The proxy API key is sent on every request.</p>\r
+        <div class="banner" id="banner"></div>\r
+\r
+        <div class="field">\r
+          <label for="s-apikey">Proxy API key</label>\r
+          <input type="password" id="s-apikey" autocomplete="off" placeholder="(leave blank if proxy has no key)" />\r
+          <div class="hint">Sent as <code>Authorization: Bearer &lt;key&gt;</code>.</div>\r
+        </div>\r
+\r
+        <div class="field">\r
+          <label for="s-system">System prompt</label>\r
+          <textarea id="s-system" placeholder="e.g. You are a concise senior engineer."></textarea>\r
+        </div>\r
+\r
+        <div class="row">\r
+          <div class="field">\r
+            <label>Temperature</label>\r
+            <div class="range-row">\r
+              <input type="range" id="s-temp" min="0" max="1" step="0.01" />\r
+              <span class="val" id="s-temp-val">1.00</span>\r
+            </div>\r
+          </div>\r
+          <div class="field">\r
+            <label>Top-p</label>\r
+            <div class="range-row">\r
+              <input type="range" id="s-topp" min="0.01" max="1" step="0.01" />\r
+              <span class="val" id="s-topp-val">0.95</span>\r
+            </div>\r
+          </div>\r
+        </div>\r
+\r
+        <div class="row">\r
+          <div class="field">\r
+            <label for="s-maxtok">Max output tokens</label>\r
+            <input type="number" id="s-maxtok" min="1" max="131072" step="1" />\r
+          </div>\r
+          <div class="field">\r
+            <label>Sampling</label>\r
+            <div class="switch" style="margin-top:10px;">\r
+              <input type="checkbox" id="s-dosample" />\r
+              <span>do_sample (disable for deterministic output)</span>\r
+            </div>\r
+          </div>\r
+        </div>\r
+\r
+        <div class="field">\r
+          <label>MCP tool calling</label>\r
+          <div class="switch" style="margin-bottom:8px;">\r
+            <input type="checkbox" id="s-mcpenable" />\r
+            <span>Enable tools (when off, no tools are sent even if servers are connected)</span>\r
+          </div>\r
+          <label for="s-mcp" style="margin-top:6px;">MCP servers (one per line)</label>\r
+          <textarea id="s-mcp" placeholder="https://mcp.example.com/mcp&#10;https://mcp.github.com/mcp,ghp_xxx&#10;http://localhost:3001/mcp"></textarea>\r
+          <div class="hint">Format: <code>URL</code> or <code>URL,key</code> (comma-separated). Key sent as <code>Authorization: Bearer</code>. If a server needs the key in the URL, embed it there directly. Caution: keys are stored in plaintext in localStorage.</div>\r
+        </div>\r
+\r
+        <div class="field">\r
+          <label for="s-cors">CORS proxy (optional)</label>\r
+          <input type="text" id="s-cors" placeholder="https://corsproxy.io/?url=   (leave blank for no CORS)" />\r
+          <div class="hint">Needed when servers block browser CORS.</div>\r
+        </div>\r
+\r
+        <div class="field">\r
+          <label>MCP connection</label>\r
+          <div class="mcp-bar">\r
+            <button class="btn" id="btn-mcp-connect" type="button">Connect all</button>\r
+            <button class="btn" id="btn-mcp-disconnect" type="button">Disconnect</button>\r
+            <span class="mcp-summary" id="mcp-summary"></span>\r
+          </div>\r
+          <div id="mcp-status"></div>\r
+        </div>\r
+\r
+        <div class="field">\r
+          <label>Input</label>\r
+          <div class="switch">\r
+            <input type="checkbox" id="s-enter" />\r
+            <span>Enter to send (Shift+Enter = newline)</span>\r
+          </div>\r
+        </div>\r
+\r
+        <div class="modal-foot">\r
+          <button class="btn" id="btn-clear-all" title="Delete all conversations and reset settings">Reset all</button>\r
+          <button class="btn primary" id="btn-close-settings">Done</button>\r
+        </div>\r
+      </div>\r
+    </div>\r
+\r
+    <div class="toast" id="toast"></div>\r
+\r
+    <script>\r
+    (function () {\r
+      "use strict";\r
+      var STORE = "zcode_webui_state_v1";\r
+      // Known model catalog (used as a fallback when /v1/models is unreachable,\r
+      // e.g. before the proxy key has been entered).\r
+      var KNOWN_MODELS = [\r
+        "glm-4.5-air", "glm-4.6", "glm-4.6v", "glm-4.7", "glm-5",\r
+        "glm-5-turbo", "glm-5v-turbo", "glm-5.1", "glm-5.2"\r
+      ];\r
+\r
+      var DEFAULT_SETTINGS = {\r
+        apiKey: "",\r
+        model: "glm-4.6",\r
+        systemPrompt: "",\r
+        temperature: 1.0,\r
+        topP: 0.95,\r
+        maxTokens: 4096,\r
+        doSample: true,\r
+        thinkingEnabled: true,\r
+        reasoningEffort: "max",\r
+        mcpEnabled: true,          // master toggle: only send tools when on\r
+        mcpServers: [],            // [{url, authKey}] \u2014 "URL" or "URL,key" per line\r
+        mcpCorsProxy: "",          // optional prefix (or {url} template) for browser CORS bypass\r
+        theme: "system",\r
+        enterToSend: true\r
+      };\r
+\r
+      // ---- state ----\r
+      var state = loadState();\r
+      var pendingImages = [];      // {name, dataUrl} attached to next user msg\r
+      var abortCtrl = null;        // current stream controller\r
+      var busy = false;            // generating?\r
+      var systemThemeDark = matchMedia("(prefers-color-scheme: dark)").matches;\r
+\r
+      // ---- dom ----\r
+      var $ = function (id) { return document.getElementById(id); };\r
+      var msgList = $("msg-list"), messages = $("messages");\r
+      var inputEl = $("input"), sendBtn = $("btn-send"), attachBtn = $("btn-attach");\r
+      var modelSel = $("model"), effortSel = $("reasoning-effort"), btnThink = $("btn-think");\r
+      var convListEl = $("conv-list"), statusDot = $("status-dot");\r
+      var sidebar = $("sidebar"), overlay = $("overlay"), toastEl = $("toast");\r
+      var hintEl = $("hint");\r
+\r
+      // =========================================================\r
+      // persistence\r
+      // =========================================================\r
+      function loadState() {\r
+        try {\r
+          var raw = localStorage.getItem(STORE);\r
+          if (raw) {\r
+            var s = JSON.parse(raw);\r
+            s.settings = Object.assign({}, DEFAULT_SETTINGS, s.settings || {});\r
+            s.conversations = Array.isArray(s.conversations) ? s.conversations : [];\r
+            s.activeId = s.activeId || (s.conversations[0] && s.conversations[0].id) || null;\r
+            return s;\r
+          }\r
+        } catch (e) { console.warn("load state failed", e); }\r
+        return { settings: Object.assign({}, DEFAULT_SETTINGS), conversations: [], activeId: null };\r
+      }\r
+      function saveState() {\r
+        try { localStorage.setItem(STORE, JSON.stringify(state)); }\r
+        catch (e) { toast("Storage full \\u2014 older sessions not saved."); }\r
+      }\r
+      function activeConv() {\r
+        return state.conversations.find(function (c) { return c.id === state.activeId; }) || null;\r
+      }\r
+      function newConv() {\r
+        var c = { id: rid(), title: "New chat", messages: [], model: state.settings.model, createdAt: Date.now() };\r
+        state.conversations.unshift(c);\r
+        state.activeId = c.id;\r
+        saveState();\r
+        renderSidebar(); renderMessages(); inputEl.focus();\r
+      }\r
+      function rid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }\r
+\r
+      // =========================================================\r
+      // rendering\r
+      // =========================================================\r
+      function renderSidebar() {\r
+        convListEl.innerHTML = "";\r
+        state.conversations.forEach(function (c) {\r
+          var row = document.createElement("div");\r
+          row.className = "conv" + (c.id === state.activeId ? " active" : "");\r
+          var title = document.createElement("span");\r
+          title.className = "conv-title"; title.textContent = c.title || "New chat";\r
+          var del = document.createElement("button");\r
+          del.className = "conv-del"; del.innerHTML = "\\u2715"; del.title = "Delete";\r
+          del.onclick = function (e) { e.stopPropagation(); deleteConv(c.id); };\r
+          row.onclick = function () { state.activeId = c.id; saveState(); renderSidebar(); renderMessages(); };\r
+          row.appendChild(title); row.appendChild(del);\r
+          convListEl.appendChild(row);\r
+        });\r
+      }\r
+      function deleteConv(id) {\r
+        var i = state.conversations.findIndex(function (c) { return c.id === id; });\r
+        if (i < 0) return;\r
+        state.conversations.splice(i, 1);\r
+        if (state.activeId === id) state.activeId = state.conversations[0] ? state.conversations[0].id : null;\r
+        saveState(); renderSidebar(); renderMessages();\r
+      }\r
+\r
+      function renderMessages() {\r
+        msgList.innerHTML = "";\r
+        var c = activeConv();\r
+        if (!c || c.messages.length === 0) { emptyState(); return; }\r
+        c.messages.forEach(function (m, idx) {\r
+          msgList.appendChild(buildMsg(m, idx === c.messages.length - 1));\r
+        });\r
+        scrollBottom(true);\r
+      }\r
+      function emptyState() {\r
+        var d = document.createElement("div");\r
+        d.className = "empty";\r
+        d.innerHTML = "<h1>zcode-proxy</h1><p>Chat with GLM models through your proxy. Pick a model above and start typing.</p>";\r
+        msgList.appendChild(d);\r
+      }\r
+\r
+      function buildMsg(m, isLast) {\r
+        var wrap = document.createElement("div");\r
+        wrap.className = "msg " + m.role;\r
+        var role = document.createElement("div"); role.className = "role";\r
+        role.textContent = m.role === "user" ? "You" : "Assistant";\r
+        wrap.appendChild(role);\r
+\r
+        if (m.images && m.images.length) {\r
+          var imgWrap = document.createElement("div"); imgWrap.className = "msg-images";\r
+          m.images.forEach(function (src) {\r
+            var im = document.createElement("img"); im.src = src; imgWrap.appendChild(im);\r
+          });\r
+          wrap.appendChild(imgWrap);\r
+        }\r
+\r
+        if (m.role === "tool") {\r
+          var tbody = document.createElement("div"); tbody.className = "tool-body";\r
+          tbody.textContent = "\u{1F527} tool result\\n" + (m.content || "");\r
+          wrap.appendChild(tbody);\r
+          return wrap;\r
+        }\r
+\r
+        if (m.role === "user") {\r
+          var bubble = document.createElement("div"); bubble.className = "bubble";\r
+          bubble.textContent = m.content || ""; wrap.appendChild(bubble);\r
+        } else {\r
+          var body = document.createElement("div"); body.className = "content md";\r
+          if (m.reasoning) {\r
+            var t = document.createElement("details"); t.className = "think"; t.open = true;\r
+            var sum = document.createElement("summary"); sum.textContent = "Thinking\\u2026";\r
+            var tb = document.createElement("div"); tb.className = "think-body"; tb.textContent = m.reasoning;\r
+            t.appendChild(sum); t.appendChild(tb);\r
+            body.appendChild(t);\r
+          }\r
+          body.innerHTML = renderMarkdown(m.content || "");\r
+          enhanceCode(body);\r
+          if (m.toolCalls && m.toolCalls.length) {\r
+            var tc = document.createElement("div"); tc.className = "toolcalls";\r
+            tc.textContent = "\u{1F527} called: " + m.toolCalls.map(function (x) { return x.name; }).join(", ");\r
+            body.appendChild(tc);\r
+          }\r
+          wrap.appendChild(body);\r
+          wrap.appendChild(meta(m, isLast));\r
+        }\r
+        return wrap;\r
+      }\r
+      function meta(m, isLast) {\r
+        var d = document.createElement("div"); d.className = "msg-meta";\r
+        if (m.model) { var s = document.createElement("span"); s.textContent = m.model; d.appendChild(s); }\r
+        if (m.truncated) { var t = document.createElement("span"); t.textContent = "\\u00b7 truncated (max tokens)"; d.appendChild(t); }\r
+        if (m.role === "assistant" && isLast && !busy) {\r
+          var b = document.createElement("button"); b.className = "regen"; b.textContent = "\\u21bb Regenerate";\r
+          b.onclick = regenerate; d.appendChild(b);\r
+        }\r
+        return d;\r
+      }\r
+\r
+      // =========================================================\r
+      // markdown\r
+      // =========================================================\r
+      function renderMarkdown(text) {\r
+        if (typeof marked === "undefined") return escapeHtml(text);\r
+        try {\r
+          marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false });\r
+          var html = marked.parse(text);\r
+          if (typeof DOMPurify !== "undefined") html = DOMPurify.sanitize(html);\r
+          return html;\r
+        } catch (e) { return escapeHtml(text); }\r
+      }\r
+      function escapeHtml(s) {\r
+        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");\r
+      }\r
+      // Tiny script appended to rendered HTML so the sandboxed iframe can tell\r
+      // its parent how tall the content is (auto-height). Split "<script" so the\r
+      // host parser never sees a real end-tag inside this string.\r
+      var RESIZE_SCRIPT = '<' + 'script>(function(){function r(){try{parent.postMessage({__zcpPreview:true,h:document.documentElement.scrollHeight},"*")}catch(e){}}window.addEventListener("load",r);setTimeout(r,60);setTimeout(r,400);setTimeout(r,1200);})();<' + '/script>';\r
+      var previewListenerAdded = false;\r
+      function ensurePreviewListener() {\r
+        if (previewListenerAdded) return;\r
+        previewListenerAdded = true;\r
+        window.addEventListener("message", function (ev) {\r
+          var d = ev.data;\r
+          if (!d || d.__zcpPreview !== true || typeof d.h !== "number") return;\r
+          var frames = document.querySelectorAll("iframe.html-preview");\r
+          for (var i = 0; i < frames.length; i++) {\r
+            if (frames[i].contentWindow === ev.source) {\r
+              var h = Math.max(120, Math.min(2000, d.h | 0));\r
+              frames[i].style.height = h + "px";\r
+              break;\r
+            }\r
+          }\r
+        });\r
+      }\r
+      function toggleHtmlPreview(pre, code, btn, label, raw) {\r
+        var frame = pre.querySelector("iframe.html-preview");\r
+        if (!frame) {\r
+          ensurePreviewListener();\r
+          frame = document.createElement("iframe");\r
+          frame.className = "html-preview";\r
+          // allow-scripts (no allow-same-origin): JS runs but the iframe is a\r
+          // null origin that cannot touch the parent page's DOM/storage.\r
+          frame.setAttribute("sandbox", "allow-scripts");\r
+          frame.setAttribute("srcdoc", raw + RESIZE_SCRIPT);\r
+          pre.appendChild(frame);\r
+        }\r
+        var showPreview = btn.textContent === "preview";\r
+        code.style.display = showPreview ? "none" : "";\r
+        frame.style.display = showPreview ? "" : "none";\r
+        btn.textContent = showPreview ? "code" : "preview";\r
+        label.textContent = showPreview ? "preview" : "html";\r
+      }\r
+      function enhanceCode(root) {\r
+        var pres = root.querySelectorAll("pre > code:not([data-hl])");\r
+        pres.forEach(function (code) {\r
+          var pre = code.parentElement;\r
+          var raw = code.textContent;\r
+          var lang = (code.className.match(/language-([\\w+-]+)/) || [])[1] || "";\r
+          var head = document.createElement("div"); head.className = "code-head";\r
+          var label = document.createElement("span"); label.textContent = lang || "code";\r
+          var actions = document.createElement("span"); actions.className = "code-actions";\r
+          var cp = document.createElement("button"); cp.className = "copy-btn"; cp.textContent = "copy";\r
+          cp.onclick = function () {\r
+            navigator.clipboard.writeText(raw).then(function () {\r
+              cp.textContent = "copied"; setTimeout(function () { cp.textContent = "copy"; }, 1200);\r
+            });\r
+          };\r
+          // In-page render toggle for HTML blocks (sandboxed iframe preview).\r
+          if (/^html$/i.test(lang)) {\r
+            var pv = document.createElement("button"); pv.className = "copy-btn"; pv.textContent = "preview";\r
+            pv.title = "Render this HTML live (sandboxed)";\r
+            pv.onclick = function () { toggleHtmlPreview(pre, code, pv, label, raw); };\r
+            actions.appendChild(pv);\r
+          }\r
+          actions.appendChild(cp);\r
+          head.appendChild(label); head.appendChild(actions);\r
+          pre.insertBefore(head, code);\r
+          code.setAttribute("data-hl", "1");\r
+          if (typeof hljs !== "undefined") { try { hljs.highlightElement(code); } catch (e) {} }\r
+        });\r
+        root.querySelectorAll("a[href]").forEach(function (a) {\r
+          a.target = "_blank"; a.rel = "noopener noreferrer";\r
+        });\r
+      }\r
+\r
+      // =========================================================\r
+      // theme\r
+      // =========================================================\r
+      function applyTheme() {\r
+        var t = state.settings.theme;\r
+        var dark = t === "dark" || (t === "system" && systemThemeDark);\r
+        document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");\r
+        var b = $("btn-theme");\r
+        if (b) {\r
+          // Label shows the mode you'll switch TO.\r
+          b.textContent = dark ? "Light mode" : "Dark mode";\r
+          b.title = "Switch to " + (dark ? "light" : "dark") + " theme";\r
+        }\r
+      }\r
+      matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function (e) {\r
+        systemThemeDark = e.matches; if (state.settings.theme === "system") applyTheme();\r
+      });\r
+\r
+      // =========================================================\r
+      // models\r
+      // =========================================================\r
+      function populateModels(list) {\r
+        modelSel.innerHTML = "";\r
+        (list.length ? list : KNOWN_MODELS).forEach(function (id) {\r
+          var o = document.createElement("option"); o.value = id; o.textContent = id;\r
+          modelSel.appendChild(o);\r
+        });\r
+        if (state.settings.model && Array.from(modelSel.options).some(function (o) { return o.value === state.settings.model; })) {\r
+          modelSel.value = state.settings.model;\r
+        }\r
+        syncAttachVisibility();\r
+        if (typeof populateEffort === "function") { populateEffort(); syncThinkButton(); }\r
+      }\r
+      function fetchModels() {\r
+        var headers = {};\r
+        if (state.settings.apiKey) headers["authorization"] = "Bearer " + state.settings.apiKey;\r
+        fetch("/v1/models", { method: "GET", headers: headers })\r
+          .then(function (r) {\r
+            if (!r.ok) throw new Error("HTTP " + r.status);\r
+            return r.json();\r
+          })\r
+          .then(function (j) {\r
+            var ids = (j.data || []).map(function (m) { return m.id; });\r
+            populateModels(ids); setStatus("ok");\r
+          })\r
+          .catch(function () {\r
+            populateModels(KNOWN_MODELS);\r
+            setStatus(state.settings.apiKey ? "err" : "idle");\r
+          });\r
+      }\r
+      function setStatus(s) {\r
+        statusDot.className = "status-dot" + (s === "ok" ? " ok" : s === "err" ? " err" : "");\r
+        statusDot.title = s === "ok" ? "Connected" : s === "err" ? "Request failed (check key / proxy)" : "Set proxy API key in settings";\r
+      }\r
+      function isVisionModel(id) { return /v/i.test(id || ""); }\r
+      function syncAttachVisibility() { attachBtn.hidden = !isVisionModel(modelSel.value); }\r
+\r
+      // =========================================================\r
+      // request building\r
+      // =========================================================\r
+      function buildRequestMessages(conv) {\r
+        var msgs = [];\r
+        if (state.settings.systemPrompt && state.settings.systemPrompt.trim()) {\r
+          msgs.push({ role: "system", content: state.settings.systemPrompt.trim() });\r
+        }\r
+        conv.messages.forEach(function (m) {\r
+          if (m.role === "user" && m.images && m.images.length) {\r
+            var parts = m.images.map(function (src) {\r
+              return { type: "image_url", image_url: { url: src } };\r
+            });\r
+            parts.push({ type: "text", text: m.content || "" });\r
+            msgs.push({ role: "user", content: parts });\r
+          } else if (m.role === "assistant" && m.toolCalls && m.toolCalls.length) {\r
+            msgs.push({\r
+              role: "assistant",\r
+              content: m.content || "",\r
+              tool_calls: m.toolCalls.map(function (tc) {\r
+                return { id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments || "{}" } };\r
+              }),\r
+            });\r
+          } else if (m.role === "tool") {\r
+            msgs.push({ role: "tool", tool_call_id: m.toolCallId, content: m.content || "" });\r
+          } else {\r
+            msgs.push({ role: m.role, content: m.content || "" });\r
+          }\r
+        });\r
+        return msgs;\r
+      }\r
+      function buildBody(conv) {\r
+        var model = conv.model || state.settings.model;\r
+        var body = {\r
+          model: model,\r
+          messages: buildRequestMessages(conv),\r
+          stream: true,\r
+          temperature: Number(state.settings.temperature),\r
+          top_p: Number(state.settings.topP),\r
+          max_tokens: Number(state.settings.maxTokens),\r
+          do_sample: !!state.settings.doSample\r
+        };\r
+        if (state.settings.thinkingEnabled) {\r
+          body.thinking = { type: "enabled" };\r
+          if (isReasoningModel(model)) body.reasoning_effort = state.settings.reasoningEffort;\r
+        } else {\r
+          body.thinking = { type: "disabled" };\r
+        }\r
+        var fnTools = gatherMcpTools();\r
+        if (fnTools.length) { body.tools = fnTools; body.tool_choice = "auto"; }\r
+        return body;\r
+      }\r
+      function isReasoningModel(id) {\r
+        // reasoning_effort is only honored by GLM-5.2 and above per BigModel docs.\r
+        return /glm-5\\.[2-9]|glm-[6-9]/i.test(id || "");\r
+      }\r
+      // =========================================================\r
+      // MCP \u2014 client-managed (browser-direct, optional CORS proxy).\r
+      // The webui connects to each server, lists its tools, injects them as\r
+      // function tools, and auto-executes tool calls the model returns.\r
+      // =========================================================\r
+      var mcpState = {};          // url -> {sessionId, tools[], connected, error, status}\r
+      var mcpToolMap = {};        // tool name -> {url, name}\r
+      var mcpRpcId = 0;\r
+      function nextRpcId() { return ++mcpRpcId; }\r
+\r
+      function applyCorsProxy(url) {\r
+        var cp = (state.settings.mcpCorsProxy || "").trim();\r
+        if (!cp) return url;\r
+        if (cp.indexOf("{url}") >= 0) return cp.replace("{url}", encodeURIComponent(url));\r
+        return cp + encodeURIComponent(url);\r
+      }\r
+      // POST one JSON-RPC message. Resolves {status, contentType, sessionId, body}.\r
+      // Auth: sent only as Authorization: Bearer (KoboldAI parity). If a server\r
+      // needs the key in the URL, embed it directly in the server URL line.\r
+      function mcpFetch(server, rpc) {\r
+        var st = mcpState[server.url] || (mcpState[server.url] = {});\r
+        var headers = { "content-type": "application/json", "accept": "application/json, text/event-stream" };\r
+        if (st.sessionId) headers["mcp-session-id"] = st.sessionId;\r
+        if (server.authKey) headers["authorization"] = "Bearer " + server.authKey;\r
+        return fetch(applyCorsProxy(server.url), {\r
+          method: "POST", headers: headers, body: JSON.stringify(rpc),\r
+        }).then(function (r) {\r
+          return r.text().then(function (t) {\r
+            return {\r
+              ok: r.ok, status: r.status,\r
+              contentType: r.headers.get("content-type") || "",\r
+              sessionId: r.headers.get("mcp-session-id") || "",\r
+              body: t,\r
+            };\r
+          });\r
+        });\r
+      }\r
+      // streamable-http servers may answer with SSE (data: lines) or plain JSON.\r
+      function parseMcpResponse(resp) {\r
+        var body = resp.body || "";\r
+        var looksSSE = resp.contentType.indexOf("text/event-stream") >= 0 || body.indexOf("data:") === 0;\r
+        if (looksSSE) {\r
+          var parsed = null;\r
+          body.split("\\n").forEach(function (ln) {\r
+            if (ln.indexOf("data:") === 0) {\r
+              var d = ln.slice(5).trim();\r
+              if (d) { try { parsed = JSON.parse(d); } catch (e) {} }\r
+            }\r
+          });\r
+          return parsed;\r
+        }\r
+        try { return JSON.parse(body); } catch (e) { return null; }\r
+      }\r
+      function mcpCall(server, method, params) {\r
+        var rpc = { jsonrpc: "2.0", id: nextRpcId(), method: method };\r
+        if (params) rpc.params = params;\r
+        return mcpFetch(server, rpc).then(function (resp) {\r
+          var st = mcpState[server.url];\r
+          if (resp.sessionId && st && !st.sessionId) st.sessionId = resp.sessionId;\r
+          var json = parseMcpResponse(resp);\r
+          if (!json) throw new Error("MCP " + method + " on " + server.url + " returned no JSON (HTTP " + resp.status + ")");\r
+          if (json.error) throw new Error("MCP error" + (json.error.code != null ? " (" + json.error.code + ")" : "") + ": " + (json.error.message || JSON.stringify(json.error)));\r
+          return json;\r
+        });\r
+      }\r
+      // initialize + tools/list for one server. Resolves to tools[].\r
+      function mcpConnect(server) {\r
+        return mcpCall(server, "initialize", {\r
+          protocolVersion: "2024-11-05", capabilities: {},\r
+          clientInfo: { name: "zcode-proxy-webui", version: "1.0" },\r
+        }).then(function () {\r
+          // required notification before tools/list on stateful servers\r
+          return mcpFetch(server, { jsonrpc: "2.0", method: "notifications/initialized" });\r
+        }).then(function () {\r
+          return mcpCall(server, "tools/list", {});\r
+        }).then(function (j) {\r
+          return (j.result && j.result.tools) || [];\r
+        });\r
+      }\r
+      // Build function-tool entries from every connected server + refresh the\r
+      // tool name -> {url, name} routing map. No tools when MCP is disabled.\r
+      function gatherMcpTools() {\r
+        var out = []; mcpToolMap = {};\r
+        if (!state.settings.mcpEnabled) return out;\r
+        state.settings.mcpServers.forEach(function (s) {\r
+          var st = mcpState[s.url];\r
+          if (st && st.connected && st.tools) {\r
+            st.tools.forEach(function (t) {\r
+              if (mcpToolMap[t.name]) return; // dedupe across servers (first wins)\r
+              mcpToolMap[t.name] = { url: s.url, name: t.name };\r
+              out.push({\r
+                type: "function",\r
+                function: {\r
+                  name: t.name,\r
+                  description: (t.description || t.name).slice(0, 1024),\r
+                  parameters: t.inputSchema || { type: "object", properties: {} },\r
+                },\r
+              });\r
+            });\r
+          }\r
+        });\r
+        return out;\r
+      }\r
+      // Execute one model tool_call against its MCP server. Resolves to text.\r
+      function execMcpTool(tc) {\r
+        var map = mcpToolMap[tc.name];\r
+        if (!map) return Promise.reject(new Error("Unknown tool: " + tc.name));\r
+        var server = state.settings.mcpServers.find(function (s) { return s.url === map.url; });\r
+        if (!server) return Promise.reject(new Error("MCP server not configured: " + map.url));\r
+        var args = {};\r
+        try { args = JSON.parse(tc.arguments || "{}"); } catch (e) { args = {}; }\r
+        return mcpCall(server, "tools/call", { name: map.name, arguments: args }).then(function (j) {\r
+          var res = j.result;\r
+          if (!res) return "(no result)";\r
+          if (Array.isArray(res.content)) {\r
+            return res.content.map(function (c) { return c.type === "text" ? c.text : JSON.stringify(c); }).join("\\n");\r
+          }\r
+          return JSON.stringify(res);\r
+        });\r
+      }\r
+\r
+      // Parse the MCP textarea (KoboldAI format: "URL" or "URL,key" per line).\r
+      function parseServersFromTextarea() {\r
+        return $("s-mcp").value.split("\\n").map(function (ln) {\r
+          var line = ln.trim();\r
+          if (!line) return null;\r
+          var parts = line.split(",");\r
+          var url = (parts[0] || "").trim();\r
+          var key = (parts[1] || "").trim();\r
+          if (!url) return null;\r
+          return { url: url, authKey: key };\r
+        }).filter(function (s) { return s.url; });\r
+      }\r
+      function connectAllMcp() {\r
+        var servers = parseServersFromTextarea();\r
+        state.settings.mcpServers = servers;\r
+        state.settings.mcpCorsProxy = $("s-cors").value.trim();\r
+        state.settings.mcpEnabled = $("s-mcpenable").checked;\r
+        saveState();\r
+        mcpState = {};              // fresh sessions each connect\r
+        renderMcpStatus(servers);\r
+        var chain = Promise.resolve();\r
+        servers.forEach(function (s) {\r
+          chain = chain.then(function () {\r
+            var st = mcpState[s.url] = { connected: false, tools: [], sessionId: "", error: "", status: "connecting" };\r
+            renderMcpStatus(servers);\r
+            return mcpConnect(s).then(function (tools) {\r
+              st.connected = true; st.tools = tools || []; st.error = ""; st.status = "ok";\r
+            }, function (err) {\r
+              st.connected = false; st.tools = []; st.error = String((err && err.message) || err); st.status = "error";\r
+            }).then(function () { renderMcpStatus(servers); });\r
+          });\r
+        });\r
+        chain.then(updateMcpSummary, updateMcpSummary);\r
+      }\r
+      function disconnectMcp() {\r
+        mcpState = {};\r
+        renderMcpStatus(state.settings.mcpServers);\r
+        updateMcpSummary();\r
+      }\r
+      function renderMcpStatus(servers) {\r
+        var box = $("mcp-status"); if (!box) return;\r
+        box.innerHTML = "";\r
+        (servers || state.settings.mcpServers || []).forEach(function (s) {\r
+          var st = mcpState[s.url] || { connected: false, tools: [], status: "", error: "" };\r
+          var row = document.createElement("div"); row.className = "mcp-srv";\r
+          var head = document.createElement("div"); head.className = "mcp-srv-head";\r
+          var dot = document.createElement("span");\r
+          dot.className = "mcp-dot " + (st.status === "ok" ? "ok" : st.status === "error" ? "err" : st.status === "connecting" ? "busy" : "");\r
+          var urlEl = document.createElement("span"); urlEl.className = "mcp-label"; urlEl.textContent = s.url; urlEl.title = s.url;\r
+          var info = document.createElement("span"); info.className = "mcp-state";\r
+          if (st.status === "connecting") info.textContent = "connecting\\u2026";\r
+          else if (st.status === "ok") info.textContent = "connected \\u00b7 " + (st.tools ? st.tools.length : 0) + " tools";\r
+          else if (st.status === "error") info.textContent = "failed";\r
+          else info.textContent = "not connected";\r
+          head.appendChild(dot); head.appendChild(urlEl); head.appendChild(info);\r
+          row.appendChild(head);\r
+          if (st.error) { var e = document.createElement("div"); e.className = "mcp-err"; e.textContent = st.error; row.appendChild(e); }\r
+          if (st.tools && st.tools.length) {\r
+            var tw = document.createElement("div"); tw.className = "mcp-tools";\r
+            st.tools.forEach(function (t) {\r
+              var c = document.createElement("span"); c.className = "mcp-tool-chip";\r
+              c.textContent = t.name; c.title = t.description || "";\r
+              tw.appendChild(c);\r
+            });\r
+            row.appendChild(tw);\r
+          }\r
+          box.appendChild(row);\r
+        });\r
+      }\r
+      function updateMcpSummary() {\r
+        var el = $("mcp-summary"); if (!el) return;\r
+        var servers = state.settings.mcpServers || [];\r
+        var connected = 0, tools = 0;\r
+        servers.forEach(function (s) {\r
+          var st = mcpState[s.url];\r
+          if (st && st.connected) { connected++; tools += (st.tools ? st.tools.length : 0); }\r
+        });\r
+        el.textContent = connected + "/" + servers.length + " servers \\u00b7 " + tools + " tools";\r
+      }\r
+\r
+      // =========================================================\r
+      // send / stream\r
+      // =========================================================\r
+      function send() {\r
+        if (busy) return;\r
+        var text = inputEl.value.trim();\r
+        if (!text && pendingImages.length === 0) return;\r
+        // Block image input for non-vision models with a clear message.\r
+        if (pendingImages.length && !isVisionModel(state.settings.model)) {\r
+          toast("This model does not support image input. Select a vision model (name contains 'v', e.g. glm-4.6v).");\r
+          return;\r
+        }\r
+        var c = activeConv(); if (!c) { newConv(); c = activeConv(); }\r
+        var images = pendingImages.map(function (p) { return p.dataUrl; });\r
+        c.messages.push({ role: "user", content: text, images: images.length ? images : undefined });\r
+        if (c.messages.filter(function (m) { return m.role === "user"; }).length === 1 && text) {\r
+          c.title = text.slice(0, 40);\r
+        }\r
+        inputEl.value = ""; autoGrow(); pendingImages = []; renderAttachPreview(); renderSidebar();\r
+        renderMessages();\r
+        runCompletion(c);\r
+      }\r
+\r
+      function regenerate() {\r
+        if (busy) return;\r
+        var c = activeConv(); if (!c) return;\r
+        while (c.messages.length && c.messages[c.messages.length - 1].role === "assistant") c.messages.pop();\r
+        renderMessages();\r
+        runCompletion(c);\r
+      }\r
+\r
+      function runCompletion(conv) {\r
+        setBusy(true);\r
+        runToolLoop(conv, 0);\r
+      }\r
+\r
+      // One assistant turn per call; recurses while the model requests tools.\r
+      function runToolLoop(conv, depth) {\r
+        if (depth > 8) {\r
+          toast("Stopped after 8 tool rounds.");\r
+          finalizeLoop();\r
+          return;\r
+        }\r
+        var assistant = { role: "assistant", content: "", reasoning: "", model: conv.model || state.settings.model, truncated: false };\r
+        conv.messages.push(assistant);\r
+        renderMessages();\r
+\r
+        streamOnce(conv, assistant).then(function (toolCalls) {\r
+          if (toolCalls && toolCalls.length) {\r
+            assistant.toolCalls = toolCalls;\r
+            saveState(); renderMessages();\r
+            // Auto-execute every tool call against its MCP server, sequentially.\r
+            var seq = Promise.resolve();\r
+            toolCalls.forEach(function (tc) {\r
+              seq = seq.then(function () {\r
+                return execMcpTool(tc).then(function (result) {\r
+                  conv.messages.push({ role: "tool", toolCallId: tc.id, content: result });\r
+                }, function (err) {\r
+                  conv.messages.push({ role: "tool", toolCallId: tc.id, content: "Error: " + String((err && err.message) || err) });\r
+                });\r
+              });\r
+            });\r
+            seq.then(function () {\r
+              saveState(); renderMessages(); scrollBottom(true);\r
+              runToolLoop(conv, depth + 1);   // feed results back to the model\r
+            });\r
+          } else {\r
+            finalizeLoop();\r
+          }\r
+        });\r
+\r
+        function finalizeLoop() {\r
+          setBusy(false);\r
+          abortCtrl = null;\r
+          saveState();\r
+          renderSidebar();\r
+        }\r
+      }\r
+\r
+      // Stream one completion. Resolves to an array of accumulated tool calls\r
+      // (empty/null when the model just replied with text).\r
+      function streamOnce(conv, assistant) {\r
+        return new Promise(function (resolve) {\r
+          abortCtrl = new AbortController();\r
+          var toolAccum = {};     // index -> {id, name, arguments}\r
+          var finished = false;\r
+\r
+          fetch("/v1/chat/completions", {\r
+            method: "POST",\r
+            headers: {\r
+              "content-type": "application/json",\r
+              "authorization": state.settings.apiKey ? "Bearer " + state.settings.apiKey : "",\r
+            },\r
+            body: JSON.stringify(buildBody(conv)),\r
+            signal: abortCtrl.signal,\r
+          }).then(function (r) {\r
+            if (!r.ok || !r.body) {\r
+              return r.text().then(function (t) {\r
+                assistant.content = "**Request failed (" + r.status + ").**\\n\\n\`\`\`\\n" + (t || r.statusText).slice(0, 800) + "\\n\`\`\`";\r
+                updateStreamingDom(assistant, true);\r
+                resolve(null);\r
+                throw new Error("__stop__");\r
+              });\r
+            }\r
+            var reader = r.body.getReader();\r
+            var dec = new TextDecoder();\r
+            var buf = "";\r
+            var lastRender = 0;\r
+            function pump() {\r
+              return reader.read().then(function (chunk) {\r
+                if (chunk.done) { return; }\r
+                buf += dec.decode(chunk.value, { stream: true });\r
+                var lines = buf.split("\\n");\r
+                buf = lines.pop();\r
+                for (var i = 0; i < lines.length; i++) {\r
+                  var line = lines[i].trim();\r
+                  if (!line || line.indexOf("data:") !== 0) continue;\r
+                  var data = line.slice(5).trim();\r
+                  if (data === "[DONE]") { finished = true; break; }\r
+                  var json; try { json = JSON.parse(data); } catch (e) { continue; }\r
+                  var choice = json.choices && json.choices[0];\r
+                  if (!choice) continue;\r
+                  var d = choice.delta || {};\r
+                  if (d.reasoning_content) assistant.reasoning += d.reasoning_content;\r
+                  if (d.content) assistant.content += d.content;\r
+                  if (d.tool_calls) {\r
+                    d.tool_calls.forEach(function (tc) {\r
+                      var idx = tc.index || 0;\r
+                      var slot = toolAccum[idx] = toolAccum[idx] || { id: "", name: "", arguments: "" };\r
+                      if (tc.id) slot.id = tc.id;\r
+                      if (tc.function) {\r
+                        if (tc.function.name) slot.name = tc.function.name;\r
+                        if (tc.function.arguments) slot.arguments += tc.function.arguments;\r
+                      }\r
+                    });\r
+                  }\r
+                  if (choice.finish_reason === "length") assistant.truncated = true;\r
+                }\r
+                var now = Date.now();\r
+                if (now - lastRender > 33) { lastRender = now; updateStreamingDom(assistant, false); }\r
+                if (finished) { return; }\r
+                return pump();\r
+              });\r
+            }\r
+            return pump().then(function () {\r
+              updateStreamingDom(assistant, true);\r
+              var tcs = Object.keys(toolAccum).map(function (k) { return toolAccum[k]; }).filter(function (t) { return t.id && t.name; });\r
+              if (!assistant.content && !assistant.reasoning && !tcs.length) {\r
+                assistant.content = "_(empty response)_"; updateStreamingDom(assistant, true);\r
+              }\r
+              resolve(tcs.length ? tcs : null);\r
+            });\r
+          }).catch(function (e) {\r
+            if (e && e.message === "__stop__") return;\r
+            if (e && e.name === "AbortError") {\r
+              assistant.content += "\\n\\n_\\u2026stopped._"; updateStreamingDom(assistant, true);\r
+            } else {\r
+              assistant.content = "**Error:** " + escapeHtml(String((e && e.message) || e));\r
+              updateStreamingDom(assistant, true);\r
+            }\r
+            resolve(null);\r
+          });\r
+        });\r
+      }\r
+\r
+      function updateStreamingDom(assistant, done) {\r
+        var last = msgList.lastChild;\r
+        if (!last || !last.classList || !last.classList.contains("msg")) { renderMessages(); last = msgList.lastChild; }\r
+        if (!last) return;\r
+        var body = last.querySelector(".content");\r
+        if (!body) return;\r
+        var think = body.querySelector(".think");\r
+        if (assistant.reasoning) {\r
+          if (!think) {\r
+            think = document.createElement("details"); think.className = "think"; think.open = true;\r
+            var sum = document.createElement("summary");\r
+            var tb = document.createElement("div"); tb.className = "think-body";\r
+            think.appendChild(sum); think.appendChild(tb);\r
+            body.insertBefore(think, body.firstChild);\r
+          }\r
+          think.querySelector(".think-body").textContent = assistant.reasoning;\r
+          think.querySelector("summary").textContent = done ? "Thought process" : "Thinking\\u2026";\r
+          if (done) think.open = false;\r
+        }\r
+        if (assistant.content) {\r
+          body.innerHTML = renderMarkdown(assistant.content);\r
+          enhanceCode(body);\r
+          if (think) body.insertBefore(think, body.firstChild); // keep thinking on top\r
+        }\r
+        if (done) {\r
+          var oldMeta = last.querySelector(".msg-meta"); if (oldMeta) oldMeta.remove();\r
+          last.appendChild(meta(assistant, true));\r
+        }\r
+        scrollBottom();\r
+      }\r
+\r
+      function setBusy(b) {\r
+        busy = b;\r
+        sendBtn.className = "c-btn " + (b ? "stop" : "send");\r
+        sendBtn.innerHTML = b ? "\\u25a0" : "\\u2191";\r
+        sendBtn.title = b ? "Stop" : "Send";\r
+        hintEl.textContent = b ? "Generating \\u2014 press Stop to interrupt." : "";\r
+      }\r
+      function stop() { if (abortCtrl) { try { abortCtrl.abort(); } catch (e) {} } }\r
+\r
+      // =========================================================\r
+      // autoscroll\r
+      // =========================================================\r
+      function nearBottom() {\r
+        return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 120;\r
+      }\r
+      function scrollBottom(force) {\r
+        if (force || nearBottom()) messages.scrollTop = messages.scrollHeight;\r
+      }\r
+\r
+      // =========================================================\r
+      // composer helpers\r
+      // =========================================================\r
+      function autoGrow() {\r
+        inputEl.style.height = "auto";\r
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + "px";\r
+      }\r
+      function renderAttachPreview() {\r
+        var box = $("attach-preview"); box.innerHTML = "";\r
+        pendingImages.forEach(function (p, i) {\r
+          var w = document.createElement("div"); w.className = "ap";\r
+          var img = document.createElement("img"); img.src = p.dataUrl;\r
+          var rm = document.createElement("button"); rm.className = "ap-rm"; rm.innerHTML = "\\u2715";\r
+          rm.onclick = function () { pendingImages.splice(i, 1); renderAttachPreview(); };\r
+          w.appendChild(img); w.appendChild(rm); box.appendChild(w);\r
+        });\r
+      }\r
+      function readImages(files) {\r
+        Array.from(files).forEach(function (f) {\r
+          if (!/image\\//.test(f.type)) return;\r
+          var r = new FileReader();\r
+          r.onload = function () { pendingImages.push({ name: f.name, dataUrl: r.result }); renderAttachPreview(); };\r
+          r.readAsDataURL(f);\r
+        });\r
+      }\r
+\r
+      // =========================================================\r
+      // settings modal\r
+      // =========================================================\r
+      function openSettings() { syncSettingsForm(); renderMcpStatus(state.settings.mcpServers); updateMcpSummary(); overlay.classList.add("open"); }\r
+      function closeSettings() { overlay.classList.remove("open"); }\r
+      function syncSettingsForm() {\r
+        var s = state.settings;\r
+        $("s-apikey").value = s.apiKey;\r
+        $("s-system").value = s.systemPrompt;\r
+        $("s-temp").value = s.temperature; $("s-temp-val").textContent = Number(s.temperature).toFixed(2);\r
+        $("s-topp").value = s.topP; $("s-topp-val").textContent = Number(s.topP).toFixed(2);\r
+        $("s-maxtok").value = s.maxTokens;\r
+        $("s-dosample").checked = s.doSample;\r
+        $("s-mcpenable").checked = s.mcpEnabled !== false;\r
+        $("s-mcp").value = (s.mcpServers || []).map(function (m) {\r
+          return m.authKey ? (m.url + "," + m.authKey) : m.url;\r
+        }).join("\\n");\r
+        $("s-cors").value = s.mcpCorsProxy || "";\r
+        $("s-enter").checked = s.enterToSend;\r
+        $("banner").style.display = s.apiKey ? "none" : "block";\r
+        $("banner").textContent = "No proxy API key set. If your proxy requires one, requests will return 401.";\r
+      }\r
+      function readSettingsForm() {\r
+        var s = state.settings;\r
+        s.apiKey = $("s-apikey").value.trim();\r
+        s.systemPrompt = $("s-system").value;\r
+        s.temperature = parseFloat($("s-temp").value);\r
+        s.topP = parseFloat($("s-topp").value);\r
+        s.maxTokens = parseInt($("s-maxtok").value, 10) || 4096;\r
+        s.doSample = $("s-dosample").checked;\r
+        s.mcpEnabled = $("s-mcpenable").checked;\r
+        s.mcpServers = $("s-mcp").value.split("\\n").map(function (ln) {\r
+          var parts = ln.trim().split(",");\r
+          var url = (parts[0] || "").trim();\r
+          if (!url) return null;\r
+          return { url: url, authKey: (parts[1] || "").trim() };\r
+        }).filter(Boolean);\r
+        s.mcpCorsProxy = $("s-cors").value.trim();\r
+        s.enterToSend = $("s-enter").checked;\r
+        saveState();\r
+      }\r
+\r
+      // =========================================================\r
+      // toast\r
+      // =========================================================\r
+      var toastTimer;\r
+      function toast(msg) {\r
+        toastEl.textContent = msg; toastEl.classList.add("show");\r
+        clearTimeout(toastTimer); toastTimer = setTimeout(function () { toastEl.classList.remove("show"); }, 2600);\r
+      }\r
+\r
+      // =========================================================\r
+      // wiring\r
+      // =========================================================\r
+      $("btn-new").onclick = newConv;\r
+      $("btn-settings").onclick = openSettings;\r
+      $("btn-close-settings").onclick = function () { readSettingsForm(); closeSettings(); fetchModels(); populateEffort(); syncThinkButton(); };\r
+      $("btn-clear-all").onclick = function () {\r
+        if (!confirm("Delete ALL conversations and reset settings? This cannot be undone.")) return;\r
+        localStorage.removeItem(STORE);\r
+        state = loadState(); saveState(); applyTheme(); renderSidebar(); renderMessages();\r
+        syncSettingsForm(); populateModels(KNOWN_MODELS); toast("Reset complete.");\r
+      };\r
+      $("btn-theme").onclick = function () {\r
+        var cur = document.documentElement.getAttribute("data-theme");\r
+        state.settings.theme = cur === "dark" ? "light" : "dark";\r
+        saveState(); applyTheme();\r
+      };\r
+      $("btn-menu").onclick = function () { sidebar.classList.toggle("collapsed"); };\r
+      $("btn-mcp-connect").onclick = connectAllMcp;\r
+      $("btn-mcp-disconnect").onclick = disconnectMcp;\r
+      overlay.onclick = function (e) { if (e.target === overlay) closeSettings(); };\r
+\r
+      $("s-temp").addEventListener("input", function () { $("s-temp-val").textContent = parseFloat($("s-temp").value).toFixed(2); });\r
+      $("s-topp").addEventListener("input", function () { $("s-topp-val").textContent = parseFloat($("s-topp").value).toFixed(2); });\r
+      $("s-apikey").addEventListener("input", function () {\r
+        $("banner").style.display = $("s-apikey").value.trim() ? "none" : "block";\r
+      });\r
+\r
+      modelSel.onchange = function () {\r
+        state.settings.model = modelSel.value;\r
+        var c = activeConv(); if (c) c.model = modelSel.value;\r
+        // If images were queued for a vision model and the user switched to a\r
+        // non-vision one, drop them and explain.\r
+        if (pendingImages.length && !isVisionModel(modelSel.value)) {\r
+          pendingImages = []; renderAttachPreview();\r
+          toast("Switched to a non-vision model \\u2014 attached images were removed.");\r
+        }\r
+        saveState(); syncAttachVisibility(); populateEffort();\r
+      };\r
+      // GLM-5.2 only has two distinct reasoning-effort levels (low/medium map\r
+      // to high, xhigh maps to max), so expose just high and max. Other models\r
+      // get a disabled placeholder (reasoning_effort is GLM-5.2+ only).\r
+      function populateEffort() {\r
+        var model = modelSel.value;\r
+        effortSel.innerHTML = "";\r
+        if (isReasoningModel(model)) {\r
+          ["max", "high"].forEach(function (v) {\r
+            var o = document.createElement("option");\r
+            o.value = v; o.textContent = v;\r
+            effortSel.appendChild(o);\r
+          });\r
+          var cur = state.settings.reasoningEffort;\r
+          effortSel.value = (cur === "high") ? "high" : "max";\r
+          effortSel.disabled = !state.settings.thinkingEnabled;\r
+        } else {\r
+          var o = document.createElement("option");\r
+          o.value = ""; o.textContent = "n/a";\r
+          effortSel.appendChild(o);\r
+          effortSel.disabled = true;\r
+        }\r
+      }\r
+      function syncThinkButton() {\r
+        var on = state.settings.thinkingEnabled;\r
+        btnThink.classList.toggle("on", on);\r
+        btnThink.textContent = on ? "Think: on" : "Think: off";\r
+        btnThink.title = on ? "Deep thinking on \\u2014 click to turn off" : "Deep thinking off \\u2014 click to turn on";\r
+        // Repopulate so the effort dropdown's disabled state tracks the toggle\r
+        // (populateEffort sets disabled = !thinkingEnabled for reasoning models).\r
+        populateEffort();\r
+      }\r
+      effortSel.onchange = function () {\r
+        state.settings.reasoningEffort = effortSel.value || "max";\r
+        saveState();\r
+      };\r
+      btnThink.onclick = function () {\r
+        state.settings.thinkingEnabled = !state.settings.thinkingEnabled;\r
+        saveState(); syncThinkButton();\r
+      };\r
+\r
+      attachBtn.onclick = function () { $("attach-input").click(); };\r
+      $("attach-input").onchange = function (e) { readImages(e.target.files); e.target.value = ""; };\r
+      // drag & drop onto composer\r
+      var composer = document.querySelector(".composer");\r
+      ["dragover", "dragenter"].forEach(function (ev) {\r
+        composer.addEventListener(ev, function (e) { e.preventDefault(); composer.style.borderColor = "var(--accent)"; });\r
+      });\r
+      ["dragleave", "drop"].forEach(function (ev) {\r
+        composer.addEventListener(ev, function (e) { e.preventDefault(); composer.style.borderColor = ""; });\r
+      });\r
+      composer.addEventListener("drop", function (e) {\r
+        if (!isVisionModel(modelSel.value)) { toast("Select a vision model (name contains 'v') to attach images."); return; }\r
+        if (e.dataTransfer && e.dataTransfer.files) readImages(e.dataTransfer.files);\r
+      });\r
+\r
+      inputEl.addEventListener("input", autoGrow);\r
+      inputEl.addEventListener("keydown", function (e) {\r
+        if (e.key === "Enter" && !e.shiftKey && state.settings.enterToSend && !e.isComposing) { e.preventDefault(); send(); }\r
+        else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }\r
+      });\r
+      sendBtn.onclick = function () { if (busy) stop(); else send(); };\r
+\r
+      // =========================================================\r
+      // boot\r
+      // =========================================================\r
+      applyTheme();\r
+      populateModels(KNOWN_MODELS);\r
+      renderSidebar(); renderMessages();\r
+      populateEffort(); syncThinkButton();\r
+      fetchModels();\r
+      autoGrow();\r
+      inputEl.focus();\r
+      if (!state.conversations.length) newConv();\r
+    })();\r
+    </script>\r
+  </body>\r
+</html>\r
+`;
+  }
+});
+
+// src/provider/providers.ts
+function getProvider(id2) {
+  const def = PROVIDERS[id2];
+  if (!def) {
+    throw new Error(`Unknown provider: "${id2}"`);
+  }
+  return def;
+}
+var ZAI_PROVIDER, BIGMODEL_PROVIDER, PROVIDERS;
+var init_providers = __esm({
+  "src/provider/providers.ts"() {
+    "use strict";
+    ZAI_PROVIDER = {
+      id: "zai",
+      displayName: "Z.AI",
+      anthropicBaseURL: "https://api.z.ai/api/anthropic",
+      openaiBaseURL: "https://api.z.ai/api/coding/paas/v4",
+      bizHost: "https://api.z.ai"
+    };
+    BIGMODEL_PROVIDER = {
+      id: "bigmodel",
+      displayName: "BigModel / \u667A\u8C31",
+      anthropicBaseURL: "https://open.bigmodel.cn/api/anthropic",
+      openaiBaseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
+      bizHost: "https://open.bigmodel.cn"
+    };
+    PROVIDERS = {
+      zai: ZAI_PROVIDER,
+      bigmodel: BIGMODEL_PROVIDER
+    };
+  }
+});
+
+// src/auth/types.ts
+function credentialString(cred) {
+  if (cred.secret) {
+    return `${cred.apiKey}.${cred.secret}`;
+  }
+  return cred.apiKey;
+}
+var init_types = __esm({
+  "src/auth/types.ts"() {
+    "use strict";
+  }
+});
+
 // src/proxy/identity.ts
 function resolveAppVersion(raw) {
   if (typeof raw !== "string") return void 0;
@@ -7440,6 +9357,2498 @@ var init_identity = __esm({
     "use strict";
     import_node_os = __toESM(require("node:os"), 1);
     ASCII_PRINTABLE2 = /^[\x20-\x7e]+$/;
+  }
+});
+
+// src/proxy/trace-headers.ts
+function resolveSessionType(ctx) {
+  const explicit = ctx.sessionType?.trim();
+  if (explicit === "main" || explicit === "subagent" || explicit === "other") return explicit;
+  if (ctx.sessionId?.startsWith(SUBAGENT_PREFIX) && ctx.sessionId.length > SUBAGENT_PREFIX.length) return "subagent";
+  return "main";
+}
+function buildZcodeTraceHeaders(ctx = {}) {
+  const queryId = ctx.queryId ? stripHeaderInternalPrefixes(ctx.queryId, [QUERY_PREFIX]) : void 0;
+  const sessionId = ctx.sessionId ? stripHeaderInternalPrefixes(ctx.sessionId, SESSION_PREFIXES) : void 0;
+  return {
+    "x-request-id": ctx.requestId ?? crypto.randomUUID(),
+    "x-zcode-session-type": resolveSessionType(ctx),
+    "x-zcode-trace-id": ctx.traceId ?? crypto.randomUUID(),
+    ...queryId ? { "x-query-id": queryId } : {},
+    ...sessionId ? { "x-session-id": sessionId } : {}
+  };
+}
+function stripHeaderInternalPrefixes(value2, prefixes) {
+  let out = value2;
+  for (const prefix2 of prefixes) {
+    if (out.startsWith(prefix2) && out.length > prefix2.length) out = out.slice(prefix2.length);
+  }
+  return out || value2;
+}
+var QUERY_PREFIX, SUBAGENT_PREFIX, SESSION_PREFIXES;
+var init_trace_headers = __esm({
+  "src/proxy/trace-headers.ts"() {
+    "use strict";
+    QUERY_PREFIX = "query_";
+    SUBAGENT_PREFIX = "subagent_agent_";
+    SESSION_PREFIXES = ["sess_", SUBAGENT_PREFIX];
+  }
+});
+
+// src/proxy/client-session.ts
+function createClientSessionResolver(now = () => Date.now()) {
+  const nodes = /* @__PURE__ */ new Map();
+  const sessions = /* @__PURE__ */ new Map();
+  function remember(nodeHash, session, config) {
+    const stored = { ...session, nodeHash, lastSeenAt: now() };
+    nodes.set(nodeHash, stored);
+    sessions.set(stored.sessionId, stored);
+    prune(config);
+  }
+  function prune(config) {
+    const cutoff = now() - config.ttlSeconds * 1e3;
+    for (const [hash, node] of nodes.entries()) {
+      if (node.lastSeenAt < cutoff) nodes.delete(hash);
+    }
+    for (const [id2, node] of sessions.entries()) {
+      if (node.lastSeenAt < cutoff) sessions.delete(id2);
+    }
+    while (sessions.size > config.maxSessions) {
+      let oldestId = "";
+      let oldestAt = Infinity;
+      for (const [id2, node] of sessions.entries()) {
+        if (node.lastSeenAt < oldestAt) {
+          oldestAt = node.lastSeenAt;
+          oldestId = id2;
+        }
+      }
+      if (!oldestId) break;
+      sessions.delete(oldestId);
+      for (const [hash, node] of nodes.entries()) {
+        if (node.sessionId === oldestId) nodes.delete(hash);
+      }
+    }
+  }
+  function action(config) {
+    return config.mode;
+  }
+  return {
+    resolve(req, body2, format, model, config) {
+      if (config.mode === "off") return { source: "none", action: "off", confidence: 0 };
+      prune(config);
+      const explicitTrace = requestTraceContext(req, body2);
+      if (explicitTrace.sessionId) return explicitResult(explicitTrace, config);
+      const canonical = canonicalize(body2, format, model);
+      if (!canonical) {
+        if (hasTraceContext(explicitTrace)) return explicitResult(explicitTrace, config);
+        return { source: "none", action: action(config), confidence: 0 };
+      }
+      const nodeHash = hashJson(canonical.identity);
+      const existing = nodes.get(nodeHash);
+      if (existing) {
+        remember(nodeHash, existing, config);
+        return withTraceContext(result("lineage", action(config), existing, 0.95), explicitTrace);
+      }
+      const parent2 = findLinearParent(canonical, nodes);
+      if (parent2) {
+        remember(nodeHash, parent2, config);
+        return withTraceContext(result("lineage", action(config), parent2, 0.9), explicitTrace);
+      }
+      const fresh = newSession();
+      remember(nodeHash, fresh, config);
+      return withTraceContext(result("lineage", action(config), fresh, 0.75), explicitTrace);
+    }
+  };
+}
+function result(source, action, node, confidence) {
+  return {
+    source,
+    action,
+    confidence,
+    sessionId: node.sessionId,
+    upstreamSessionId: node.upstreamSessionId
+  };
+}
+function requestTraceContext(req, body2) {
+  const bodyTrace = bodyMetadataTrace(body2);
+  return {
+    requestId: firstHeader(req.headers, ["x-request-id"]) ?? bodyTrace.requestId,
+    traceId: firstHeader(req.headers, ["x-zcode-trace-id"]) ?? bodyTrace.traceId,
+    queryId: firstHeader(req.headers, ["x-query-id"]) ?? bodyTrace.queryId,
+    sessionId: firstHeader(req.headers, ["x-opencode-session", "x-claude-code-session-id", "x-session-id", "x-parent-session-id", "helicone-session-id"]) ?? bodyTrace.sessionId
+  };
+}
+function explicitResult(trace, config) {
+  return {
+    source: "explicit",
+    action: config.mode,
+    confidence: 1,
+    ...trace.requestId ? { requestId: trace.requestId } : {},
+    ...trace.traceId ? { traceId: trace.traceId } : {},
+    ...trace.queryId ? { queryId: trace.queryId } : {},
+    ...trace.sessionId ? { sessionId: trace.sessionId, upstreamSessionId: trace.sessionId } : {}
+  };
+}
+function withTraceContext(session, trace) {
+  if (!trace.requestId && !trace.traceId && !trace.queryId) return session;
+  return {
+    ...session,
+    ...trace.requestId ? { requestId: trace.requestId } : {},
+    ...trace.traceId ? { traceId: trace.traceId } : {},
+    ...trace.queryId ? { queryId: trace.queryId } : {}
+  };
+}
+function hasTraceContext(trace) {
+  return Boolean(trace.requestId || trace.traceId || trace.queryId || trace.sessionId);
+}
+function firstHeader(headers2, names) {
+  for (const name2 of names) {
+    const value2 = headers2.get(name2);
+    if (value2 && value2.trim()) return value2.trim();
+  }
+  return null;
+}
+function bodyMetadataTrace(body2) {
+  if (!body2) return {};
+  try {
+    const parsed = JSON.parse(body2);
+    const metadata = parsed?.metadata;
+    if (!metadata || typeof metadata !== "object") return {};
+    return {
+      requestId: stringProperty(metadata, ["requestId", "request_id"]),
+      traceId: stringProperty(metadata, ["traceId", "trace_id"]),
+      queryId: stringProperty(metadata, ["queryId", "query_id"]),
+      sessionId: stringProperty(metadata, ["sessionId", "session_id", "conversationId", "conversation_id"])
+    };
+  } catch {
+    return {};
+  }
+}
+function stringProperty(obj, names) {
+  for (const name2 of names) {
+    const value2 = obj[name2];
+    if (typeof value2 === "string" && value2.trim()) return value2.trim();
+  }
+  return void 0;
+}
+function canonicalize(body2, format, fallbackModel) {
+  if (!body2) return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(body2);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const model = typeof parsed.model === "string" ? parsed.model : fallbackModel;
+  const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
+  if (messages.length === 0) return null;
+  const identity = {
+    format,
+    model,
+    system: parsed.system,
+    developer: messages.filter((m) => typeof m === "object" && m !== null && m.role === "developer"),
+    tools: parsed.tools,
+    tool_choice: parsed.tool_choice,
+    messages
+  };
+  return { model, identity, messages };
+}
+function findLinearParent(canonical, nodes) {
+  if (canonical.messages.length < 3) return null;
+  const prefix2 = {
+    ...canonical.identity,
+    messages: canonical.messages.slice(0, -2)
+  };
+  if (prefix2.messages.length === 0) return null;
+  return nodes.get(hashJson(prefix2)) ?? null;
+}
+function newSession() {
+  const upstreamSessionId = crypto.randomUUID();
+  return {
+    nodeHash: "",
+    sessionId: `ses_${upstreamSessionId.replace(/-/g, "").slice(0, 12)}`,
+    upstreamSessionId,
+    lastSeenAt: Date.now()
+  };
+}
+function hashJson(value2) {
+  return hashString(stableStringify(value2));
+}
+function hashString(value2) {
+  return import_node_crypto.default.createHash("sha256").update(value2, "utf-8").digest("hex");
+}
+function stableStringify(value2) {
+  if (value2 === null || typeof value2 !== "object") return JSON.stringify(value2);
+  if (Array.isArray(value2)) return `[${value2.map(stableStringify).join(",")}]`;
+  const obj = value2;
+  return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
+}
+var import_node_crypto, defaultClientSessionResolver;
+var init_client_session = __esm({
+  "src/proxy/client-session.ts"() {
+    "use strict";
+    import_node_crypto = __toESM(require("node:crypto"), 1);
+    defaultClientSessionResolver = createClientSessionResolver();
+  }
+});
+
+// src/proxy/session-context.ts
+function resolveSessionContext(input) {
+  if (input.config.clientIdentity.mode === "off") return void 0;
+  const resolver = input.resolver ?? defaultClientSessionResolver;
+  return resolver.resolve(input.clientReq, input.body, input.upstreamFormat, input.model, input.config.clientIdentity);
+}
+function shouldUseExactTraceHeaders(plan, session) {
+  return plan === "start-plan" || hasExplicitTraceHeaders(session) || shouldForwardSessionId(session);
+}
+function shouldForwardSessionId(session) {
+  return session?.source === "explicit" || session?.action === "enforce";
+}
+function sessionIdForHeader(session) {
+  if (!session || !shouldForwardSessionId(session)) return void 0;
+  return session.upstreamSessionId ?? session.sessionId;
+}
+function hasExplicitTraceHeaders(session) {
+  return Boolean(session?.requestId || session?.traceId || session?.queryId);
+}
+var init_session_context = __esm({
+  "src/proxy/session-context.ts"() {
+    "use strict";
+    init_client_session();
+  }
+});
+
+// src/proxy/upstream.ts
+function buildUpstreamURL(format, provider, plan = "coding-plan") {
+  if (plan === "start-plan") {
+    return `${STARTPLAN_ANTHROPIC_BASE}/anthropic/v1/messages`;
+  }
+  if (format === "anthropic") {
+    return `${provider.anthropicBaseURL}/v1/messages`;
+  }
+  return `${provider.openaiBaseURL}/chat/completions`;
+}
+function buildAuthHeaders(format, cred, identity, plan = "coding-plan", clientSession) {
+  const credStr = plan === "start-plan" && cred.jwt ? cred.jwt : credentialString(cred);
+  const base = {
+    ...buildIdentityHeaders(identity),
+    ...buildTraceHeaders(plan, clientSession)
+  };
+  if (format === "anthropic") {
+    if (plan === "start-plan" && cred.jwt) {
+      base["authorization"] = `Bearer ${cred.jwt}`;
+    } else {
+      base["x-api-key"] = credStr;
+    }
+    base["anthropic-version"] = ANTHROPIC_VERSION;
+  } else {
+    base["authorization"] = `Bearer ${credStr}`;
+  }
+  return base;
+}
+function buildTraceHeaders(plan, clientSession) {
+  if (shouldUseExactTraceHeaders(plan, clientSession)) {
+    return buildZcodeTraceHeaders({
+      requestId: clientSession?.requestId,
+      traceId: clientSession?.traceId,
+      queryId: clientSession?.queryId,
+      sessionId: sessionIdForHeader(clientSession)
+    });
+  }
+  const headers2 = {
+    "x-request-id": crypto.randomUUID(),
+    // ZCode 3.9.1 attributes every model request; a forwarded conversation turn is the main-agent loop.
+    "x-zcode-session-type": "main",
+    "x-zcode-trace-id": crypto.randomUUID()
+  };
+  if (plan !== "start-plan") {
+    headers2["x-query-id"] = crypto.randomUUID();
+    headers2["x-session-id"] = crypto.randomUUID();
+  }
+  return headers2;
+}
+function collectPassthroughHeaders(req) {
+  const result3 = {};
+  for (const [key, value2] of req.headers.entries()) {
+    const lower = key.toLowerCase();
+    if (STRIP_HEADERS.has(lower)) continue;
+    if (lower === "anthropic-beta") {
+      result3[lower] = value2;
+    }
+  }
+  return result3;
+}
+function buildUpstreamHeaderPairs(clientReq, format, cred, identity, plan = "coding-plan", extraHeaders, clientSession) {
+  const clientAcceptEncoding = clientReq.headers.get("accept-encoding") ?? "gzip";
+  return [
+    ["content-type", "application/json"],
+    ["accept-encoding", clientAcceptEncoding],
+    ...Object.entries(collectPassthroughHeaders(clientReq)),
+    ...Object.entries(buildAuthHeaders(format, cred, identity, plan, clientSession)),
+    ...Object.entries(extraHeaders ?? {})
+  ];
+}
+function buildUpstreamRequest(clientReq, format, provider, cred, body2, identity, plan = "coding-plan", extraHeaders, clientSession) {
+  const url2 = buildUpstreamURL(format, provider, plan);
+  const headerPairs = buildUpstreamHeaderPairs(clientReq, format, cred, identity, plan, extraHeaders, clientSession);
+  const init = {
+    method: "POST",
+    headers: Object.fromEntries(headerPairs)
+  };
+  if (body2 !== void 0) {
+    init.body = body2;
+  }
+  return new Request(url2, init);
+}
+var ANTHROPIC_VERSION, STARTPLAN_ANTHROPIC_BASE, STRIP_HEADERS;
+var init_upstream = __esm({
+  "src/proxy/upstream.ts"() {
+    "use strict";
+    init_types();
+    init_identity();
+    init_trace_headers();
+    init_session_context();
+    ANTHROPIC_VERSION = "2023-06-01";
+    STARTPLAN_ANTHROPIC_BASE = "https://zcode.z.ai/api/v1/zcode-plan";
+    STRIP_HEADERS = /* @__PURE__ */ new Set([
+      "host",
+      "authorization",
+      "x-api-key",
+      "anthropic-version",
+      "content-length",
+      "connection",
+      "proxy-authorization",
+      "proxy-authenticate",
+      "transfer-encoding",
+      "x-request-id",
+      "x-zcode-trace-id",
+      "x-zcode-session-type",
+      "x-query-id",
+      "x-session-id",
+      // V4 signing headers are proxy-generated only; inbound copies must never
+      // reach the upstream (spoofed values would either fail verification or
+      // silently disable proxy signing via the existing-header guard).
+      "x-client-ts",
+      "x-client-version",
+      "x-client-sig",
+      "x-client-nonce",
+      "x-app-id",
+      "x-client-pow",
+      "x-client-sign-verified"
+    ]);
+  }
+});
+
+// src/proxy/endpoint-routing.ts
+function normalizePath(pathname) {
+  if (pathname === "/") return "/";
+  return pathname.replace(/\/+$/u, "") || "/";
+}
+function routingKey(url2) {
+  const port = url2.port || "443";
+  return `${url2.protocol}//${url2.hostname.toLowerCase()}:${port}${normalizePath(url2.pathname)}`;
+}
+function parseMappingUrl(value2, field) {
+  if (typeof value2 !== "string") throw new Error(`mapping.${field} must be a string`);
+  const parsed = new URL(value2);
+  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error(`mapping.${field} URL is not a plain https URL`);
+  }
+  return parsed;
+}
+function identityCacheKey(identity) {
+  return JSON.stringify([identity.appVersion, identity.sourceTitle, identity.refererOrigin, identity.deviceMid ?? ""]);
+}
+function getDefaultEndpointRouting(config) {
+  if (!config.endpointRouting.enabled) return null;
+  const key = `${config.endpointRouting.origin}
+${identityCacheKey(config.identity)}`;
+  if (!defaultRouting || key !== defaultRoutingKey) {
+    defaultRouting = new EndpointRoutingService({
+      origin: config.endpointRouting.origin,
+      identity: config.identity
+    });
+    defaultRoutingKey = key;
+  }
+  return defaultRouting;
+}
+var DEFAULT_ORIGIN, CONFIG_PATH, SUCCESS_TTL_MS, FAILURE_COOLDOWN_MS, REQUEST_TIMEOUT_MS, MAX_MAPPING_ENTRIES, EndpointRoutingService, defaultRouting, defaultRoutingKey;
+var init_endpoint_routing = __esm({
+  "src/proxy/endpoint-routing.ts"() {
+    "use strict";
+    init_identity();
+    DEFAULT_ORIGIN = "https://zcode.z.ai";
+    CONFIG_PATH = "/api/v1/agent/configs";
+    SUCCESS_TTL_MS = 3e5;
+    FAILURE_COOLDOWN_MS = 3e4;
+    REQUEST_TIMEOUT_MS = 3e3;
+    MAX_MAPPING_ENTRIES = 256;
+    EndpointRoutingService = class {
+      configUrl;
+      identity;
+      credential;
+      fetchImpl;
+      now;
+      successTtlMs;
+      failureCooldownMs;
+      requestTimeoutMs;
+      onSnapshot;
+      snapshot;
+      retryAfter = 0;
+      refreshPromise;
+      constructor(opts) {
+        this.configUrl = `${(opts.origin?.trim() || DEFAULT_ORIGIN).replace(/\/+$/u, "")}${CONFIG_PATH}`;
+        this.identity = opts.identity;
+        this.credential = opts.credential;
+        this.fetchImpl = opts.fetchImpl ?? fetch;
+        this.now = opts.now ?? Date.now;
+        this.successTtlMs = opts.successTtlMs ?? SUCCESS_TTL_MS;
+        this.failureCooldownMs = opts.failureCooldownMs ?? FAILURE_COOLDOWN_MS;
+        this.requestTimeoutMs = opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+        this.onSnapshot = opts.onSnapshot;
+      }
+      /** True when at least one successful snapshot has been fetched. */
+      hasSnapshot() {
+        return this.snapshot !== void 0;
+      }
+      /**
+       * Resolve a request URL through the mapping table. Never throws: any error
+       * resolves to `{ routed: false, url }` so the caller keeps the original URL.
+       * The optional `credential` (coding-plan key) is attached as `x-api-key` on
+       * a mapping refresh fetch, mirroring the client's `sourceHeaders`.
+       */
+      async resolve(url2, credential) {
+        let parsed;
+        try {
+          parsed = new URL(url2);
+        } catch {
+          return { routed: false, url: url2 };
+        }
+        try {
+          await this.ensureFresh(credential);
+        } catch {
+        }
+        const target2 = this.snapshot?.mapping.get(routingKey(parsed));
+        if (!target2) return { routed: false, url: url2 };
+        const rewritten = new URL(target2);
+        rewritten.search = parsed.search;
+        return { routed: true, url: rewritten.href };
+      }
+      async ensureFresh(credential) {
+        const now = this.now();
+        if (this.snapshot && this.snapshot.expiresAt > now || this.retryAfter > now) return;
+        const pending = this.refreshPromise ?? this.beginRefresh(credential);
+        await pending;
+      }
+      beginRefresh(credential) {
+        const promise = this.refresh(credential).finally(() => {
+          if (this.refreshPromise === promise) this.refreshPromise = void 0;
+        });
+        this.refreshPromise = promise;
+        return promise;
+      }
+      async refresh(credential) {
+        const identityHeaders = Object.fromEntries(
+          Object.entries(buildIdentityHeaders(this.identity)).filter(([name2]) => name2 !== "X-ZCode-Agent")
+        );
+        const headers2 = {
+          ...identityHeaders,
+          Accept: "application/json"
+        };
+        const key = credential ?? this.credential?.();
+        if (key) headers2["x-api-key"] = key;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+        try {
+          const resp = await this.fetchImpl(this.configUrl, {
+            method: "GET",
+            headers: headers2,
+            redirect: "manual",
+            signal: controller.signal
+          });
+          if (resp.status < 200 || resp.status >= 300) throw new Error(`agent_configs_http_${resp.status}`);
+          const parsed = await resp.json();
+          const envelope = parsed;
+          if (!envelope || typeof envelope !== "object" || envelope.code !== 0) {
+            throw new Error("agent_configs_nonzero_code");
+          }
+          const data2 = envelope.data;
+          const entries2 = data2?.proxyEndpoint?.mapping;
+          const list = Array.isArray(entries2) ? entries2 : [];
+          if (list.length > MAX_MAPPING_ENTRIES) throw new Error("agent_configs_too_many_mappings");
+          const mapping = /* @__PURE__ */ new Map();
+          for (const entry of list) {
+            const raw = entry;
+            const from = parseMappingUrl(raw.from, "from");
+            const to = parseMappingUrl(raw.to, "to");
+            const key2 = routingKey(from);
+            if (mapping.has(key2)) throw new Error("agent_configs_duplicate_from");
+            mapping.set(key2, to.href);
+          }
+          this.snapshot = { expiresAt: this.now() + this.successTtlMs, mapping };
+          this.retryAfter = 0;
+          this.onSnapshot?.(mapping.size);
+        } catch {
+          this.retryAfter = this.now() + this.failureCooldownMs;
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+    };
+    defaultRouting = null;
+    defaultRoutingKey = "";
+  }
+});
+
+// src/proxy/client-signing.ts
+function encodeUtf8(value2) {
+  const bytes = encoder.encode(value2);
+  const out = new Uint8Array(bytes.byteLength);
+  out.set(bytes);
+  return out;
+}
+function bytesToBase64(bytes) {
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
+function bytesToHex(bytes) {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+function randomHex(byteCount) {
+  return bytesToHex(crypto.getRandomValues(new Uint8Array(byteCount)));
+}
+function base64ToBytes(value2) {
+  if (!value2 || value2.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value2)) {
+    throw new Error("invalid base64");
+  }
+  const binary = atob(value2);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
+  return out;
+}
+async function hkdfBytes(secret, info) {
+  const key = await crypto.subtle.importKey("raw", encodeUtf8(secret), "HKDF", false, ["deriveBits"]);
+  return new Uint8Array(await crypto.subtle.deriveBits(
+    { name: "HKDF", hash: "SHA-256", salt: encodeUtf8(KDF_SALT), info: encodeUtf8(info) },
+    key,
+    256
+  ));
+}
+async function handshakeSignature(secret, message) {
+  const bits = await hkdfBytes(secret, KDF_INFO_HMAC);
+  try {
+    const key = await crypto.subtle.importKey("raw", bits, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, encodeUtf8(message)));
+    try {
+      return bytesToBase64(mac);
+    } finally {
+      mac.fill(0);
+    }
+  } finally {
+    bits.fill(0);
+  }
+}
+async function decryptSigningPrivateKey(apiKeyId, secret, privateCipher) {
+  const cipher = base64ToBytes(privateCipher);
+  if (cipher.byteLength <= 12 + 16) throw new Error("privateCipher is too short");
+  const aesKeyBits = await hkdfBytes(secret, KDF_INFO_ED25519);
+  try {
+    const aesKey = await crypto.subtle.importKey("raw", aesKeyBits, "AES-GCM", false, ["decrypt"]);
+    const plain = new Uint8Array(
+      await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: cipher.slice(0, 12), additionalData: encodeUtf8(apiKeyId), tagLength: 128 },
+        aesKey,
+        cipher.slice(12)
+      )
+    );
+    try {
+      const pkcs8 = base64ToBytes(new TextDecoder().decode(plain));
+      return await crypto.subtle.importKey("pkcs8", pkcs8, "Ed25519", false, ["sign"]);
+    } finally {
+      plain.fill(0);
+    }
+  } finally {
+    aesKeyBits.fill(0);
+  }
+}
+async function signBusinessMessage(privateKey, message) {
+  const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", privateKey, encodeUtf8(message)));
+  try {
+    return bytesToBase64(sig);
+  } finally {
+    sig.fill(0);
+  }
+}
+function hasLeadingZeroBits(bytes, bits) {
+  const fullBytes = Math.floor(bits / 8);
+  for (let i = 0; i < fullBytes; i++) {
+    if (bytes[i] !== 0) return false;
+  }
+  const remainder = bits % 8;
+  if (remainder === 0) return true;
+  const mask = 255 << 8 - remainder & 255;
+  return ((bytes[fullBytes] ?? 255) & mask) === 0;
+}
+async function createProofOfWork(apiKeyId, sessionId, ts, signal2) {
+  const seedDigest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", encodeUtf8(`${apiKeyId}
+${APP_ID}
+${sessionId}
+${ts}`))
+  );
+  const seed2 = bytesToHex(seedDigest).slice(0, 32);
+  const nonce = randomHex(POW_NONCE_BYTES);
+  for (let counter = 0; counter <= 4294967295; counter++) {
+    signal2?.throwIfAborted();
+    const candidate = `${nonce}${counter.toString(16).padStart(8, "0")}`;
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encodeUtf8(`${seed2}
+${candidate}`)));
+    if (hasLeadingZeroBits(digest, POW_BITS)) return candidate;
+  }
+  throw new Error("Unable to solve client request proof of work");
+}
+function parseSigningCredential(credential) {
+  const dot = credential.indexOf(".");
+  if (dot <= 0 || dot !== credential.lastIndexOf(".")) return void 0;
+  const apiKeyId = credential.slice(0, dot);
+  const apiKeySecret = credential.slice(dot + 1);
+  if (!apiKeyId.trim() || !apiKeySecret.trim()) return void 0;
+  return { apiKeyId, apiKeySecret };
+}
+function isUnsignedPath(pathname) {
+  let path2 = pathname;
+  try {
+    path2 = decodeURIComponent(pathname);
+  } catch {
+  }
+  path2 = path2.replace(/\/+$/u, "");
+  return UNSIGNED_PATHS.has(path2);
+}
+function findHeader(pairs, name2) {
+  const lower = name2.toLowerCase();
+  for (const [key, value2] of pairs) {
+    if (key.toLowerCase() === lower) return value2;
+  }
+  return void 0;
+}
+async function sendWithClientSigning(signer, params) {
+  const { url: url2, headerPairs, credential, appVersion, send, debug } = params;
+  if (!signer) return send(headerPairs);
+  const first = await signer.signWithStatus(url2, headerPairs, { credential, appVersion });
+  let resp = await send(first.pairs);
+  if (!first.signed || !await signer.isVerifyFailure(resp)) return resp;
+  debug?.("401 VERIFY_SIGNATURE_* \u2014 invalidating signing key and retrying once");
+  signer.invalidate(url2, credential);
+  const second = await signer.signWithStatus(url2, headerPairs, { credential, appVersion });
+  resp = await send(second.pairs);
+  if (!second.signed || !await signer.isVerifyFailure(resp)) return resp;
+  signer.setBypass(url2, credential);
+  debug?.("401 VERIFY_SIGNATURE_* twice \u2014 sending unsigned (signing bypassed)");
+  return send(headerPairs);
+}
+function identityCacheKey2(identity) {
+  return JSON.stringify([identity.appVersion, identity.sourceTitle, identity.refererOrigin, identity.deviceMid ?? ""]);
+}
+function getDefaultClientSigning(config) {
+  if (!config.clientSigning.enabled) return null;
+  const key = `${config.clientSigning.origin}
+${identityCacheKey2(config.identity)}`;
+  if (!defaultSigner || key !== defaultSignerKey) {
+    defaultSigner = new ClientSigningManager({
+      identity: config.identity,
+      origin: config.clientSigning.origin
+    });
+    defaultSignerKey = key;
+  }
+  return defaultSigner;
+}
+var DEFAULT_ORIGIN2, GATE_PATH, HANDSHAKE_PATH, APP_ID, POW_BITS, NONCE_BYTES, POW_NONCE_BYTES, KDF_SALT, KDF_INFO_HMAC, KDF_INFO_ED25519, HANDSHAKE_METHOD, GATE_TTL_MS, GATE_FAILURE_COOLDOWN_MS, GATE_UNAVAILABLE_COOLDOWN_MS, GATE_TIMEOUT_MS, HANDSHAKE_TIMEOUT_MS, VERIFY_SIGNATURE_INVALID, VERIFY_APIKEY_EXPIRED, UNSIGNED_PATHS, SIGNING_HEADER_NAMES, encoder, ClientSigningManager, defaultSigner, defaultSignerKey;
+var init_client_signing = __esm({
+  "src/proxy/client-signing.ts"() {
+    "use strict";
+    init_identity();
+    DEFAULT_ORIGIN2 = "https://zcode.z.ai";
+    GATE_PATH = "/api/v1/agent/configs";
+    HANDSHAKE_PATH = "/api/paas/c1f3a7e2/v2/client";
+    APP_ID = "zcode";
+    POW_BITS = 8;
+    NONCE_BYTES = 16;
+    POW_NONCE_BYTES = 12;
+    KDF_SALT = "WD_CLIENT_SIGN_KDF_SALT";
+    KDF_INFO_HMAC = "getSignKey_hmac";
+    KDF_INFO_ED25519 = "ed25519_priv";
+    HANDSHAKE_METHOD = "get_sign_key";
+    GATE_TTL_MS = 36e5;
+    GATE_FAILURE_COOLDOWN_MS = 6e4;
+    GATE_UNAVAILABLE_COOLDOWN_MS = 3e4;
+    GATE_TIMEOUT_MS = 15e3;
+    HANDSHAKE_TIMEOUT_MS = 1e4;
+    VERIFY_SIGNATURE_INVALID = "VERIFY_SIGNATURE_INVALID";
+    VERIFY_APIKEY_EXPIRED = "VERIFY_APIKEY_EXPIRED";
+    UNSIGNED_PATHS = /* @__PURE__ */ new Set([
+      "/api/v1/zcode-plan/anthropic/v1/messages",
+      "/api/v1/zcode-plan/chat/completions",
+      "/api/v1/off-peak/anthropic/v1/messages"
+    ]);
+    SIGNING_HEADER_NAMES = /* @__PURE__ */ new Set([
+      "x-client-ts",
+      "x-client-version",
+      "x-client-sig",
+      "x-client-nonce",
+      "x-app-id",
+      "x-client-pow",
+      "x-client-sign-verified"
+    ]);
+    encoder = new TextEncoder();
+    ClientSigningManager = class {
+      gateUrl;
+      identity;
+      fetchImpl;
+      now;
+      states = /* @__PURE__ */ new Map();
+      notedKeys = /* @__PURE__ */ new Set();
+      onEvent;
+      constructor(opts) {
+        this.gateUrl = `${(opts.origin?.trim() || DEFAULT_ORIGIN2).replace(/\/+$/u, "")}${GATE_PATH}`;
+        this.identity = opts.identity;
+        this.fetchImpl = opts.fetchImpl ?? fetch;
+        this.now = opts.now ?? Date.now;
+        this.onEvent = opts.onEvent;
+      }
+      /**
+       * Add the V4 signing headers to an upstream header-pair list. Returns the
+       * input pairs unchanged whenever signing does not apply: exempt path,
+       * bypass, non-signable credential, missing session id, gate off/unreachable,
+       * or handshake failure. Never throws.
+       */
+      async sign(url2, pairs, cred) {
+        return (await this.signWithStatus(url2, pairs, cred)).pairs;
+      }
+      /**
+       * `sign` with a `signed` flag so the retry ladder can distinguish
+       * "signed but rejected" from "never signed" without identity checks on the
+       * returned array reference. Cheap local eligibility checks (credential
+       * separator, session id) run BEFORE the gate probe so non-signable
+       * credentials never pay for network fetches.
+       */
+      async signWithStatus(url2, pairs, cred) {
+        let parsed;
+        try {
+          parsed = new URL(url2);
+        } catch {
+          return { pairs, signed: false };
+        }
+        if (parsed.protocol !== "https:") return { pairs, signed: false };
+        if (isUnsignedPath(parsed.pathname)) return { pairs, signed: false };
+        if (pairs.some(([k]) => k.toLowerCase() === "x-client-sig")) return { pairs, signed: false };
+        const stateKey = `${parsed.origin}
+${cred.credential}`;
+        const state2 = this.stateFor(stateKey);
+        if (state2.bypass) return { pairs, signed: false };
+        const parsedCred = parseSigningCredential(cred.credential);
+        if (!parsedCred) {
+          this.noteOnce(stateKey, "credential has no {apiKeyId}.{apiKeySecret} separator \u2014 signing skipped");
+          return { pairs, signed: false };
+        }
+        const sessionId = findHeader(pairs, "x-session-id")?.trim();
+        if (!sessionId) {
+          this.noteOnce(stateKey, "upstream request has no x-session-id \u2014 signing skipped");
+          return { pairs, signed: false };
+        }
+        if (!await this.gateEnabled(state2, cred)) return { pairs, signed: false };
+        let privateKey;
+        try {
+          privateKey = await this.ensurePrivateKey(state2, stateKey, parsedCred, parsed.origin);
+        } catch {
+          this.noteOnce(stateKey, "signing handshake failed \u2014 sending unsigned");
+          this.invalidateState(stateKey);
+          return { pairs, signed: false };
+        }
+        const signedPairs = await this.buildSignedPairs(stateKey, pairs, privateKey, parsedCred, sessionId, cred.appVersion);
+        return signedPairs ? { pairs: signedPairs, signed: true } : { pairs, signed: false };
+      }
+      async buildSignedPairs(stateKey, pairs, privateKey, parsedCred, sessionId, appVersion) {
+        const ts = String(Date.now());
+        const nonce = randomHex(NONCE_BYTES);
+        let pow;
+        let sig;
+        try {
+          pow = await createProofOfWork(parsedCred.apiKeyId, sessionId, ts);
+          sig = await signBusinessMessage(
+            privateKey,
+            `${parsedCred.apiKeyId}
+${ts}
+${appVersion}
+${sessionId}
+${nonce}`
+          );
+        } catch (err) {
+          if (err.name !== "AbortError") {
+            this.noteOnce(stateKey, `signing failed (${err.message}) \u2014 sending unsigned`);
+          }
+          return null;
+        }
+        const cleaned = pairs.filter(([k]) => {
+          const lower = k.toLowerCase();
+          return !SIGNING_HEADER_NAMES.has(lower) && lower !== "x-session-id";
+        });
+        return [
+          ...cleaned,
+          ["X-Client-Ts", ts],
+          ["X-Client-Version", appVersion],
+          ["X-Client-Sig", sig],
+          // canonical case replaces the lowercase trace copy in this append position
+          // (mirrors the client's i.set("X-Session-Id") Headers.set semantics)
+          ["X-Session-Id", sessionId],
+          ["X-Client-Nonce", nonce],
+          ["X-App-Id", APP_ID],
+          ["X-Client-Pow", pow]
+        ];
+      }
+      /**
+       * True when the response is a signing rejection the client retries on:
+       * HTTP 401 whose envelope mentions VERIFY_SIGNATURE_INVALID / VERIFY_APIKEY_EXPIRED.
+       * Reads a clone; the response body stays consumable by the caller.
+       */
+      async isVerifyFailure(resp) {
+        if (resp.status !== 401) return false;
+        try {
+          const body2 = await resp.clone().json();
+          if (!body2 || typeof body2 !== "object" || Array.isArray(body2)) return false;
+          const data2 = body2.data;
+          const error2 = body2.error;
+          const candidates = [body2.msg, body2.reason, data2?.reason, error2?.reason, error2?.message];
+          return candidates.some((v) => v === VERIFY_SIGNATURE_INVALID || v === VERIFY_APIKEY_EXPIRED);
+        } catch {
+          return false;
+        }
+      }
+      /** Drop the cached signing key for a (origin, credential) pair after a VERIFY rejection. */
+      invalidate(url2, credential) {
+        try {
+          const stateKey = `${new URL(url2).origin}
+${credential}`;
+          this.invalidateState(stateKey);
+        } catch {
+        }
+      }
+      /** Permanently stop signing for a (origin, credential) pair (two VERIFY rejections). */
+      setBypass(url2, credential) {
+        try {
+          const stateKey = `${new URL(url2).origin}
+${credential}`;
+          const state2 = this.stateFor(stateKey);
+          state2.bypass = true;
+          this.invalidateState(stateKey);
+          this.onEvent?.("client-signing: VERIFY rejection persisted \u2014 bypassing signing for this credential");
+        } catch {
+        }
+      }
+      invalidateState(stateKey) {
+        const state2 = this.states.get(stateKey);
+        if (!state2) return;
+        state2.epoch += 1;
+        state2.privKey = void 0;
+        state2.handshake = void 0;
+      }
+      stateFor(stateKey) {
+        let state2 = this.states.get(stateKey);
+        if (!state2) {
+          state2 = { gateEnabled: false, gateExpiresAt: 0, gateNegUntil: 0, epoch: 0, bypass: false };
+          this.states.set(stateKey, state2);
+        }
+        return state2;
+      }
+      async gateEnabled(state2, cred) {
+        const now = this.now();
+        if (state2.gateExpiresAt > now) return state2.gateEnabled;
+        if (state2.gateNegUntil > now) return false;
+        if (state2.gatePromise) return state2.gatePromise;
+        const promise = this.probeGate(state2, cred).finally(() => {
+          if (state2.gatePromise === promise) state2.gatePromise = void 0;
+        });
+        state2.gatePromise = promise;
+        return promise;
+      }
+      async probeGate(state2, cred) {
+        const now = this.now();
+        let outcome;
+        try {
+          outcome = await this.fetchGate(cred);
+        } catch {
+          state2.gateNegUntil = now + GATE_FAILURE_COOLDOWN_MS;
+          return false;
+        }
+        state2.gateEnabled = outcome === "enabled";
+        if (outcome === "unavailable") {
+          state2.gateNegUntil = now + GATE_UNAVAILABLE_COOLDOWN_MS;
+        } else {
+          state2.gateExpiresAt = now + GATE_TTL_MS;
+          state2.gateNegUntil = 0;
+        }
+        if (state2.gateEnabled) this.onEvent?.("client-signing: server enabled codingPlanSignature \u2014 signing requests");
+        return state2.gateEnabled;
+      }
+      async fetchGate(cred) {
+        const identityHeaders = Object.fromEntries(
+          Object.entries(buildIdentityHeaders(this.identity)).filter(([name2]) => name2 !== "X-ZCode-Agent" && name2 !== "X-Device-Mid")
+        );
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), GATE_TIMEOUT_MS);
+        try {
+          const resp = await this.fetchImpl(this.gateUrl, {
+            method: "GET",
+            headers: { ...identityHeaders, "x-api-key": cred.credential },
+            redirect: "manual",
+            signal: controller.signal
+          });
+          if (!resp.ok) return "unavailable";
+          const parsed = await resp.json();
+          if (!parsed || parsed.code !== 0) return "unavailable";
+          const data2 = parsed.data;
+          if (!data2 || !Object.prototype.hasOwnProperty.call(data2, "codingPlanSignature")) return "disabled";
+          const signature = data2.codingPlanSignature;
+          return signature?.enable === true ? "enabled" : "disabled";
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      async ensurePrivateKey(state2, stateKey, parsedCred, origin) {
+        if (state2.privKey) return state2.privKey;
+        if (state2.handshake) return state2.handshake;
+        const epoch = state2.epoch;
+        const handshake = this.performHandshake(parsedCred, origin).then((key) => {
+          if (state2.epoch !== epoch) throw new Error("signing key changed during handshake");
+          state2.privKey = key;
+          return key;
+        });
+        const clear = () => {
+          if (state2.handshake === handshake) state2.handshake = void 0;
+        };
+        handshake.then(clear, clear);
+        state2.handshake = handshake;
+        return handshake;
+      }
+      async performHandshake(parsedCred, origin) {
+        const ts = String(Date.now());
+        const nonce = randomHex(NONCE_BYTES);
+        const sig = await handshakeSignature(
+          parsedCred.apiKeySecret,
+          `${HANDSHAKE_METHOD}
+${parsedCred.apiKeyId}
+${ts}
+${nonce}`
+        );
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), HANDSHAKE_TIMEOUT_MS);
+        try {
+          const resp = await this.fetchImpl(`${origin}${HANDSHAKE_PATH}`, {
+            method: "POST",
+            headers: { Authorization: `${parsedCred.apiKeyId}.${parsedCred.apiKeySecret}`, "Content-Type": "application/json" },
+            body: JSON.stringify({ apiKey: `${parsedCred.apiKeyId}.${parsedCred.apiKeySecret}`, nonce, sig, ts }),
+            redirect: "manual",
+            signal: controller.signal
+          });
+          if (resp.status !== 200) throw new Error(`handshake_http_${resp.status}`);
+          const envelope = await resp.json();
+          if (envelope.code === 500) throw new Error("handshake_server_500");
+          if (envelope.code !== 200) throw new Error(`handshake_rejected: ${String(envelope.msg)}`);
+          const cipher = envelope.data?.privateCipher;
+          if (typeof cipher !== "string" || !cipher) throw new Error("handshake_omitted_privateCipher");
+          return await decryptSigningPrivateKey(parsedCred.apiKeyId, parsedCred.apiKeySecret, cipher);
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      noteOnce(stateKey, message) {
+        if (this.notedKeys.has(stateKey)) return;
+        this.notedKeys.add(stateKey);
+        this.onEvent?.(`client-signing: ${message}`);
+      }
+    };
+    defaultSigner = null;
+    defaultSignerKey = "";
+  }
+});
+
+// src/proxy/ordered-transport.ts
+async function sendOrderedUpstreamRequest(req) {
+  const url2 = new URL(req.url);
+  const bodyBytes = bodyToBytes(req.body);
+  const requestHead = buildRequestHead(url2, req.method ?? "POST", req.headers, bodyBytes.byteLength);
+  const socket = await openSocket(url2);
+  return await new Promise((resolve, reject) => {
+    let headerBuffer = new Uint8Array(0);
+    let responseStarted = false;
+    let postWrite = false;
+    let bodyController = null;
+    let chunkedDecoder = null;
+    let remainingContentLength = null;
+    const bodyStream = new ReadableStream({
+      start(controller) {
+        bodyController = controller;
+      },
+      cancel() {
+        socket.destroy();
+      }
+    });
+    function fail(err) {
+      if (!responseStarted && postWrite) {
+        try {
+          err.postWrite = true;
+        } catch {
+        }
+      }
+      if (responseStarted) bodyController?.error(err);
+      else reject(err);
+      socket.destroy();
+    }
+    function finish() {
+      if (chunkedDecoder && !chunkedDecoder.done) {
+        try {
+          bodyController?.error(new Error("upstream chunked body truncated"));
+        } catch {
+        }
+        socket.destroy();
+        return;
+      }
+      try {
+        bodyController?.close();
+      } catch {
+      }
+    }
+    function pushBody(bytes) {
+      if (!bodyController || bytes.byteLength === 0) return;
+      if (chunkedDecoder) {
+        chunkedDecoder.push(bytes, bodyController);
+        if (chunkedDecoder.done) finish();
+        return;
+      }
+      if (remainingContentLength !== null) {
+        const next = bytes.slice(0, remainingContentLength);
+        remainingContentLength -= next.byteLength;
+        if (next.byteLength > 0) bodyController.enqueue(next);
+        if (remainingContentLength === 0) finish();
+        return;
+      }
+      bodyController.enqueue(bytes);
+    }
+    socket.on("data", (chunk) => {
+      try {
+        const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+        if (!responseStarted) {
+          headerBuffer = concatBytes(headerBuffer, bytes);
+          const headerEnd = indexOfBytes(headerBuffer, HEADER_END);
+          if (headerEnd < 0) return;
+          const headerBytes = headerBuffer.slice(0, headerEnd);
+          const rest = headerBuffer.slice(headerEnd + HEADER_END.byteLength);
+          const parsed = parseResponseHeaders(headerBytes);
+          responseStarted = true;
+          const transferEncoding = parsed.headers.get("transfer-encoding")?.toLowerCase() ?? "";
+          if (transferEncoding.split(",").map((s) => s.trim()).includes("chunked")) {
+            parsed.headers.delete("transfer-encoding");
+            chunkedDecoder = new ChunkedDecoder();
+          } else {
+            const contentLength2 = parsed.headers.get("content-length");
+            remainingContentLength = contentLength2 ? Number.parseInt(contentLength2, 10) : null;
+            if (!Number.isFinite(remainingContentLength)) remainingContentLength = null;
+          }
+          let responseBody = bodyStream;
+          if (req.decompress && parsed.headers.get("content-encoding")?.toLowerCase() === "gzip") {
+            parsed.headers.delete("content-encoding");
+            parsed.headers.delete("content-length");
+            const gzip = new DecompressionStream("gzip");
+            responseBody = bodyStream.pipeThrough(gzip);
+          }
+          resolve(new Response(responseBody, {
+            status: parsed.status,
+            statusText: parsed.statusText,
+            headers: parsed.headers
+          }));
+          pushBody(rest);
+          return;
+        }
+        pushBody(bytes);
+      } catch (err) {
+        fail(err);
+      }
+    });
+    socket.once("error", fail);
+    socket.once("end", () => {
+      if (!responseStarted) {
+        reject(new Error("upstream closed before sending response headers"));
+        return;
+      }
+      finish();
+    });
+    socket.write(requestHead);
+    if (bodyBytes.byteLength > 0) socket.write(bodyBytes);
+    postWrite = true;
+  });
+}
+function openSocket(url2) {
+  const isHttps = url2.protocol === "https:";
+  if (!isHttps && url2.protocol !== "http:") {
+    return Promise.reject(new Error(`Unsupported upstream protocol: ${url2.protocol}`));
+  }
+  const port = Number(url2.port || (isHttps ? 443 : 80));
+  return new Promise((resolve, reject) => {
+    const onConnect = () => {
+      socket.off("error", reject);
+      resolve(socket);
+    };
+    const socket = isHttps ? (0, import_node_tls.connect)({ host: url2.hostname, port, servername: url2.hostname }, onConnect) : (0, import_node_net.connect)({ host: url2.hostname, port }, onConnect);
+    socket.once("error", reject);
+  });
+}
+function buildRequestHead(url2, method2, headers2, contentLength2) {
+  const path2 = `${url2.pathname || "/"}${url2.search}`;
+  const lines = [
+    `${method2} ${path2} HTTP/1.1`,
+    `Host: ${url2.host}`,
+    ...headers2.map(headerLine),
+    `Content-Length: ${contentLength2}`,
+    "Connection: close",
+    "",
+    ""
+  ];
+  return lines.join(CRLF);
+}
+function headerLine([name2, value2]) {
+  if (!HEADER_NAME.test(name2)) throw new Error(`Invalid upstream header name: ${name2}`);
+  if (/[\r\n]/.test(value2)) throw new Error(`Invalid upstream header value for ${name2}`);
+  return `${name2}: ${value2}`;
+}
+function bodyToBytes(body2) {
+  if (body2 === void 0) return new Uint8Array(0);
+  if (typeof body2 === "string") return new TextEncoder().encode(body2);
+  return body2;
+}
+function parseResponseHeaders(bytes) {
+  const text = new TextDecoder("latin1").decode(bytes);
+  const lines = text.split(CRLF);
+  const statusLine = lines.shift() ?? "";
+  const match = /^HTTP\/\d(?:\.\d)?\s+(\d{3})(?:\s+(.*))?$/.exec(statusLine);
+  if (!match) throw new Error(`Invalid upstream status line: ${statusLine}`);
+  const headers2 = new Headers();
+  for (const line of lines) {
+    if (!line) continue;
+    const idx = line.indexOf(":");
+    if (idx <= 0) continue;
+    headers2.append(line.slice(0, idx), line.slice(idx + 1).trimStart());
+  }
+  return { status: Number(match[1]), statusText: match[2] ?? "", headers: headers2 };
+}
+function concatBytes(a, b) {
+  const out = new Uint8Array(a.byteLength + b.byteLength);
+  if (a.byteLength > 0) out.set(a, 0);
+  if (b.byteLength > 0) out.set(b, a.byteLength);
+  return out;
+}
+function indexOfBytes(haystack, needle) {
+  outer: for (let i = 0; i <= haystack.byteLength - needle.byteLength; i++) {
+    for (let j = 0; j < needle.byteLength; j++) {
+      if (haystack[i + j] !== needle[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+function indexOfCrlf(bytes) {
+  for (let i = 0; i < bytes.byteLength - 1; i++) {
+    if (bytes[i] === 13 && bytes[i + 1] === 10) return i;
+  }
+  return -1;
+}
+var import_node_net, import_node_tls, CRLF, HEADER_END, HEADER_NAME, ChunkedDecoder;
+var init_ordered_transport = __esm({
+  "src/proxy/ordered-transport.ts"() {
+    "use strict";
+    import_node_net = require("node:net");
+    import_node_tls = require("node:tls");
+    CRLF = "\r\n";
+    HEADER_END = new Uint8Array([13, 10, 13, 10]);
+    HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+    ChunkedDecoder = class {
+      buffer = new Uint8Array(0);
+      expectedSize = null;
+      done = false;
+      push(bytes, controller) {
+        if (this.done) return;
+        this.buffer = concatBytes(this.buffer, bytes);
+        while (!this.done) {
+          if (this.expectedSize === null) {
+            const lineEnd = indexOfCrlf(this.buffer);
+            if (lineEnd < 0) return;
+            const line = new TextDecoder("latin1").decode(this.buffer.slice(0, lineEnd));
+            const sizeHex = line.split(";", 1)[0].trim();
+            const size = Number.parseInt(sizeHex, 16);
+            if (!Number.isFinite(size)) throw new Error(`Invalid chunk size: ${line}`);
+            this.buffer = this.buffer.slice(lineEnd + 2);
+            this.expectedSize = size;
+            if (size === 0) {
+              this.done = true;
+              return;
+            }
+          }
+          if (this.buffer.byteLength < this.expectedSize + 2) return;
+          const chunk = this.buffer.slice(0, this.expectedSize);
+          controller.enqueue(chunk);
+          this.buffer = this.buffer.slice(this.expectedSize + 2);
+          this.expectedSize = null;
+        }
+      }
+    };
+  }
+});
+
+// src/proxy/zcode_system.json
+var zcode_system_default;
+var init_zcode_system = __esm({
+  "src/proxy/zcode_system.json"() {
+    zcode_system_default = [
+      {
+        type: "text",
+        text: "You are ZCode, an interactive coding agent",
+        cache_control: {
+          type: "ephemeral"
+        }
+      },
+      {
+        type: "text",
+        text: "\nYou are an interactive ZCode agent that helps users with software engineering tasks.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n- Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n- Tools run behind a user-selected permission mode; a denied call means the user declined it \u2014 adjust, don't retry verbatim.\n- The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n- Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n- Reference code as `file_path:line_number` \u2014 it's clickable.",
+        cache_control: {
+          type: "ephemeral"
+        }
+      },
+      {
+        type: "text",
+        text: "# Environment\nYou have been invoked in the following environment:\n- Primary working directory: unknown\n- Is a git repository: no\n- Platform: unknown\n- Shell: unknown\n- OS Version: unknown",
+        cache_control: {
+          type: "ephemeral"
+        }
+      }
+    ];
+  }
+});
+
+// src/proxy/system-prompt.ts
+function buildStartPlanSystem(existingSystem, currentModel) {
+  const official = ZCODE_SYSTEM_BLOCKS.map((b) => structuredClone(b));
+  if (currentModel && currentModel.trim().length > 0) {
+    official.push({
+      type: "text",
+      text: `- You are powered by the model named ${currentModel}.`,
+      cache_control: { type: "ephemeral" }
+    });
+  }
+  const userBlocks = normalizeUserSystem(existingSystem);
+  return [...official, ...userBlocks];
+}
+function normalizeUserSystem(system) {
+  if (system == null) return [];
+  if (typeof system === "string") {
+    const text = system.trim();
+    return text ? [{ type: "text", text }] : [];
+  }
+  if (!Array.isArray(system)) return [];
+  const out = [];
+  for (const item of system) {
+    if (typeof item === "string") {
+      if (item.trim()) out.push({ type: "text", text: item });
+    } else if (item && typeof item === "object") {
+      const b = item;
+      if (b.type === "text" && typeof b.text === "string" && b.text.trim()) {
+        out.push({
+          type: "text",
+          text: b.text,
+          ...typeof b.cache_control === "object" && b.cache_control !== null ? { cache_control: b.cache_control } : {}
+        });
+      }
+    }
+  }
+  return out;
+}
+var ZCODE_SYSTEM_BLOCKS;
+var init_system_prompt = __esm({
+  "src/proxy/system-prompt.ts"() {
+    "use strict";
+    init_zcode_system();
+    ZCODE_SYSTEM_BLOCKS = zcode_system_default;
+  }
+});
+
+// src/proxy/body-transformer.ts
+function transformRequestBody(body2, ctx) {
+  if (body2 === void 0 || body2.length === 0) return body2;
+  let parsed;
+  try {
+    parsed = JSON.parse(body2);
+  } catch {
+    return body2;
+  }
+  if (typeof parsed !== "object" || parsed === null) return body2;
+  let modified = false;
+  if (ctx.format === "openai") {
+    if (ctx.startPlan) {
+      modified = applyStartPlanOpenAISystem(parsed) || modified;
+    }
+    modified = applyStreamOptionsIncludeUsage(parsed) || modified;
+  }
+  if (ctx.format === "anthropic") {
+    const obj = parsed;
+    if (ctx.startPlan) {
+      modified = applyStartPlanSystem(obj) || modified;
+    }
+    modified = applyAnthropicCacheControl(obj) || modified;
+    if (ctx.userId) {
+      modified = applyAnthropicUserId(obj, ctx.userId) || modified;
+    }
+  }
+  return modified ? JSON.stringify(parsed) : body2;
+}
+function applyStreamOptionsIncludeUsage(body2) {
+  if (body2.stream !== true) return false;
+  const existing = body2.stream_options;
+  if (isPlainObject(existing) && existing.include_usage === true) {
+    return false;
+  }
+  const merged = isPlainObject(existing) ? { ...existing } : {};
+  merged.include_usage = true;
+  body2.stream_options = merged;
+  return true;
+}
+function isPlainObject(v) {
+  return typeof v === "object" && v !== null;
+}
+function applyAnthropicCacheControl(body2) {
+  const messages = body2.messages;
+  if (!Array.isArray(messages) || messages.length === 0) return false;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (typeof msg !== "object" || msg === null) continue;
+    if (msg.role === "system") continue;
+    if (typeof msg.content === "string") {
+      msg.content = [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }];
+      return true;
+    }
+    if (Array.isArray(msg.content) && msg.content.length > 0) {
+      const lastBlock = msg.content[msg.content.length - 1];
+      if (typeof lastBlock === "object" && lastBlock !== null && !lastBlock.cache_control) {
+        lastBlock.cache_control = { type: "ephemeral" };
+        return true;
+      }
+    }
+    return false;
+  }
+  return false;
+}
+function applyAnthropicUserId(body2, userId) {
+  const existing = body2.metadata;
+  if (isPlainObject(existing) && existing.user_id === userId) {
+    return false;
+  }
+  body2.metadata = {
+    ...isPlainObject(existing) ? existing : {},
+    user_id: userId
+  };
+  return true;
+}
+function applyStartPlanSystem(body2) {
+  const model = typeof body2.model === "string" ? body2.model : void 0;
+  body2.system = buildStartPlanSystem(body2.system, model);
+  return true;
+}
+function applyStartPlanOpenAISystem(body2) {
+  const messages = body2.messages;
+  if (!Array.isArray(messages)) return false;
+  const model = typeof body2.model === "string" ? body2.model : void 0;
+  const official = buildStartPlanSystem(void 0, model).map((block) => ({
+    role: "system",
+    content: typeof block === "object" && block !== null && "text" in block ? String(block.text) : ""
+  }));
+  body2.messages = [...official, ...messages];
+  return true;
+}
+var init_body_transformer = __esm({
+  "src/proxy/body-transformer.ts"() {
+    "use strict";
+    init_system_prompt();
+  }
+});
+
+// src/provider/models.ts
+var MODELS;
+var init_models = __esm({
+  "src/provider/models.ts"() {
+    "use strict";
+    MODELS = [
+      { id: "glm-4.5-air", name: "GLM 4.5 Air", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
+      { id: "glm-4.6", name: "GLM 4.6", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
+      { id: "glm-4.6v", name: "GLM 4.6V", contextWindow: 2e5, maxOutputTokens: 128e3 },
+      { id: "glm-4.7", name: "GLM 4.7", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
+      { id: "glm-5", name: "GLM 5", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
+      { id: "glm-5-turbo", name: "GLM 5 Turbo", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
+      { id: "glm-5v-turbo", name: "GLM 5V Turbo", contextWindow: 2e5, maxOutputTokens: 128e3 },
+      { id: "glm-5.1", name: "GLM 5.1", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
+      { id: "glm-5.2", name: "GLM 5.2", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true },
+      { id: "glm-5.3", name: "GLM 5.3", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true },
+      // start-plan gateway serves the -flash variant (used by claimed trial plans
+      // like the weekend package); advertised so client-side discovery lists it.
+      { id: "glm-5.3-flash", name: "GLM 5.3 Flash", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true }
+    ];
+  }
+});
+
+// src/provider/reasoning.ts
+function isGlm53Model(model) {
+  if (!model) return false;
+  return GLM53_MODEL_PATTERN.test(model);
+}
+function normalizeGlm53Effort(effort) {
+  switch (effort) {
+    case "none":
+    case "minimal":
+    case "light":
+    case "low":
+      return "low";
+    case "medium":
+    case "high":
+      return "high";
+    case "xhigh":
+    case "max":
+    case "ultra":
+      return "max";
+    default:
+      return GLM53_DEFAULT_EFFORT;
+  }
+}
+function buildGlm53Reasoning(effort) {
+  return {
+    thinking: { type: "enabled", budget_tokens: GLM53_THINKING_BUDGETS[effort] },
+    output_config: { effort }
+  };
+}
+function fitGlm53Budget(budget, maxTokens) {
+  if (typeof maxTokens !== "number" || !Number.isFinite(maxTokens)) return budget;
+  const clamped = Math.min(budget, Math.floor(maxTokens) - GLM53_ANSWER_RESERVE);
+  return clamped >= GLM53_MIN_THINKING_BUDGET ? clamped : void 0;
+}
+var GLM53_DEFAULT_EFFORT, GLM53_THINKING_BUDGETS, GLM53_MIN_THINKING_BUDGET, GLM53_ANSWER_RESERVE, GLM53_MODEL_PATTERN;
+var init_reasoning = __esm({
+  "src/provider/reasoning.ts"() {
+    "use strict";
+    GLM53_DEFAULT_EFFORT = "max";
+    GLM53_THINKING_BUDGETS = {
+      low: 8e3,
+      high: 16e3,
+      max: 32e3
+    };
+    GLM53_MIN_THINKING_BUDGET = 1024;
+    GLM53_ANSWER_RESERVE = 1024;
+    GLM53_MODEL_PATTERN = /glm-5\.3(?![0-9])/i;
+  }
+});
+
+// src/translator/openai-to-anthropic.ts
+function translateRequestOpenAIToAnthropic(req) {
+  const systemMessages = req.messages.filter((m) => m.role === "system");
+  const nonSystemMessages = req.messages.filter((m) => m.role !== "system");
+  const system = systemMessages.length > 0 ? systemMessages.map((m) => extractText(m)).join("\n\n") : void 0;
+  const anthropicMessages = translateMessagesWithToolCoalescing(nonSystemMessages);
+  const result3 = {
+    model: req.model,
+    messages: anthropicMessages,
+    max_tokens: req.max_tokens ?? resolveDefaultMaxTokens(req.model)
+  };
+  if (system) result3.system = system;
+  if (req.temperature !== void 0) result3.temperature = req.temperature;
+  if (req.top_p !== void 0) result3.top_p = req.top_p;
+  if (req.stream !== void 0) result3.stream = req.stream;
+  if (req.stop) result3.stop_sequences = Array.isArray(req.stop) ? req.stop : [req.stop];
+  if (isGlm53Model(req.model)) {
+    const { thinking, output_config } = translateGlm53Reasoning(req, result3.max_tokens);
+    result3.thinking = thinking;
+    if (output_config) result3.output_config = output_config;
+  } else {
+    const thinking = translateThinking(req);
+    if (thinking) result3.thinking = thinking;
+  }
+  if (req.tools?.length && req.tool_choice !== "none") {
+    result3.tools = req.tools.map(translateToolOpenAIToAnthropic);
+  }
+  if (req.tool_choice !== void 0 && req.tool_choice !== "none") {
+    const translated = translateToolChoice(req.tool_choice);
+    if (translated) result3.tool_choice = translated;
+  }
+  return result3;
+}
+function translateThinking(req) {
+  const explicit = req.thinking;
+  if (explicit && typeof explicit === "object") {
+    if (explicit.type === "disabled") return { type: "disabled" };
+    if (explicit.type === "enabled" || explicit.type === "adaptive") {
+      const budget = explicit.budget_tokens ?? explicit.budgetTokens;
+      return {
+        type: explicit.type,
+        ...typeof budget === "number" && Number.isFinite(budget) && budget > 0 ? { budget_tokens: Math.floor(budget) } : {},
+        ...explicit.type === "adaptive" && typeof explicit.display === "boolean" ? { display: explicit.display } : {}
+      };
+    }
+  }
+  if (req.reasoning_effort === "none") return { type: "disabled" };
+  if (isReasoningModel(req.model)) return { type: "enabled" };
+  return void 0;
+}
+function isReasoningModel(model) {
+  return MODELS.some((m) => m.id === model && m.reasoning === true);
+}
+function resolveDefaultMaxTokens(model) {
+  if (!isGlm53Model(model)) return DEFAULT_MAX_TOKENS;
+  const catalogEntry = MODELS.find((m) => m.id === model);
+  return catalogEntry?.maxOutputTokens ?? DEFAULT_MAX_TOKENS;
+}
+function translateGlm53Reasoning(req, maxTokens) {
+  const explicit = req.thinking;
+  if (explicit && typeof explicit === "object" && explicit.type === "disabled") {
+    return { thinking: { type: "disabled" } };
+  }
+  const effort = normalizeGlm53Effort(req.reasoning_effort);
+  const base = buildGlm53Reasoning(effort);
+  let budget = base.thinking.budget_tokens;
+  if (explicit && typeof explicit === "object" && (explicit.type === "enabled" || explicit.type === "adaptive")) {
+    const explicitBudget = explicit.budget_tokens ?? explicit.budgetTokens;
+    if (typeof explicitBudget === "number" && Number.isFinite(explicitBudget)) {
+      const floored = Math.floor(explicitBudget);
+      if (floored > 0) budget = floored;
+    }
+  }
+  const fitted = fitGlm53Budget(budget, maxTokens);
+  return {
+    thinking: fitted !== void 0 ? { type: "enabled", budget_tokens: fitted } : { type: "enabled" },
+    output_config: base.output_config
+  };
+}
+function translateToolChoice(choice) {
+  if (choice === "auto") return { type: "auto" };
+  if (choice === "required") return { type: "any" };
+  if (typeof choice === "object" && choice.type === "function") {
+    return { type: "tool", name: choice.function.name };
+  }
+  return void 0;
+}
+function translateMessagesWithToolCoalescing(messages) {
+  const out = [];
+  let i = 0;
+  while (i < messages.length) {
+    const m = messages[i];
+    if (m.role === "tool" && m.tool_call_id) {
+      const results = [];
+      while (i < messages.length) {
+        const tool = messages[i];
+        const toolCallId = tool.tool_call_id;
+        if (tool.role !== "tool" || !toolCallId) break;
+        results.push({
+          type: "tool_result",
+          tool_use_id: toolCallId,
+          content: toolResultContent(tool)
+        });
+        i++;
+      }
+      out.push({ role: "user", content: results });
+      continue;
+    }
+    out.push(translateMessageOpenAIToAnthropic(m));
+    i++;
+  }
+  return out;
+}
+function translateMessageOpenAIToAnthropic(msg) {
+  if (msg.role === "assistant" && msg.tool_calls?.length) {
+    const blocks = [];
+    const text = extractText(msg);
+    if (text.length > 0) blocks.push({ type: "text", text });
+    for (const tc of msg.tool_calls) {
+      blocks.push({
+        type: "tool_use",
+        id: tc.id,
+        name: tc.function.name,
+        input: parseToolArguments(tc.function.arguments)
+      });
+    }
+    return { role: "assistant", content: blocks };
+  }
+  return {
+    role: msg.role === "assistant" ? "assistant" : "user",
+    content: translateContentOpenAIToAnthropic(msg)
+  };
+}
+function parseToolArguments(raw) {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+function toolResultContent(msg) {
+  if (typeof msg.content === "string") return msg.content;
+  if (!Array.isArray(msg.content)) return "";
+  if (msg.content.every((c) => c.type === "text")) {
+    const joined = msg.content.map((c) => c.text ?? "").join("");
+    return joined;
+  }
+  return msg.content.map((c) => {
+    if (c.type === "text") return { type: "text", text: c.text ?? "" };
+    if (c.type === "image_url" && c.image_url?.url) {
+      return imageUrlToAnthropicBlock(c.image_url.url);
+    }
+    return { type: "text", text: "" };
+  });
+}
+function parseDataUrl(url2) {
+  const m = /^data:([^;]+);base64,(.*)$/s.exec(url2);
+  if (!m) return void 0;
+  return { mediaType: m[1], data: m[2] };
+}
+function imageUrlToAnthropicBlock(url2) {
+  const parsed = parseDataUrl(url2);
+  if (parsed) {
+    return {
+      type: "image",
+      source: { type: "base64", media_type: parsed.mediaType, data: parsed.data }
+    };
+  }
+  if (/^https?:\/\//i.test(url2)) {
+    return { type: "image", source: { type: "url", url: url2 } };
+  }
+  return { type: "text", text: url2 };
+}
+function anthropicUsageToOpenAI(usage) {
+  const inputTokens = usage?.input_tokens ?? 0;
+  const outputTokens = usage?.output_tokens ?? 0;
+  const cacheRead = usage?.cache_read_input_tokens ?? 0;
+  const cacheCreation = usage?.cache_creation_input_tokens ?? 0;
+  const promptTokens = inputTokens + cacheRead + cacheCreation;
+  return {
+    prompt_tokens: promptTokens,
+    completion_tokens: outputTokens,
+    total_tokens: promptTokens + outputTokens,
+    // Presence-preserving: an upstream explicitly reporting 0 cache reads stays
+    // distinguishable from one reporting no cache breakdown at all.
+    ...usage?.cache_read_input_tokens != null ? { prompt_tokens_details: { cached_tokens: cacheRead } } : {}
+  };
+}
+function translateResponseAnthropicToOpenAI(resp, model) {
+  const textBlocks = resp.content.filter((b) => b.type === "text");
+  const toolUseBlocks = resp.content.filter((b) => b.type === "tool_use");
+  const thinkingBlocks = resp.content.filter((b) => b.type === "thinking");
+  const content2 = textBlocks.map((b) => b.text).join("") || null;
+  const reasoningContent = thinkingBlocks.map((b) => b.thinking ?? "").join("") || void 0;
+  const toolCalls = toolUseBlocks.length > 0 ? toolUseBlocks.map((b, i) => ({
+    id: b.id,
+    type: "function",
+    function: {
+      name: b.name,
+      arguments: JSON.stringify(b.input ?? {})
+    }
+  })) : void 0;
+  const finishReason = mapStopReasonToFinishReason(resp.stop_reason);
+  return {
+    id: resp.id,
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1e3),
+    model,
+    choices: [{
+      index: 0,
+      message: {
+        role: "assistant",
+        content: content2,
+        ...reasoningContent ? { reasoning_content: reasoningContent } : {},
+        ...toolCalls ? { tool_calls: toolCalls } : {}
+      },
+      finish_reason: finishReason
+    }],
+    usage: anthropicUsageToOpenAI(resp.usage)
+  };
+}
+function extractText(msg) {
+  if (typeof msg.content === "string") return msg.content;
+  if (Array.isArray(msg.content)) {
+    return msg.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("");
+  }
+  return "";
+}
+function translateContentOpenAIToAnthropic(msg) {
+  if (typeof msg.content === "string") return msg.content;
+  if (msg.content === null) return "";
+  if (Array.isArray(msg.content)) {
+    return msg.content.map((c) => {
+      if (c.type === "text") return { type: "text", text: c.text ?? "" };
+      if (c.type === "image_url" && c.image_url?.url) {
+        return imageUrlToAnthropicBlock(c.image_url.url);
+      }
+      return { type: "text", text: "" };
+    });
+  }
+  return "";
+}
+function translateToolOpenAIToAnthropic(tool) {
+  return {
+    name: tool.function.name,
+    ...tool.function.description ? { description: tool.function.description } : {},
+    ...tool.function.parameters ? { input_schema: tool.function.parameters } : {}
+  };
+}
+function mapStopReasonToFinishReason(stopReason) {
+  switch (stopReason) {
+    case "end_turn":
+    case "stop_sequence":
+      return "stop";
+    case "max_tokens":
+      return "length";
+    case "tool_use":
+      return "tool_calls";
+    default:
+      return null;
+  }
+}
+var DEFAULT_MAX_TOKENS;
+var init_openai_to_anthropic = __esm({
+  "src/translator/openai-to-anthropic.ts"() {
+    "use strict";
+    init_models();
+    init_reasoning();
+    DEFAULT_MAX_TOKENS = 4096;
+  }
+});
+
+// src/translator/anthropic-to-openai.ts
+function translateRequestAnthropicToOpenAI(req) {
+  const messages = [];
+  if (req.system) {
+    const systemText = typeof req.system === "string" ? req.system : req.system.map((s) => s.text).join("\n");
+    messages.push({ role: "system", content: systemText });
+  }
+  for (const m of req.messages) {
+    messages.push(...translateMessageAnthropicToOpenAI(m));
+  }
+  const result3 = {
+    model: req.model,
+    messages,
+    ...req.temperature !== void 0 ? { temperature: req.temperature } : {},
+    ...req.top_p !== void 0 ? { top_p: req.top_p } : {},
+    ...req.stream !== void 0 ? { stream: req.stream } : {},
+    ...req.max_tokens !== void 0 ? { max_tokens: req.max_tokens } : {}
+  };
+  if (req.stop_sequences?.length) {
+    result3.stop = req.stop_sequences.length === 1 ? req.stop_sequences[0] : req.stop_sequences;
+  }
+  if (req.thinking) {
+    result3.thinking = req.thinking;
+  }
+  if (isGlm53Model(req.model) && req.output_config?.effort) {
+    result3.reasoning_effort = req.output_config.effort;
+  }
+  if (req.tools?.length) {
+    result3.tools = req.tools.map((t) => ({
+      type: "function",
+      function: {
+        name: t.name,
+        ...t.description ? { description: t.description } : {},
+        ...t.input_schema ? { parameters: t.input_schema } : {}
+      }
+    }));
+  }
+  if (req.tool_choice) {
+    const translated = mapToolChoiceAnthropicToOpenAI(req.tool_choice);
+    if (translated !== void 0) result3.tool_choice = translated;
+  }
+  return result3;
+}
+function mapToolChoiceAnthropicToOpenAI(choice) {
+  switch (choice.type) {
+    case "auto":
+      return "auto";
+    case "any":
+      return "required";
+    case "tool":
+      return { type: "function", function: { name: choice.name } };
+    default:
+      return void 0;
+  }
+}
+function translateResponseOpenAIToAnthropic(resp) {
+  const choice = resp.choices?.[0];
+  const content2 = [];
+  if (choice?.message?.reasoning_content) {
+    content2.push({ type: "thinking", thinking: choice.message.reasoning_content });
+  }
+  if (choice?.message?.content) {
+    const textContent = typeof choice.message.content === "string" ? choice.message.content : Array.isArray(choice.message.content) ? choice.message.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("") : "";
+    if (textContent) content2.push({ type: "text", text: textContent });
+  }
+  if (choice?.message?.tool_calls) {
+    for (const tc of choice.message.tool_calls) {
+      let input = {};
+      try {
+        input = JSON.parse(tc.function.arguments);
+      } catch {
+        input = {};
+      }
+      content2.push({
+        type: "tool_use",
+        id: tc.id,
+        name: tc.function.name,
+        input
+      });
+    }
+  }
+  const stopReason = mapFinishReasonToStopReason(choice?.finish_reason);
+  return {
+    id: resp.id,
+    type: "message",
+    role: "assistant",
+    content: content2.length > 0 ? content2 : [{ type: "text", text: "" }],
+    model: resp.model,
+    stop_reason: stopReason,
+    stop_sequence: null,
+    usage: openaiUsageToAnthropic(resp.usage)
+  };
+}
+function translateMessageAnthropicToOpenAI(m) {
+  if (typeof m.content === "string") {
+    return [{ role: m.role, content: m.content }];
+  }
+  const result3 = [];
+  const contentParts = [];
+  const toolCalls = [];
+  const reasoningParts = [];
+  for (const block of m.content) {
+    switch (block.type) {
+      case "text": {
+        contentParts.push({ type: "text", text: block.text });
+        break;
+      }
+      case "image": {
+        if (block.source.type === "base64") {
+          contentParts.push({
+            type: "image_url",
+            image_url: { url: `data:${block.source.media_type};base64,${block.source.data}` }
+          });
+        } else if (block.source.type === "url") {
+          contentParts.push({
+            type: "image_url",
+            image_url: { url: block.source.url }
+          });
+        }
+        break;
+      }
+      case "tool_use": {
+        toolCalls.push({
+          id: block.id,
+          type: "function",
+          function: { name: block.name, arguments: JSON.stringify(block.input ?? {}) }
+        });
+        break;
+      }
+      case "tool_result": {
+        result3.push({
+          role: "tool",
+          tool_call_id: block.tool_use_id,
+          content: toolResultContentToOpenAI(block.content, block.is_error === true)
+        });
+        break;
+      }
+      case "thinking": {
+        if (block.thinking.length > 0) reasoningParts.push(block.thinking);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  const hasReasoning = m.role === "assistant" && reasoningParts.length > 0;
+  if (contentParts.length > 0 || toolCalls.length > 0 || hasReasoning) {
+    const content2 = contentParts.length === 0 ? null : contentParts.length === 1 && contentParts[0].type === "text" ? contentParts[0].text ?? "" : contentParts;
+    result3.push({
+      role: m.role,
+      content: content2,
+      ...hasReasoning ? { reasoning_content: reasoningParts.join("\n") } : {},
+      ...toolCalls.length > 0 ? { tool_calls: toolCalls } : {}
+    });
+  }
+  if (result3.length === 0) {
+    result3.push({ role: m.role, content: null });
+  }
+  return result3;
+}
+function toolResultContentToOpenAI(content2, isError) {
+  const body2 = flattenToolResultContent(content2);
+  return isError && body2.length > 0 ? `[tool_error] ${body2}` : body2;
+}
+function flattenToolResultContent(content2) {
+  if (typeof content2 === "string") return content2;
+  if (!Array.isArray(content2)) return "";
+  const texts = content2.filter((b) => b.type === "text").map((b) => b.text);
+  if (texts.length > 0) return texts.join("");
+  return JSON.stringify(content2);
+}
+function mapFinishReasonToStopReason(finishReason) {
+  switch (finishReason) {
+    case "stop":
+      return "end_turn";
+    case "length":
+      return "max_tokens";
+    case "tool_calls":
+      return "tool_use";
+    case "content_filter":
+      return "end_turn";
+    default:
+      return null;
+  }
+}
+function openaiUsageToAnthropic(usage) {
+  const promptTokens = usage?.prompt_tokens ?? 0;
+  const cacheRead = usage?.cache_read_input_tokens ?? usage?.prompt_tokens_details?.cached_tokens ?? 0;
+  const cacheCreation = usage?.cache_creation_input_tokens ?? 0;
+  const inputTokens = Math.max(0, promptTokens - cacheRead - cacheCreation);
+  const result3 = {
+    input_tokens: inputTokens,
+    output_tokens: usage?.completion_tokens ?? 0
+  };
+  if (cacheRead > 0) result3.cache_read_input_tokens = cacheRead;
+  if (cacheCreation > 0) result3.cache_creation_input_tokens = cacheCreation;
+  return result3;
+}
+var init_anthropic_to_openai = __esm({
+  "src/translator/anthropic-to-openai.ts"() {
+    "use strict";
+    init_reasoning();
+  }
+});
+
+// src/translator/sse-translator.ts
+function parseSSEChunk(raw) {
+  const results = [];
+  const blocks = raw.split("\n\n");
+  for (const block of blocks) {
+    const lines = block.trim().split("\n").filter(Boolean);
+    if (lines.length === 0) continue;
+    let eventType = "";
+    let dataStr = "";
+    for (const line of lines) {
+      if (line.startsWith("event: ")) {
+        eventType = line.slice(7).trim();
+      } else if (line.startsWith("data: ")) {
+        dataStr = line.slice(6);
+      }
+    }
+    if (dataStr) {
+      try {
+        results.push({ event: eventType, data: JSON.parse(dataStr) });
+      } catch {
+      }
+    }
+  }
+  return results;
+}
+function initState(model) {
+  return {
+    messageId: "",
+    model,
+    roleSent: false,
+    usage: { input_tokens: 0, output_tokens: 0 },
+    toolCallIndex: 0,
+    blockIndexToToolCallIndex: /* @__PURE__ */ new Map(),
+    finishReasonSent: false
+  };
+}
+function mergeAnthropicUsage(target2, patch) {
+  if (!patch) return;
+  if (patch.input_tokens != null) target2.input_tokens = patch.input_tokens;
+  if (patch.output_tokens != null) target2.output_tokens = patch.output_tokens;
+  if (patch.cache_read_input_tokens != null) target2.cache_read_input_tokens = patch.cache_read_input_tokens;
+  if (patch.cache_creation_input_tokens != null) target2.cache_creation_input_tokens = patch.cache_creation_input_tokens;
+}
+function makeChunk(state2, delta, finishReason = null, usage) {
+  const chunk = {
+    id: state2.messageId || "chatcmpl-stream",
+    object: "chat.completion.chunk",
+    created: Math.floor(Date.now() / 1e3),
+    model: state2.model,
+    choices: [{
+      index: 0,
+      delta,
+      finish_reason: finishReason
+    }]
+  };
+  if (usage) chunk.usage = usage;
+  return `data: ${JSON.stringify(chunk)}
+
+`;
+}
+function anthropicSseToOpenaiSse(upstream, model = "glm-4.6") {
+  const state2 = initState(model);
+  const decoder = new TextDecoder();
+  const encoder2 = new TextEncoder();
+  let buffer2 = "";
+  return new ReadableStream({
+    async start(controller) {
+      const reader = upstream.getReader();
+      let errored = false;
+      try {
+        while (true) {
+          const { done, value: value2 } = await reader.read();
+          if (done) break;
+          buffer2 += decoder.decode(value2, { stream: true });
+          const blocks = buffer2.split("\n\n");
+          buffer2 = blocks.pop() ?? "";
+          for (const block of blocks) {
+            const parsed = parseSSEChunk(block);
+            for (const p of parsed) {
+              const output = translateEvent(state2, p);
+              if (output) {
+                controller.enqueue(encoder2.encode(output));
+              }
+            }
+          }
+        }
+        if (buffer2.trim()) {
+          const parsed = parseSSEChunk(buffer2);
+          for (const p of parsed) {
+            const output = translateEvent(state2, p);
+            if (output) controller.enqueue(encoder2.encode(output));
+          }
+        }
+        controller.enqueue(encoder2.encode("data: [DONE]\n\n"));
+      } catch (err) {
+        errored = true;
+        try {
+          controller.error(err);
+        } catch {
+        }
+      } finally {
+        if (!errored) {
+          try {
+            controller.close();
+          } catch {
+          }
+        }
+        reader.releaseLock();
+      }
+    }
+  });
+}
+function translateEvent(state2, sse) {
+  const data2 = sse.data;
+  switch (data2.type) {
+    case "message_start": {
+      const msg = data2.message;
+      state2.messageId = msg?.id ?? "msg_stream";
+      state2.model = msg?.model ?? state2.model;
+      mergeAnthropicUsage(state2.usage, msg?.usage);
+      if (!state2.roleSent) {
+        state2.roleSent = true;
+        return makeChunk(state2, { role: "assistant" });
+      }
+      return null;
+    }
+    case "content_block_start": {
+      if (data2.type !== "content_block_start") return null;
+      const block = data2.content_block;
+      const blockIdx = data2.index;
+      if (block.type === "tool_use") {
+        const myIndex = state2.toolCallIndex++;
+        state2.blockIndexToToolCallIndex.set(blockIdx, myIndex);
+        return makeChunk(state2, {
+          tool_calls: [{
+            index: myIndex,
+            id: block.id,
+            type: "function",
+            function: { name: block.name, arguments: "" }
+          }]
+        });
+      }
+      return null;
+    }
+    case "content_block_delta": {
+      if (data2.type !== "content_block_delta") return null;
+      const delta = data2.delta;
+      const blockIdx = data2.index;
+      if (delta.type === "text_delta") {
+        return makeChunk(state2, { content: delta.text });
+      }
+      if (delta.type === "thinking_delta") {
+        return makeChunk(state2, { reasoning_content: delta.thinking });
+      }
+      if (delta.type === "signature_delta") {
+        return null;
+      }
+      if (delta.type === "input_json_delta") {
+        const myIndex = state2.blockIndexToToolCallIndex.get(blockIdx);
+        if (myIndex === void 0) return null;
+        return makeChunk(state2, {
+          tool_calls: [{
+            index: myIndex,
+            function: { arguments: delta.partial_json ?? "" }
+          }]
+        });
+      }
+      return null;
+    }
+    case "message_delta": {
+      mergeAnthropicUsage(state2.usage, data2.usage);
+      if (data2.delta?.stop_reason && !state2.finishReasonSent) {
+        const finishReason = mapStopReason(data2.delta.stop_reason);
+        state2.finishReasonSent = true;
+        return makeChunk(state2, {}, finishReason, anthropicUsageToOpenAI(state2.usage));
+      }
+      return null;
+    }
+    case "message_stop": {
+      if (state2.finishReasonSent) return null;
+      state2.finishReasonSent = true;
+      return makeChunk(state2, {}, "stop", anthropicUsageToOpenAI(state2.usage));
+    }
+    case "ping":
+    case "content_block_stop":
+      return null;
+    default:
+      return null;
+  }
+}
+function mapStopReason(stopReason) {
+  switch (stopReason) {
+    case "end_turn":
+    case "stop_sequence":
+      return "stop";
+    case "max_tokens":
+      return "length";
+    case "tool_use":
+      return "tool_calls";
+    default:
+      return "stop";
+  }
+}
+function openaiSseToAnthropicSse(upstream, model = "glm-4.6") {
+  const encoder2 = new TextEncoder();
+  const decoder = new TextDecoder();
+  let buffer2 = "";
+  let messageStarted = false;
+  let blockIndex = 0;
+  let activeBlock = null;
+  const toolBlocks = /* @__PURE__ */ new Map();
+  const openToolBlockIndices = [];
+  let outputTokens = 0;
+  let latestUsage;
+  let pendingStopReason = null;
+  let contentClosed = false;
+  let messageDeltaSent = false;
+  let messageStopped = false;
+  const messageId = `msg_${Date.now()}`;
+  return new ReadableStream({
+    async start(controller) {
+      const reader = upstream.getReader();
+      let errored = false;
+      const enqueueAnthropicEvent = (eventType, data2) => {
+        controller.enqueue(encoder2.encode(formatAnthropicSSE(eventType, data2)));
+      };
+      const closeActiveBlock = () => {
+        if (!activeBlock) return;
+        enqueueAnthropicEvent("content_block_stop", {
+          type: "content_block_stop",
+          index: activeBlock.index
+        });
+        activeBlock = null;
+      };
+      const closeToolBlocks = () => {
+        for (const idx of openToolBlockIndices) {
+          enqueueAnthropicEvent("content_block_stop", {
+            type: "content_block_stop",
+            index: idx
+          });
+        }
+        openToolBlockIndices.length = 0;
+      };
+      const ensureActiveBlock = (type2) => {
+        if (activeBlock?.type === type2) return activeBlock.index;
+        closeActiveBlock();
+        const index = blockIndex++;
+        activeBlock = { type: type2, index };
+        enqueueAnthropicEvent("content_block_start", {
+          type: "content_block_start",
+          index,
+          content_block: type2 === "text" ? { type: "text", text: "" } : { type: "thinking", thinking: "", signature: "" }
+        });
+        return index;
+      };
+      const handleToolCalls = (toolCalls) => {
+        closeActiveBlock();
+        for (const tc of toolCalls) {
+          const idx = tc.index ?? 0;
+          let state2 = toolBlocks.get(idx);
+          if (!state2) {
+            state2 = { index: blockIndex++, id: "", name: "", started: false, pendingArgs: "" };
+            toolBlocks.set(idx, state2);
+          }
+          if (tc.id) state2.id = tc.id;
+          if (tc.function?.name) state2.name = tc.function.name;
+          if (!state2.started && state2.id && state2.name) {
+            state2.started = true;
+            enqueueAnthropicEvent("content_block_start", {
+              type: "content_block_start",
+              index: state2.index,
+              content_block: { type: "tool_use", id: state2.id, name: state2.name, input: {} }
+            });
+            openToolBlockIndices.push(state2.index);
+            if (state2.pendingArgs.length > 0) {
+              enqueueAnthropicEvent("content_block_delta", {
+                type: "content_block_delta",
+                index: state2.index,
+                delta: { type: "input_json_delta", partial_json: state2.pendingArgs }
+              });
+              state2.pendingArgs = "";
+            }
+          }
+          const argsDelta = tc.function?.arguments;
+          if (argsDelta) {
+            if (state2.started) {
+              enqueueAnthropicEvent("content_block_delta", {
+                type: "content_block_delta",
+                index: state2.index,
+                delta: { type: "input_json_delta", partial_json: argsDelta }
+              });
+            } else {
+              state2.pendingArgs += argsDelta;
+            }
+          }
+        }
+      };
+      const startPendingToolBlocks = () => {
+        const lateStarts = [];
+        for (const [openaiIdx, state2] of toolBlocks) {
+          if (state2.started) continue;
+          if (!state2.pendingArgs && !state2.id && !state2.name) continue;
+          state2.started = true;
+          lateStarts.push({
+            index: state2.index,
+            id: state2.id || `tool_call_${openaiIdx}`,
+            name: state2.name || "unknown_tool",
+            args: state2.pendingArgs
+          });
+          state2.pendingArgs = "";
+          openToolBlockIndices.push(state2.index);
+        }
+        lateStarts.sort((a, b) => a.index - b.index);
+        for (const ls of lateStarts) {
+          enqueueAnthropicEvent("content_block_start", {
+            type: "content_block_start",
+            index: ls.index,
+            content_block: { type: "tool_use", id: ls.id, name: ls.name, input: {} }
+          });
+          if (ls.args.length > 0) {
+            enqueueAnthropicEvent("content_block_delta", {
+              type: "content_block_delta",
+              index: ls.index,
+              delta: { type: "input_json_delta", partial_json: ls.args }
+            });
+          }
+        }
+      };
+      const closeContent = () => {
+        if (contentClosed) return;
+        contentClosed = true;
+        closeActiveBlock();
+        startPendingToolBlocks();
+        closeToolBlocks();
+      };
+      const finalizeStream = () => {
+        closeContent();
+        if (!messageDeltaSent) {
+          messageDeltaSent = true;
+          const usage = openaiUsageToAnthropic(latestUsage);
+          if (!latestUsage) usage.output_tokens = outputTokens;
+          enqueueAnthropicEvent("message_delta", {
+            type: "message_delta",
+            delta: {
+              stop_reason: pendingStopReason ?? "end_turn",
+              stop_sequence: null
+            },
+            usage
+          });
+        }
+        if (!messageStopped) {
+          messageStopped = true;
+          enqueueAnthropicEvent("message_stop", { type: "message_stop" });
+        }
+      };
+      try {
+        while (true) {
+          const { done, value: value2 } = await reader.read();
+          if (done) break;
+          buffer2 += decoder.decode(value2, { stream: true });
+          const lines = buffer2.split("\n");
+          buffer2 = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const dataStr = line.slice(6).trim();
+            if (dataStr === "[DONE]") {
+              finalizeStream();
+              continue;
+            }
+            try {
+              const chunk = JSON.parse(dataStr);
+              const choice = chunk.choices?.[0];
+              if (chunk.usage) {
+                latestUsage = chunk.usage;
+                outputTokens = chunk.usage.completion_tokens ?? outputTokens;
+              }
+              if (!messageStarted) {
+                messageStarted = true;
+                const startUsage = openaiUsageToAnthropic(chunk.usage);
+                enqueueAnthropicEvent("message_start", {
+                  type: "message_start",
+                  message: {
+                    id: chunk.id ?? messageId,
+                    type: "message",
+                    role: "assistant",
+                    content: [],
+                    model: chunk.model || model,
+                    stop_reason: null,
+                    stop_sequence: null,
+                    usage: startUsage
+                  }
+                });
+              }
+              if (choice?.delta?.content) {
+                const index = ensureActiveBlock("text");
+                enqueueAnthropicEvent("content_block_delta", {
+                  type: "content_block_delta",
+                  index,
+                  delta: { type: "text_delta", text: choice.delta.content }
+                });
+              }
+              if (choice?.delta?.reasoning_content) {
+                const index = ensureActiveBlock("thinking");
+                enqueueAnthropicEvent("content_block_delta", {
+                  type: "content_block_delta",
+                  index,
+                  delta: { type: "thinking_delta", thinking: choice.delta.reasoning_content }
+                });
+              }
+              if (choice?.delta?.tool_calls?.length) {
+                handleToolCalls(choice.delta.tool_calls);
+              }
+              if (choice?.finish_reason) {
+                pendingStopReason = mapFinishReason(choice.finish_reason);
+                closeContent();
+              }
+            } catch {
+            }
+          }
+        }
+        finalizeStream();
+      } catch (err) {
+        errored = true;
+        try {
+          controller.error(err);
+        } catch {
+        }
+      } finally {
+        if (!errored) {
+          try {
+            controller.close();
+          } catch {
+          }
+        }
+        reader.releaseLock();
+      }
+    }
+  });
+}
+function formatAnthropicSSE(eventType, data2) {
+  return `event: ${eventType}
+data: ${JSON.stringify(data2)}
+
+`;
+}
+function mapFinishReason(finishReason) {
+  switch (finishReason) {
+    case "stop":
+      return "end_turn";
+    case "length":
+      return "max_tokens";
+    case "tool_calls":
+      return "tool_use";
+    default:
+      return "end_turn";
+  }
+}
+var init_sse_translator = __esm({
+  "src/translator/sse-translator.ts"() {
+    "use strict";
+    init_anthropic_to_openai();
+    init_openai_to_anthropic();
+  }
+});
+
+// src/proxy/dump.ts
+function maskHeaderValue(key, value2) {
+  if (!SENSITIVE_HEADERS.has(key.toLowerCase())) return value2;
+  if (value2.length <= 12) return "<redacted>";
+  return `${value2.slice(0, 8)}\u2026${value2.slice(-4)} (len=${value2.length})`;
+}
+function dumpHeaders(headers2) {
+  const out = {};
+  for (const [k, v] of headers2.entries()) {
+    out[k] = maskHeaderValue(k, v);
+  }
+  return out;
+}
+function dumpBody(body2) {
+  if (body2 === void 0 || body2 === null) return void 0;
+  if (body2.length === 0) return "";
+  try {
+    return JSON.parse(body2);
+  } catch {
+    return body2;
+  }
+}
+function dumpPhase(reqId, phase, data2) {
+  if (!DUMP_PATH) return;
+  try {
+    const line = {
+      ts: (/* @__PURE__ */ new Date()).toISOString(),
+      reqId,
+      phase,
+      ...data2
+    };
+    (0, import_node_fs2.appendFileSync)(DUMP_PATH, JSON.stringify(line) + "\n", "utf-8");
+  } catch {
+  }
+}
+function dumpEnabled() {
+  return !!DUMP_PATH;
+}
+var import_node_fs2, DUMP_PATH, SENSITIVE_HEADERS;
+var init_dump = __esm({
+  "src/proxy/dump.ts"() {
+    "use strict";
+    import_node_fs2 = require("node:fs");
+    DUMP_PATH = process.env.ZCODE_DUMP_UPSTREAM;
+    SENSITIVE_HEADERS = /* @__PURE__ */ new Set([
+      "authorization",
+      "x-api-key",
+      "proxy-authorization",
+      "proxy-api-key",
+      "x-zcode-captcha-verify-param",
+      "x-zcode-captcha-verify-region",
+      "cookie"
+    ]);
   }
 });
 
@@ -107054,6 +111463,7 @@ var captcha_happy_exports = {};
 __export(captcha_happy_exports, {
   createDom: () => createDom,
   destroyDom: () => destroyDom,
+  makeDualConsole: () => makeDualConsole,
   solveTraceless: () => solveTraceless
 });
 function ensureSyncFetchWorker() {
@@ -108669,8 +113079,47 @@ async function createDom(region, prefix2) {
   w2.AliyunCaptchaConfig = { region, prefix: prefix2 };
   return { window: w2, browserFrame };
 }
+function isGuestConsoleCall() {
+  const stack = new Error().stack ?? "";
+  return /alicdn\.com|aliyuncs\.com/i.test(stack);
+}
+function makeDualConsole(isGuest = isGuestConsoleCall) {
+  const host2 = console;
+  const dual = {};
+  for (const key of Object.keys(host2)) {
+    const fn = host2[key];
+    if (typeof fn !== "function") {
+      dual[key] = fn;
+      continue;
+    }
+    dual[key] = (...args) => {
+      if (isGuest()) return;
+      return fn.apply(host2, args);
+    };
+  }
+  return dual;
+}
 function installGlobalWindowAlias(g, w2) {
   _aliasRefCount += 1;
+  if (_aliasRefCount === 1 && !process.env.CAPTCHA_DEBUG) {
+    _dualConsole = makeDualConsole();
+    _savedConsoleDescriptor = Object.getOwnPropertyDescriptor(g, "console");
+    try {
+      Object.defineProperty(g, "console", {
+        get() {
+          return _dualConsole;
+        },
+        set(v) {
+          try {
+            w2.console = v;
+          } catch (_) {
+          }
+        },
+        configurable: true
+      });
+    } catch (_) {
+    }
+  }
   const props = new Set(Object.getOwnPropertyNames(w2));
   for (const name2 of EXTRA_WINDOW_PROPS) props.add(name2);
   for (const proto = Object.getPrototypeOf(w2); proto && proto !== Object.prototype; ) {
@@ -108739,6 +113188,14 @@ function removeGlobalWindowAlias(g, w2) {
       delete g[prop];
     } catch (_) {
     }
+  }
+  if (_savedConsoleDescriptor) {
+    try {
+      Object.defineProperty(g, "console", _savedConsoleDescriptor);
+    } catch (_) {
+    }
+    _savedConsoleDescriptor = void 0;
+    _dualConsole = null;
   }
 }
 function destroyDom(win) {
@@ -108955,7 +113412,7 @@ async function solveTraceless(opts) {
     }
   }
 }
-var import_undici, import_node_crypto2, import_node_fs3, import_node_os2, import_node_path, import_node_worker_threads, SYNC_FETCH_BUF_BYTES, SYNC_FETCH_HEADER_BYTES, _syncFetchWorker, SYNC_WORKER_SRC, CDN_CACHE_DIR, _memCdnCache, _cookieCache, COOKIE_CACHE_TTL_MS, _DEBUG, proxyUrl, _requestLog, _stallCounts, _bypassPeCacheOnce, fp, HTML, peVmCallRegex, GUEST_EVAL_PATCH, HOST_CRITICAL_GLOBALS, EXTRA_WINDOW_PROPS, _aliasRefCount, _reusePool, REUSE_MAX_SOLVES, REUSE_MAX_IDLE_MS;
+var import_undici, import_node_crypto2, import_node_fs3, import_node_os2, import_node_path, import_node_worker_threads, SYNC_FETCH_BUF_BYTES, SYNC_FETCH_HEADER_BYTES, _syncFetchWorker, SYNC_WORKER_SRC, CDN_CACHE_DIR, _memCdnCache, _cookieCache, COOKIE_CACHE_TTL_MS, _DEBUG, proxyUrl, _requestLog, _stallCounts, _bypassPeCacheOnce, fp, HTML, peVmCallRegex, GUEST_EVAL_PATCH, HOST_CRITICAL_GLOBALS, EXTRA_WINDOW_PROPS, _aliasRefCount, _savedConsoleDescriptor, _dualConsole, _reusePool, REUSE_MAX_SOLVES, REUSE_MAX_IDLE_MS;
 var init_captcha_happy = __esm({
   "src/proxy/captcha-happy.ts"() {
     "use strict";
@@ -109224,6 +113681,7 @@ var init_captcha_happy = __esm({
       "find"
     ];
     _aliasRefCount = 0;
+    _dualConsole = null;
     _reusePool = { window: null, browserFrame: null, solves: 0, lastUsedAt: 0 };
     REUSE_MAX_SOLVES = Number(process.env.CAPTCHA_REUSE_MAX_SOLVES || 25);
     REUSE_MAX_IDLE_MS = Number(process.env.CAPTCHA_REUSE_MAX_IDLE_MS || 12e4);
@@ -110040,4833 +114498,7 @@ var init_captcha = __esm({
   }
 });
 
-// src/auth/store.ts
-function getEncryptionKey() {
-  const hash = new Uint8Array(new ArrayBuffer(32));
-  const encoder2 = new TextEncoder();
-  const seed2 = process.env[ENV_SECRET] ?? `${(0, import_node_os4.homedir)()}-${process.platform}-${process.arch}`;
-  const seedBytes = encoder2.encode(seed2);
-  for (let i = 0; i < seedBytes.length; i++) {
-    hash[i % 32] ^= seedBytes[i];
-  }
-  return hash;
-}
-async function encrypt(plaintext) {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    getEncryptionKey(),
-    { name: "AES-GCM" },
-    false,
-    ["encrypt", "decrypt"]
-  );
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const encoder2 = new TextEncoder();
-  const encrypted = await crypto.subtle.encrypt(
-    { name: "AES-GCM", iv },
-    key,
-    encoder2.encode(plaintext)
-  );
-  const combined = new Uint8Array(iv.length + encrypted.byteLength);
-  combined.set(iv, 0);
-  combined.set(new Uint8Array(encrypted), iv.length);
-  return Buffer.from(combined).toString("base64");
-}
-async function decrypt(ciphertext) {
-  const key = await crypto.subtle.importKey(
-    "raw",
-    getEncryptionKey(),
-    { name: "AES-GCM" },
-    false,
-    ["encrypt", "decrypt"]
-  );
-  const combined = Buffer.from(ciphertext, "base64");
-  const iv = combined.slice(0, 12);
-  const data2 = combined.slice(12);
-  const decrypted = await crypto.subtle.decrypt(
-    { name: "AES-GCM", iv },
-    key,
-    data2
-  );
-  return new TextDecoder().decode(decrypted);
-}
-async function saveCredential(cred) {
-  (0, import_node_fs4.mkdirSync)((0, import_node_path2.dirname)(STORE_FILE), { recursive: true });
-  const json = JSON.stringify(cred);
-  const encrypted = await encrypt(json);
-  (0, import_node_fs4.writeFileSync)(STORE_FILE, JSON.stringify({ encrypted }), { mode: 384 });
-}
-async function loadCredential() {
-  if (!(0, import_node_fs4.existsSync)(STORE_FILE)) return null;
-  const raw = (0, import_node_fs4.readFileSync)(STORE_FILE, "utf-8");
-  const parsed = JSON.parse(raw);
-  if (!parsed.encrypted) return null;
-  try {
-    const json = await decrypt(parsed.encrypted);
-    return JSON.parse(json);
-  } catch (e) {
-    console.warn(`Ignoring corrupted or stale credentials at ${STORE_FILE}: ${e.message}`);
-    return null;
-  }
-}
-function clearCredential() {
-  if ((0, import_node_fs4.existsSync)(STORE_FILE)) {
-    (0, import_node_fs4.unlinkSync)(STORE_FILE);
-  }
-}
-function getStorePath() {
-  return STORE_FILE;
-}
-var import_node_fs4, import_node_path2, import_node_os4, STORE_DIR, STORE_FILE, ENV_SECRET;
-var init_store = __esm({
-  "src/auth/store.ts"() {
-    "use strict";
-    import_node_fs4 = require("node:fs");
-    import_node_path2 = require("node:path");
-    import_node_os4 = require("node:os");
-    STORE_DIR = (0, import_node_path2.join)((0, import_node_os4.homedir)(), ".zcode-proxy");
-    STORE_FILE = (0, import_node_path2.join)(STORE_DIR, "credentials.json");
-    ENV_SECRET = "ZCODE_PROXY_CREDENTIAL_SECRET";
-  }
-});
-
-// src/claim/types.ts
-function classifyClaimCode(code) {
-  switch (typeof code === "string" ? Number.parseInt(code, 10) : code) {
-    case 1001:
-      return "not_found";
-    case 1002:
-      return "unavailable";
-    case 1003:
-      return "already_claimed";
-    case 1004:
-      return "ineligible";
-    case 1005:
-      return "quota_exhausted";
-    case 3001:
-      return "invalid_request";
-    case 3007:
-      return "captcha";
-    case 401:
-      return "login_required";
-    default:
-      return "unknown";
-  }
-}
-var init_types = __esm({
-  "src/claim/types.ts"() {
-    "use strict";
-  }
-});
-
-// src/claim/client.ts
-function createClaimClient(opts) {
-  const origin = opts.origin.replace(/\/+$/, "");
-  const jwt = opts.jwt?.trim() || void 0;
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
-  const identityHeaders = opts.identity ? Object.fromEntries(
-    Object.entries(buildIdentityHeaders(opts.identity)).filter(([name2]) => name2 !== "X-ZCode-Agent")
-  ) : { "X-ZCode-App-Version": opts.appVersion, "X-Platform": opts.platform };
-  function parseEntitlement(c) {
-    const entitlementId = c.entitlement_id?.trim() ?? "";
-    if (!entitlementId) return null;
-    const e = {
-      entitlementId,
-      showName: c.show_name?.trim() ?? "",
-      meter: c.meter?.trim() ?? "",
-      unitType: c.unit_type?.trim() ?? "",
-      capabilities: Array.isArray(c.capabilities) ? c.capabilities : [],
-      grantUnits: Number.isFinite(c.grant_units) ? c.grant_units : 0,
-      period: c.period?.trim() ?? "",
-      priority: Number.isFinite(c.priority) ? c.priority : 0
-    };
-    if (Number.isFinite(c.effective_at)) e.effectiveAt = c.effective_at;
-    return e;
-  }
-  function parsePlan(p) {
-    const planId = p.plan_id?.trim() ?? "";
-    if (!planId) return null;
-    const plan = {
-      planId,
-      name: p.name?.trim() || planId,
-      description: p.description?.trim() ?? "",
-      priority: Number.isFinite(p.priority) ? p.priority : 0,
-      entitlements: (p.entitlements ?? []).flatMap((c) => {
-        const e = parseEntitlement(c);
-        return e ? [e] : [];
-      })
-    };
-    if (Number.isFinite(p.starts_at)) plan.startsAt = p.starts_at;
-    if (Number.isFinite(p.ends_at)) plan.endsAt = p.ends_at;
-    return plan;
-  }
-  async function request(method2, path2, init) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    const onExternalAbort = () => controller.abort();
-    if (init.signal) {
-      if (init.signal.aborted) controller.abort();
-      else init.signal.addEventListener("abort", onExternalAbort, { once: true });
-    }
-    let resp;
-    try {
-      resp = await fetchImpl(`${origin}${path2}`, {
-        method: method2,
-        headers: init.headers,
-        body: init.body === void 0 ? void 0 : JSON.stringify(init.body),
-        signal: controller.signal
-      });
-      const text = await resp.text();
-      let json;
-      try {
-        const parsed = JSON.parse(text);
-        if (parsed && typeof parsed === "object") json = parsed;
-      } catch {
-      }
-      return { status: resp.status, json, text };
-    } finally {
-      clearTimeout(timer);
-      init.signal?.removeEventListener("abort", onExternalAbort);
-    }
-  }
-  function unwrapError(json, status, text) {
-    const code = json?.code !== void 0 ? json.code : status >= 400 ? status : -1;
-    const rawMsg = json?.msg ?? json?.message;
-    const message = typeof rawMsg === "string" && rawMsg.trim() ? rawMsg.trim() : text.length > 0 && text.length < 200 ? text : `HTTP ${status}`;
-    return { code, message };
-  }
-  return {
-    async getPreviews(signal2) {
-      const url2 = `/api/v1/zcode-plan/billing/preview?app_version=${encodeURIComponent(opts.appVersion)}&platform=${encodeURIComponent(opts.platform)}`;
-      const headers2 = { ...identityHeaders };
-      if (jwt) headers2.authorization = `Bearer ${jwt}`;
-      const { status, json, text } = await request("GET", url2, { headers: headers2, signal: signal2 });
-      if (status < 200 || status >= 300 || json?.code !== void 0 && json.code !== 0 || json?.data === void 0) {
-        const { code, message } = unwrapError(json, status, text);
-        throw new ClaimPreviewError(`claim preview failed (${code}): ${message}`, status, code);
-      }
-      const data2 = json.data;
-      return (data2.plans ?? []).flatMap((p) => {
-        const plan = parsePlan(p);
-        return plan ? [plan] : [];
-      });
-    },
-    async claim(planId, captcha, signal2) {
-      if (!jwt) return { ok: false, planId, failureKind: "login_required", code: 401, message: "manual_claim_login_required" };
-      const headers2 = {
-        ...identityHeaders,
-        authorization: `Bearer ${jwt}`,
-        "content-type": "application/json",
-        "X-Aliyun-Captcha-Verify-Param": captcha.verifyParam
-      };
-      if (captcha.region) headers2["X-Aliyun-Captcha-Verify-Region"] = captcha.region;
-      const { status, json, text } = await request("POST", "/api/v1/zcode-plan/billing/claim", { body: { plan_id: planId }, headers: headers2, signal: signal2 });
-      const data2 = json?.data;
-      const bizCode = json?.code !== void 0 ? json.code : void 0;
-      const plan = data2?.plan;
-      if (status >= 200 && status < 300 && bizCode === 0 && plan) {
-        const out = { ok: true, planId };
-        if (Number.isFinite(plan.starts_at)) out.startsAt = plan.starts_at;
-        if (Number.isFinite(plan.ends_at)) out.endsAt = plan.ends_at;
-        return out;
-      }
-      const { code, message } = unwrapError(json, status, text);
-      const failureEndsAt = Number.isFinite(plan?.ends_at) ? plan?.ends_at : void 0;
-      const httpDerived = status >= 400 && bizCode === void 0;
-      return {
-        ok: false,
-        planId,
-        failureKind: httpDerived ? status === 401 ? "login_required" : "http_error" : classifyClaimCode(code),
-        code,
-        message,
-        ...failureEndsAt !== void 0 ? { failureEndsAt } : {}
-      };
-    }
-  };
-}
-var DEFAULT_TIMEOUT_MS, ClaimPreviewError;
-var init_client = __esm({
-  "src/claim/client.ts"() {
-    "use strict";
-    init_types();
-    init_identity();
-    DEFAULT_TIMEOUT_MS = 15e3;
-    ClaimPreviewError = class extends Error {
-      status;
-      code;
-      constructor(message, status, code) {
-        super(message);
-        this.name = "ClaimPreviewError";
-        this.status = status;
-        this.code = code;
-      }
-    };
-  }
-});
-
-// src/claim/scheduler.ts
-var ClaimScheduler;
-var init_scheduler = __esm({
-  "src/claim/scheduler.ts"() {
-    "use strict";
-    init_client();
-    ClaimScheduler = class {
-      constructor(deps) {
-        this.deps = deps;
-        this.now = deps.now ?? Date.now;
-        this.log = deps.log ?? (() => {
-        });
-      }
-      deps;
-      stopped = false;
-      holdUntil = 0;
-      timer = null;
-      now;
-      log;
-      isStopped() {
-        return this.stopped;
-      }
-      start() {
-        if (this.stopped) return;
-        this.scheduleNext(0);
-      }
-      stop() {
-        this.stopped = true;
-        if (this.timer !== null) {
-          clearTimeout(this.timer);
-          this.timer = null;
-        }
-      }
-      /** One poll→claim cycle. Exposed for tests; `start()` drives it on a timer. */
-      async tick() {
-        if (this.stopped) return { action: "stopped" };
-        const nowMs = this.now();
-        if (nowMs < this.holdUntil) return { action: "skipped_hold" };
-        let jwt;
-        try {
-          jwt = await this.deps.getJwt();
-        } catch (err) {
-          return this.errorBackoff(`credential resolution failed: ${err.message}`);
-        }
-        if (!jwt) {
-          return this.errorBackoff("no JWT available (oauth login pending)");
-        }
-        const client = this.deps.createClient(jwt);
-        let plans;
-        try {
-          plans = await client.getPreviews();
-        } catch (err) {
-          if (err instanceof ClaimPreviewError && err.status === 404) {
-            this.holdUntil = nowMs + this.deps.config.pollIntervalMs;
-            return { action: "idle" };
-          }
-          return this.errorBackoff(`preview failed: ${err.message}`);
-        }
-        if (plans.length === 0) {
-          this.holdUntil = nowMs + this.deps.config.pollIntervalMs;
-          return { action: "idle" };
-        }
-        const target2 = this.pickPlan(plans);
-        if (!target2) {
-          this.holdUntil = nowMs + this.deps.config.pollIntervalMs;
-          return { action: "idle" };
-        }
-        let captcha;
-        try {
-          captcha = await this.deps.getCaptcha();
-        } catch (err) {
-          return this.errorBackoff(`captcha token failed: ${err.message}`);
-        }
-        let outcome;
-        try {
-          outcome = await client.claim(target2.planId, captcha);
-        } catch (err) {
-          return this.errorBackoff(`claim request failed: ${err.message}`);
-        }
-        if (outcome.ok) {
-          const endsAtMs = outcome.endsAt !== void 0 ? outcome.endsAt * 1e3 : void 0;
-          this.holdUntil = endsAtMs ?? nowMs + this.deps.config.pollIntervalMs;
-          this.log(`claim: claimed plan ${target2.planId}${outcome.startsAt !== void 0 ? ` (activates ${new Date(outcome.startsAt * 1e3).toISOString()})` : ""}`);
-          return { action: "claimed", planId: target2.planId, startsAt: outcome.startsAt, endsAt: outcome.endsAt };
-        }
-        const holdMs = this.holdForFailure(outcome.failureKind, outcome.failureEndsAt, nowMs);
-        this.holdUntil = nowMs + holdMs;
-        this.log(`claim: ${outcome.failureKind} (${outcome.code}) \u2014 ${outcome.message}; retry in ${Math.round(holdMs / 1e3)}s`);
-        if (outcome.failureKind === "login_required") {
-          this.stop();
-        }
-        return { action: "failed", outcome, holdMs };
-      }
-      pickPlan(plans) {
-        const wanted = this.deps.config.planId?.trim();
-        if (wanted) return plans.find((p) => p.planId === wanted) ?? null;
-        const sorted = [...plans].sort((a, b) => b.priority - a.priority);
-        return sorted[0] ?? null;
-      }
-      holdForFailure(kind2, failureEndsAtSec, nowMs) {
-        if ((kind2 === "already_claimed" || kind2 === "quota_exhausted") && Number.isFinite(failureEndsAtSec)) {
-          const untilMs = failureEndsAtSec * 1e3;
-          if (untilMs > nowMs) return Math.min(untilMs - nowMs, 24 * 60 * 60 * 1e3);
-        }
-        return this.deps.config.cooldownMs;
-      }
-      errorBackoff(message) {
-        const holdMs = this.deps.config.cooldownMs;
-        this.holdUntil = this.now() + holdMs;
-        this.log(`claim: ${message}; retry in ${Math.round(holdMs / 1e3)}s`);
-        return { action: "error", message, holdMs };
-      }
-      scheduleNext(delayMs) {
-        if (this.stopped) return;
-        this.timer = setTimeout(() => {
-          this.timer = null;
-          void this.tick().finally(() => this.scheduleNext(this.nextDelay()));
-        }, delayMs);
-      }
-      nextDelay() {
-        const remaining = this.holdUntil - this.now();
-        return remaining > 0 ? remaining : this.deps.config.pollIntervalMs;
-      }
-    };
-  }
-});
-
-// src/claim/runtime.ts
-var runtime_exports = {};
-__export(runtime_exports, {
-  claimPlatform: () => claimPlatform,
-  runClaimCli: () => runClaimCli,
-  startAutoClaim: () => startAutoClaim
-});
-function claimPlatform() {
-  return `${process.platform}-${process.arch}`;
-}
-function startAutoClaim(config, auth) {
-  const scheduler = new ClaimScheduler({
-    // AuthManager first (fresh), then the encrypted store — on Android the
-    // login can land in the store after boot while auth hasn't been reloaded.
-    getJwt: async () => {
-      try {
-        const cred = await auth.getCredential();
-        if (cred.jwt) return cred.jwt;
-      } catch {
-      }
-      const stored = await loadCredential().catch(() => null);
-      return stored?.jwt;
-    },
-    createClient: (jwt) => createClaimClient({
-      origin: config.claim.origin,
-      jwt,
-      appVersion: config.identity.appVersion,
-      platform: claimPlatform(),
-      identity: config.identity
-    }),
-    getCaptcha: async () => {
-      const { verifyParam, region } = await getCaptchaToken(config.identity.appVersion);
-      return { verifyParam, region: region || void 0 };
-    },
-    config: {
-      planId: config.claim.planId || void 0,
-      pollIntervalMs: config.claim.pollIntervalMs,
-      cooldownMs: config.claim.cooldownMs
-    },
-    log: (message) => console.log(`[claim] ${message}`)
-  });
-  scheduler.start();
-  return scheduler;
-}
-async function runClaimCli(config, mode2) {
-  const cred = await loadCredential();
-  const jwt = cred?.jwt;
-  if (!jwt) {
-    console.error("Claim requires a logged-in oauth credential (no JWT stored). Run: zcode-proxy auth login <zai|bigmodel>");
-    process.exit(1);
-  }
-  const client = createClaimClient({
-    origin: config.claim.origin,
-    jwt,
-    appVersion: config.identity.appVersion,
-    platform: claimPlatform(),
-    identity: config.identity
-  });
-  let plans;
-  try {
-    plans = await client.getPreviews();
-  } catch (err) {
-    if (err instanceof ClaimPreviewError && err.status === 404) {
-      console.log("No claimable plans: the campaign endpoint is not deployed yet (404).");
-      console.log("Weekend campaigns typically go live shortly before the window \u2014 keep the proxy");
-      console.log("serving with claim.enabled, or re-run this command later.");
-      return;
-    }
-    throw err;
-  }
-  if (plans.length === 0) {
-    console.log("No claimable plans right now.");
-    return;
-  }
-  printPlans(plans);
-  if (mode2 === "list") return;
-  const wanted = config.claim.planId.trim();
-  const target2 = wanted ? plans.find((p) => p.planId === wanted) : [...plans].sort((a, b) => b.priority - a.priority)[0];
-  if (!target2) {
-    console.error(`Configured claim.planId "${wanted}" not in the preview list.`);
-    process.exit(1);
-  }
-  if (target2.planId !== plans[0].planId) console.log(`Claiming configured plan: ${target2.planId}`);
-  const captcha = await getCaptchaToken(config.identity.appVersion);
-  const outcome = await client.claim(target2.planId, { verifyParam: captcha.verifyParam, region: captcha.region || void 0 });
-  printOutcome(outcome);
-  if (!outcome.ok) process.exit(1);
-}
-function printPlans(plans) {
-  console.log(`Claimable plans (${plans.length}):`);
-  for (const p of plans) {
-    const window2 = [fmtTime(p.startsAt), fmtTime(p.endsAt)].filter(Boolean).join(" \u2192 ");
-    console.log(`  - ${p.planId}  "${p.name}"  priority=${p.priority}${window2 ? `  ${window2}` : ""}`);
-    for (const e of p.entitlements) {
-      const quota = e.grantUnits > 0 ? ` ${e.grantUnits} ${e.unitType}` : "";
-      const activate = e.effectiveAt !== void 0 ? ` (activates ${new Date(e.effectiveAt * 1e3).toISOString()})` : "";
-      console.log(`      \xB7 ${e.showName || e.entitlementId}${quota}${activate}`);
-    }
-  }
-}
-function printOutcome(outcome) {
-  if (outcome.ok) {
-    console.log(`
-Claimed: ${outcome.planId}`);
-    if (outcome.startsAt !== void 0) console.log(`  activates: ${new Date(outcome.startsAt * 1e3).toISOString()}`);
-    if (outcome.endsAt !== void 0) console.log(`  expires:   ${new Date(outcome.endsAt * 1e3).toISOString()}`);
-    if (outcome.startsAt === void 0 && outcome.endsAt === void 0) console.log("  active immediately");
-    return;
-  }
-  const label2 = FAILURE_LABELS[outcome.failureKind] ?? FAILURE_LABELS.unknown;
-  console.error(`
-Claim failed: ${label2} (code ${String(outcome.code)}) \u2014 ${outcome.message}`);
-  if (outcome.failureEndsAt !== void 0) {
-    console.error(`  retry window opens: ${new Date(outcome.failureEndsAt * 1e3).toISOString()}`);
-  }
-}
-function fmtTime(sec) {
-  return sec === void 0 ? "" : new Date(sec * 1e3).toISOString();
-}
-var FAILURE_LABELS;
-var init_runtime = __esm({
-  "src/claim/runtime.ts"() {
-    "use strict";
-    init_client();
-    init_scheduler();
-    init_captcha();
-    init_store();
-    FAILURE_LABELS = {
-      not_found: "plan does not exist",
-      unavailable: "campaign ended or not claimable yet",
-      already_claimed: "already claimed on this account",
-      ineligible: "account or client version not eligible (needs appVersion >= campaign minimum)",
-      quota_exhausted: "daily claim quota exhausted",
-      invalid_request: "invalid request",
-      captcha: "captcha verification failed",
-      login_required: "not logged in",
-      http_error: "HTTP error",
-      unknown: "unknown failure"
-    };
-  }
-});
-
-// src/index.ts
-var index_exports = {};
-__export(index_exports, {
-  applyAndroidIdentityDefaults: () => applyAndroidIdentityDefaults,
-  ensureDeviceMidInConfig: () => ensureDeviceMidInConfig,
-  main: () => main,
-  parseServeArgs: () => parseServeArgs
-});
-module.exports = __toCommonJS(index_exports);
-
-// src/config/loader.ts
-var import_node_fs = require("node:fs");
-var import_yaml = __toESM(require_dist(), 1);
-var ENV = {
-  PORT: "ZCODE_PROXY_PORT",
-  PROXY_API_KEY: "ZCODE_PROXY_API_KEY",
-  PROVIDER: "ZCODE_PROVIDER",
-  APP_VERSION: "ZCODE_APP_VERSION",
-  SOURCE_TITLE: "ZCODE_SOURCE_TITLE",
-  REFERER_ORIGIN: "ZCODE_REFERER_ORIGIN",
-  ASYNC_ENABLED: "ZCODE_ASYNC_ENABLED",
-  ASYNC_ORIGIN: "ZCODE_ASYNC_ORIGIN",
-  ASYNC_MAX_RETRIES: "ZCODE_ASYNC_MAX_RETRIES",
-  ASYNC_MAX_WAIT_MS: "ZCODE_ASYNC_MAX_WAIT_MS",
-  CLAIM_ENABLED: "ZCODE_CLAIM_ENABLED",
-  CLAIM_AUTO: "ZCODE_CLAIM_AUTO",
-  CLAIM_ORIGIN: "ZCODE_CLAIM_ORIGIN",
-  CLAIM_POLL_INTERVAL_MS: "ZCODE_CLAIM_POLL_INTERVAL_MS",
-  ENDPOINT_ROUTING_ENABLED: "ZCODE_ENDPOINT_ROUTING",
-  CLIENT_SIGNING_ENABLED: "ZCODE_CLIENT_SIGNING"
-};
-var DEFAULTS = {
-  PORT: 8080,
-  HOST: "0.0.0.0",
-  PROVIDER: "zai",
-  PLAN: "coding-plan",
-  DEFAULT_MODEL: "glm-4.6",
-  LOG_LEVEL: "info",
-  ZAI_ANTHROPIC_BASE: "https://api.z.ai/api/anthropic",
-  ZAI_OPENAI_BASE: "https://api.z.ai/api/coding/paas/v4",
-  BIGMODEL_ANTHROPIC_BASE: "https://open.bigmodel.cn/api/anthropic",
-  BIGMODEL_OPENAI_BASE: "https://open.bigmodel.cn/api/coding/paas/v4",
-  APP_VERSION: "3.10.0",
-  SOURCE_TITLE: "cli",
-  REFERER_ORIGIN: "https://zcode.z.ai",
-  CLIENT_IDENTITY_MODE: "observe",
-  CLIENT_IDENTITY_TTL_SECONDS: 900,
-  CLIENT_IDENTITY_MAX_SESSIONS: 1024,
-  RESPONSES_ENABLED: true,
-  RESPONSES_STORE_MAX_ENTRIES: 1e3,
-  RESPONSES_STORE_TTL_MS: 24 * 60 * 60 * 1e3,
-  MCP_ENABLED: true,
-  MCP_WEB_SEARCH: true,
-  MCP_WEB_READER: false,
-  MCP_ZREAD: false,
-  ASYNC_ENABLED: false,
-  ASYNC_ORIGIN: "https://zcode.z.ai",
-  ASYNC_POLL_INTERVAL_MS: 5e3,
-  ASYNC_KEEPALIVE_INTERVAL_MS: 3e3,
-  ASYNC_MAX_WAIT_MS: 0,
-  ASYNC_MAX_RETRIES: 3,
-  ASYNC_SETTLE_TIMEOUT_MS: 8e3,
-  ASYNC_CONTROL_TIMEOUT_MS: 15e3,
-  ASYNC_DEFAULT_MODEL: "",
-  CLAIM_ENABLED: false,
-  CLAIM_AUTO: true,
-  CLAIM_ORIGIN: "https://zcode.z.ai",
-  CLAIM_POLL_INTERVAL_MS: 3e5,
-  CLAIM_COOLDOWN_MS: 6e5,
-  CLAIM_PLAN_ID: "",
-  ENDPOINT_ROUTING_ENABLED: true,
-  ENDPOINT_ROUTING_ORIGIN: "https://zcode.z.ai",
-  CLIENT_SIGNING_ENABLED: true,
-  CLIENT_SIGNING_ORIGIN: "https://zcode.z.ai"
-};
-var ASCII_PRINTABLE = /^[\x20-\x7e]+$/;
-function loadConfig(path2) {
-  if (!(0, import_node_fs.existsSync)(path2)) {
-    throw new Error(`Config file not found: ${path2}`);
-  }
-  const raw = (0, import_node_fs.readFileSync)(path2, "utf-8");
-  const parsed = (0, import_yaml.parse)(raw) ?? {};
-  const port = resolvePort(process.env[ENV.PORT] ?? parsed?.server?.port);
-  const host2 = typeof parsed?.server?.host === "string" ? parsed.server.host : DEFAULTS.HOST;
-  const proxyApiKey = process.env[ENV.PROXY_API_KEY] ?? parsed?.auth?.proxyApiKey;
-  const oauthCredentialsPath = parsed?.auth?.oauthCredentialsPath;
-  const provider = resolveProvider(process.env[ENV.PROVIDER] ?? parsed?.provider);
-  const plan = resolvePlan(parsed?.plan);
-  const zai = {
-    anthropicBase: parsed?.providers?.zai?.anthropicBase ?? DEFAULTS.ZAI_ANTHROPIC_BASE,
-    openaiBase: parsed?.providers?.zai?.openaiBase ?? DEFAULTS.ZAI_OPENAI_BASE
-  };
-  const bigmodel = {
-    anthropicBase: parsed?.providers?.bigmodel?.anthropicBase ?? DEFAULTS.BIGMODEL_ANTHROPIC_BASE,
-    openaiBase: parsed?.providers?.bigmodel?.openaiBase ?? DEFAULTS.BIGMODEL_OPENAI_BASE
-  };
-  const defaultModel = typeof parsed?.defaultModel === "string" ? parsed.defaultModel : DEFAULTS.DEFAULT_MODEL;
-  const models = Array.isArray(parsed?.models) ? parsed.models : [defaultModel];
-  const logLevel = resolveLogLevel(parsed?.logging?.level);
-  const identity = resolveIdentity({
-    appVersionEnv: process.env[ENV.APP_VERSION],
-    appVersionYaml: parsed?.identity?.appVersion,
-    sourceTitleEnv: process.env[ENV.SOURCE_TITLE],
-    sourceTitleYaml: parsed?.identity?.sourceTitle,
-    refererEnv: process.env[ENV.REFERER_ORIGIN],
-    refererYaml: parsed?.identity?.refererOrigin,
-    deviceMidYaml: parsed?.identity?.deviceMid
-  });
-  const clientIdentity = resolveClientIdentity(parsed?.clientIdentity);
-  const responses = resolveResponsesConfig(parsed?.responses);
-  const mcp = resolveMcpConfig(parsed?.mcp);
-  const asyncCfg = resolveAsyncConfig(parsed?.async);
-  const claimCfg = resolveClaimConfig(parsed?.claim);
-  const endpointRouting = resolveEndpointRoutingConfig(parsed?.endpointRouting);
-  const clientSigning = resolveClientSigningConfig(parsed?.clientSigning);
-  const config = {
-    server: { port, host: host2 },
-    auth: { proxyApiKey, oauthCredentialsPath },
-    provider,
-    plan,
-    providers: { zai, bigmodel },
-    defaultModel,
-    models,
-    identity,
-    clientIdentity,
-    responses,
-    endpointRouting,
-    clientSigning,
-    mcp,
-    async: asyncCfg,
-    claim: claimCfg,
-    logging: { level: logLevel }
-  };
-  validate(config);
-  return config;
-}
-function resolveClientIdentity(raw) {
-  const obj = raw && typeof raw === "object" ? raw : {};
-  const mode2 = resolveClientIdentityMode(obj.mode);
-  const ttlSeconds = resolvePositiveInt(obj.ttlSeconds, DEFAULTS.CLIENT_IDENTITY_TTL_SECONDS, "clientIdentity.ttlSeconds");
-  const maxSessions = resolvePositiveInt(obj.maxSessions, DEFAULTS.CLIENT_IDENTITY_MAX_SESSIONS, "clientIdentity.maxSessions");
-  return { mode: mode2, ttlSeconds, maxSessions };
-}
-function resolveClientIdentityMode(raw) {
-  if (raw === void 0 || raw === null) return DEFAULTS.CLIENT_IDENTITY_MODE;
-  if (raw === "off" || raw === "observe" || raw === "enforce") return raw;
-  throw new Error(`Invalid clientIdentity.mode "${String(raw)}": must be "off", "observe", or "enforce"`);
-}
-function resolveResponsesConfig(raw) {
-  const obj = raw && typeof raw === "object" ? raw : {};
-  const storeRaw = obj.store && typeof obj.store === "object" ? obj.store : {};
-  return {
-    enabled: resolveBool(obj.enabled, DEFAULTS.RESPONSES_ENABLED),
-    storeMaxEntries: resolvePositiveInt(storeRaw.maxEntries, DEFAULTS.RESPONSES_STORE_MAX_ENTRIES, "responses.store.maxEntries"),
-    storeTtlMs: resolvePositiveInt(storeRaw.ttlMs, DEFAULTS.RESPONSES_STORE_TTL_MS, "responses.store.ttlMs")
-  };
-}
-function resolveMcpConfig(raw) {
-  const obj = raw && typeof raw === "object" ? raw : {};
-  return {
-    enabled: resolveBool(obj.enabled, DEFAULTS.MCP_ENABLED),
-    webSearch: resolveBool(obj.webSearch ?? obj.web_search, DEFAULTS.MCP_WEB_SEARCH),
-    webReader: resolveBool(obj.webReader ?? obj.web_reader, DEFAULTS.MCP_WEB_READER),
-    zread: resolveBool(obj.zread, DEFAULTS.MCP_ZREAD)
-  };
-}
-function resolveAsyncConfig(raw) {
-  const obj = raw && typeof raw === "object" ? raw : {};
-  const enabledEnv = process.env[ENV.ASYNC_ENABLED];
-  const originEnv = process.env[ENV.ASYNC_ORIGIN];
-  const maxRetriesEnv = process.env[ENV.ASYNC_MAX_RETRIES];
-  const maxWaitMsEnv = process.env[ENV.ASYNC_MAX_WAIT_MS];
-  const origin = (originEnv ?? (typeof obj.origin === "string" ? obj.origin : DEFAULTS.ASYNC_ORIGIN)).trim() || DEFAULTS.ASYNC_ORIGIN;
-  validateOrigin(origin, "async.origin");
-  return {
-    enabled: enabledEnv !== void 0 ? resolveBool(enabledEnv, DEFAULTS.ASYNC_ENABLED) : resolveBool(obj.enabled, DEFAULTS.ASYNC_ENABLED),
-    origin,
-    pollIntervalMs: resolvePositiveInt(obj.pollIntervalMs ?? obj.poll_interval_ms, DEFAULTS.ASYNC_POLL_INTERVAL_MS, "async.pollIntervalMs"),
-    keepAliveIntervalMs: resolvePositiveInt(obj.keepAliveIntervalMs ?? obj.keepalive_interval_ms, DEFAULTS.ASYNC_KEEPALIVE_INTERVAL_MS, "async.keepAliveIntervalMs"),
-    maxWaitMs: resolveNonNegativeInt(maxWaitMsEnv ?? obj.maxWaitMs ?? obj.max_wait_ms, DEFAULTS.ASYNC_MAX_WAIT_MS, "async.maxWaitMs"),
-    maxRetries: resolveNonNegativeInt(maxRetriesEnv ?? obj.maxRetries ?? obj.max_retries, DEFAULTS.ASYNC_MAX_RETRIES, "async.maxRetries"),
-    settleTimeoutMs: resolvePositiveInt(obj.settleTimeoutMs ?? obj.settle_timeout_ms, DEFAULTS.ASYNC_SETTLE_TIMEOUT_MS, "async.settleTimeoutMs"),
-    controlTimeoutMs: resolvePositiveInt(obj.controlTimeoutMs ?? obj.control_timeout_ms, DEFAULTS.ASYNC_CONTROL_TIMEOUT_MS, "async.controlTimeoutMs"),
-    defaultModel: typeof obj.defaultModel === "string" ? obj.defaultModel : DEFAULTS.ASYNC_DEFAULT_MODEL
-  };
-}
-function validateOrigin(origin, name2) {
-  let parsed;
-  try {
-    parsed = new URL(origin);
-  } catch {
-    throw new Error(`${name2} "${origin}" is not a valid URL`);
-  }
-  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
-    throw new Error(`${name2} must use http: or https: scheme (got ${parsed.protocol})`);
-  }
-  const hostname = parsed.hostname.replace(/^\[|\]$/g, "");
-  const isLoopback2 = hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1";
-  if (parsed.protocol === "http:" && !isLoopback2) {
-    throw new Error(`${name2} http:// is only allowed for loopback hosts (got ${hostname}). Use https:// for remote origins.`);
-  }
-  if (parsed.username || parsed.password) {
-    throw new Error(`${name2} must not contain userinfo`);
-  }
-  if (parsed.hash) {
-    throw new Error(`${name2} must not contain a fragment`);
-  }
-  if (parsed.pathname !== "/" && parsed.pathname !== "") {
-    throw new Error(`${name2} must not contain a path (got "${parsed.pathname}"); clients append their own paths`);
-  }
-  if (parsed.search) {
-    throw new Error(`${name2} must not contain a query string`);
-  }
-}
-function resolveEndpointRoutingConfig(raw) {
-  const obj = raw && typeof raw === "object" ? raw : {};
-  const enabledEnv = process.env[ENV.ENDPOINT_ROUTING_ENABLED];
-  const origin = (typeof obj.origin === "string" ? obj.origin : DEFAULTS.ENDPOINT_ROUTING_ORIGIN).trim() || DEFAULTS.ENDPOINT_ROUTING_ORIGIN;
-  validateOrigin(origin, "endpointRouting.origin");
-  return {
-    enabled: enabledEnv !== void 0 ? resolveBool(enabledEnv, DEFAULTS.ENDPOINT_ROUTING_ENABLED) : resolveBool(obj.enabled, DEFAULTS.ENDPOINT_ROUTING_ENABLED),
-    origin
-  };
-}
-function resolveClientSigningConfig(raw) {
-  const obj = raw && typeof raw === "object" ? raw : {};
-  const enabledEnv = process.env[ENV.CLIENT_SIGNING_ENABLED];
-  const origin = (typeof obj.origin === "string" ? obj.origin : DEFAULTS.CLIENT_SIGNING_ORIGIN).trim() || DEFAULTS.CLIENT_SIGNING_ORIGIN;
-  validateOrigin(origin, "clientSigning.origin");
-  return {
-    enabled: enabledEnv !== void 0 ? resolveBool(enabledEnv, DEFAULTS.CLIENT_SIGNING_ENABLED) : resolveBool(obj.enabled, DEFAULTS.CLIENT_SIGNING_ENABLED),
-    origin
-  };
-}
-function resolveBool(raw, fallback) {
-  if (typeof raw === "boolean") return raw;
-  if (typeof raw === "string") return raw === "true" || raw === "1";
-  return fallback;
-}
-function resolvePositiveInt(raw, fallback, name2) {
-  if (raw === void 0 || raw === null) return fallback;
-  const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
-  if (!Number.isInteger(n) || n < 1) {
-    throw new Error(`${name2} must be a positive integer`);
-  }
-  return n;
-}
-function resolveNonNegativeInt(raw, fallback, name2) {
-  if (raw === void 0 || raw === null) return fallback;
-  const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
-  if (!Number.isInteger(n) || n < 0) {
-    throw new Error(`${name2} must be a non-negative integer`);
-  }
-  return n;
-}
-function resolvePort(raw) {
-  if (raw === void 0 || raw === null) return DEFAULTS.PORT;
-  const n = typeof raw === "number" ? raw : parseInt(String(raw), 10);
-  if (!Number.isFinite(n)) {
-    throw new Error("server.port must be a valid number");
-  }
-  return n;
-}
-function resolveProvider(raw) {
-  const v = typeof raw === "string" ? raw : DEFAULTS.PROVIDER;
-  if (v !== "zai" && v !== "bigmodel") {
-    throw new Error(`Invalid provider "${v}": must be "zai" or "bigmodel"`);
-  }
-  return v;
-}
-function resolvePlan(raw) {
-  if (raw === "start-plan") return "start-plan";
-  return DEFAULTS.PLAN;
-}
-function resolveLogLevel(raw) {
-  const levels = ["debug", "info", "warn", "error"];
-  if (typeof raw === "string" && levels.includes(raw)) {
-    return raw;
-  }
-  return DEFAULTS.LOG_LEVEL;
-}
-function resolveIdentity(inp) {
-  const rawVersion = (inp.appVersionEnv ?? inp.appVersionYaml ?? DEFAULTS.APP_VERSION).trim();
-  const appVersion = ASCII_PRINTABLE.test(rawVersion) ? rawVersion : DEFAULTS.APP_VERSION;
-  const sourceTitle = (inp.sourceTitleEnv ?? inp.sourceTitleYaml ?? DEFAULTS.SOURCE_TITLE).trim() || DEFAULTS.SOURCE_TITLE;
-  const refererOrigin = (inp.refererEnv ?? inp.refererYaml ?? DEFAULTS.REFERER_ORIGIN).trim() || DEFAULTS.REFERER_ORIGIN;
-  const deviceMid = typeof inp.deviceMidYaml === "string" ? inp.deviceMidYaml.trim() : "";
-  return { appVersion, sourceTitle, refererOrigin, ...deviceMid ? { deviceMid } : {} };
-}
-function resolveClaimConfig(raw) {
-  const obj = raw && typeof raw === "object" ? raw : {};
-  const enabledEnv = process.env[ENV.CLAIM_ENABLED];
-  const autoEnv = process.env[ENV.CLAIM_AUTO];
-  const originEnv = process.env[ENV.CLAIM_ORIGIN];
-  const pollIntervalEnv = process.env[ENV.CLAIM_POLL_INTERVAL_MS];
-  const origin = (originEnv ?? (typeof obj.origin === "string" ? obj.origin : DEFAULTS.CLAIM_ORIGIN)).trim() || DEFAULTS.CLAIM_ORIGIN;
-  validateOrigin(origin, "claim.origin");
-  return {
-    enabled: enabledEnv !== void 0 ? resolveBool(enabledEnv, DEFAULTS.CLAIM_ENABLED) : resolveBool(obj.enabled, DEFAULTS.CLAIM_ENABLED),
-    auto: autoEnv !== void 0 ? resolveBool(autoEnv, DEFAULTS.CLAIM_AUTO) : resolveBool(obj.auto, DEFAULTS.CLAIM_AUTO),
-    origin,
-    pollIntervalMs: resolvePositiveInt(pollIntervalEnv ?? obj.pollIntervalMs ?? obj.poll_interval_ms, DEFAULTS.CLAIM_POLL_INTERVAL_MS, "claim.pollIntervalMs"),
-    cooldownMs: resolvePositiveInt(obj.cooldownMs ?? obj.cooldown_ms, DEFAULTS.CLAIM_COOLDOWN_MS, "claim.cooldownMs"),
-    planId: typeof obj.planId === "string" ? obj.planId.trim() : DEFAULTS.CLAIM_PLAN_ID
-  };
-}
-function validate(config) {
-  if (config.server.port < 1 || config.server.port > 65535) {
-    throw new Error(`server.port ${config.server.port} is out of range (1-65535)`);
-  }
-  if (!config.models.includes(config.defaultModel)) {
-    config.models.push(config.defaultModel);
-  }
-}
-
-// src/config/template.ts
-var EXAMPLE_CONFIG_YAML = `server:
-  port: 8080
-  host: "0.0.0.0"
-
-auth:
-  # Key that clients must provide to use the proxy.
-  # Set to null/omit to disable client auth.
-  proxyApiKey: "your-proxy-secret"
-
-  # Upstream credentials come from the OAuth login flow \u2014 run this first:
-  #   bun run src/index.ts auth login <zai|bigmodel>
-  # Path to the stored credentials (default shown):
-  # oauthCredentialsPath: "~/.zcode-proxy/credentials.json"
-
-# Which upstream provider to use: "zai" or "bigmodel"
-provider: zai
-
-# Which plan tier to use:
-#   "coding-plan" (default) \u2014 direct upstream endpoints, permanent API key
-#   "start-plan"            \u2014 routes through zcode.z.ai with JWT auth (requires \`auth login\`)
-plan: coding-plan
-
-providers:
-  zai:
-    anthropicBase: "https://api.z.ai/api/anthropic"
-    openaiBase: "https://api.z.ai/api/coding/paas/v4"
-  bigmodel:
-    anthropicBase: "https://open.bigmodel.cn/api/anthropic"
-    openaiBase: "https://open.bigmodel.cn/api/coding/paas/v4"
-
-defaultModel: glm-4.6
-
-models:
-  - glm-4.5-air
-  - glm-4.6
-  - glm-4.6v
-  - glm-4.7
-  - glm-5
-  - glm-5-turbo
-  - glm-5v-turbo
-  - glm-5.1
-  - glm-5.2
-  - glm-5.3
-
-# Configurable identity headers injected on every upstream request to mimic the
-# ZCode desktop client (User-Agent, X-ZCode-App-Version, X-Title,
-# X-ZCode-Agent, HTTP-Referer). Runtime platform headers (X-Platform,
-# X-Os-Category, X-Os-Version) are detected dynamically and are not configured
-# here. All fields below are optional; env vars override YAML, which overrides
-# defaults.
-identity:
-  # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
-  # Must be printable ASCII; non-conforming values fall back to the default.
-  # Default: "3.10.0" (current ZCode release). Override to match your real client.
-  appVersion: "3.10.0"
-  # X-Title suffix \u2192 "Z Code@{sourceTitle}". Default "cli".
-  sourceTitle: "cli"
-  # HTTP-Referer URL. Default "https://zcode.z.ai".
-  refererOrigin: "https://zcode.z.ai"
-  # Device identity (X-Device-Mid) \u2014 random UUIDv4, generated ONCE and reused
-  # forever (mirrors ZCode's telemetry deviceMid; no hardware values involved).
-  # Auto-generated into this file at first \`auth login\` or config creation.
-  # Leave empty on Android \u2014 the app injects ZCODE_IDENTITY_DEVICE_MID instead.
-  deviceMid: ""
-
-# Local client-session inference for cache-affinity experiments.
-# "observe" (default) logs inferred sessions in debug mode but does not change
-# upstream x-session-id. "enforce" reuses a stable x-session-id for inferred
-# coding-plan sessions. "off" disables inference entirely.
-clientIdentity:
-  mode: observe
-  ttlSeconds: 900
-  maxSessions: 1024
-
-# Server-controlled upstream URL remapping (mirrors the ZCode client's
-# ProviderEndpointRoutingService). The proxy periodically fetches
-# {origin}/api/v1/agent/configs and rewrites matching upstream URLs per the
-# returned proxyEndpoint.mapping table (currently the coding-plan Anthropic
-# endpoints -> zcode.z.ai ultra endpoints). Fail-open: any fetch/parse error
-# keeps the original URLs. Env override: ZCODE_ENDPOINT_ROUTING=false.
-endpointRouting:
-  enabled: true
-  origin: "https://zcode.z.ai"
-
-# Client request signing V4 (mirrors the ZCode 3.9.1 ClientRequestSigningV4Signer).
-# When enabled, the proxy probes {origin}/api/v1/agent/configs (cached 1h) and,
-# only if the server sets data.codingPlanSignature.enable=true, signs coding-plan
-# requests: handshake against {provider}/api/paas/c1f3a7e2/v2/client, Ed25519
-# signature + proof-of-work headers on every request, fail-open retry ladder
-# (two 401 VERIFY rejections -> permanent unsigned bypass). Start-plan and
-# off-peak paths are never signed. Env override: ZCODE_CLIENT_SIGNING=false.
-clientSigning:
-  enabled: true
-  origin: "https://zcode.z.ai"
-
-logging:
-  level: info
-`;
-
-// src/auth/manager.ts
-var AuthManager = class {
-  oauthCred = null;
-  /** Returns the current credential, refreshing if necessary. */
-  async getCredential() {
-    if (this.oauthCred) {
-      if (this.oauthCred.expiresAt && Date.now() >= this.oauthCred.expiresAt) {
-        this.oauthCred = null;
-        throw new Error("OAuth credential expired; re-authentication required \u2014 run: zcode-proxy auth login");
-      }
-      return this.oauthCred;
-    }
-    throw new Error("OAuth credential not available \u2014 run: zcode-proxy auth login");
-  }
-  /** Set the OAuth credential (used by the `auth login` flow). */
-  setOAuthCredential(cred) {
-    this.oauthCred = cred;
-  }
-};
-
-// src/server/server.ts
-var import_node_http = require("node:http");
-var import_node_stream = require("node:stream");
-
-// src/server/webui.txt
-var webui_default = `<!doctype html>\r
-<html lang="en">\r
-  <head>\r
-    <meta charset="utf-8" />\r
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />\r
-    <meta name="color-scheme" content="light dark" />\r
-    <title>zcode-proxy</title>\r
-    <!-- Markdown + sanitize + code highlight. All optional: the UI degrades to\r
-         escaped plaintext if the CDN is unreachable. -->\r
-    <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js" defer></script>\r
-    <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js" defer></script>\r
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" defer></script>\r
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css" />\r
-    <style>\r
-      :root {\r
-        --accent: #6366f1;\r
-        --accent-strong: #4f46e5;\r
-        --radius: 12px;\r
-        --sidebar-w: 264px;\r
-      }\r
-      :root[data-theme="dark"] {\r
-        --bg: #212121;\r
-        --sidebar: #171717;\r
-        --elevated: #2f2f2f;\r
-        --elevated-hover: #383838;\r
-        --text: #ececec;\r
-        --muted: #9a9a9a;\r
-        --border: #3a3a3a;\r
-        --user-bubble: #2f2f2f;\r
-        --danger: #ef4444;\r
-      }\r
-      :root[data-theme="light"] {\r
-        --bg: #ffffff;\r
-        --sidebar: #f7f7f8;\r
-        --elevated: #f0f0f0;\r
-        --elevated-hover: #e6e6e6;\r
-        --text: #1a1a1a;\r
-        --muted: #6e6e6e;\r
-        --border: #e5e5e5;\r
-        --user-bubble: #f0f0f0;\r
-        --danger: #dc2626;\r
-      }\r
-      * { box-sizing: border-box; }\r
-      html, body { height: 100%; margin: 0; }\r
-      body {\r
-        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", sans-serif;\r
-        background: var(--bg);\r
-        color: var(--text);\r
-        font-size: 15px;\r
-        line-height: 1.6;\r
-        -webkit-font-smoothing: antialiased;\r
-        overflow: hidden;\r
-      }\r
-      button { font-family: inherit; cursor: pointer; }\r
-      input, textarea, select { font-family: inherit; font-size: inherit; color: inherit; }\r
-      ::-webkit-scrollbar { width: 10px; height: 10px; }\r
-      ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 8px; }\r
-      ::-webkit-scrollbar-thumb:hover { background: var(--muted); }\r
-\r
-      .app { display: flex; height: 100vh; width: 100vw; }\r
-\r
-      /* ---------- Sidebar ---------- */\r
-      .sidebar {\r
-        width: var(--sidebar-w);\r
-        flex: 0 0 var(--sidebar-w);\r
-        background: var(--sidebar);\r
-        border-right: 1px solid var(--border);\r
-        display: flex;\r
-        flex-direction: column;\r
-        transition: margin-left .2s ease;\r
-      }\r
-      .sidebar.collapsed { margin-left: calc(-1 * var(--sidebar-w)); }\r
-      .sidebar-head { padding: 12px; display: flex; gap: 8px; }\r
-      .btn-new {\r
-        flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;\r
-        padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius);\r
-        background: transparent; color: var(--text); font-weight: 500;\r
-      }\r
-      .btn-new:hover { background: var(--elevated); }\r
-      .conv-list { flex: 1; overflow-y: auto; padding: 4px 8px; }\r
-      .conv {\r
-        display: flex; align-items: center; gap: 8px; padding: 9px 10px; margin: 2px 0;\r
-        border-radius: 8px; cursor: pointer; color: var(--text); position: relative;\r
-        white-space: nowrap; overflow: hidden;\r
-      }\r
-      .conv .conv-title { flex: 1; overflow: hidden; text-overflow: ellipsis; }\r
-      .conv:hover { background: var(--elevated); }\r
-      .conv.active { background: var(--elevated); }\r
-      .conv .conv-del {\r
-        opacity: 0; border: none; background: transparent; color: var(--muted);\r
-        padding: 2px 6px; border-radius: 6px; flex: 0 0 auto;\r
-      }\r
-      .conv:hover .conv-del, .conv.active .conv-del { opacity: 1; }\r
-      .conv .conv-del:hover { color: var(--danger); background: var(--elevated-hover); }\r
-      .sidebar-foot { padding: 10px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; }\r
-      .icon-btn {\r
-        border: 1px solid var(--border); background: transparent; color: var(--text);\r
-        border-radius: var(--radius); padding: 8px 10px; display: inline-flex; align-items: center; gap: 6px;\r
-      }\r
-      .icon-btn:hover { background: var(--elevated); }\r
-      .sidebar-foot .icon-btn { flex: 1; justify-content: center; }\r
-\r
-      /* ---------- Main ---------- */\r
-      .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }\r
-      .topbar {\r
-        height: 52px; flex: 0 0 52px; display: flex; align-items: center; gap: 10px;\r
-        padding: 0 14px; border-bottom: 1px solid var(--border);\r
-      }\r
-      .topbar .model-wrap { display: flex; align-items: center; gap: 6px; }\r
-      .topbar select#model {\r
-        background: var(--elevated); border: 1px solid var(--border); border-radius: 8px;\r
-        padding: 7px 10px; color: var(--text); max-width: 220px;\r
-      }\r
-      .think-wrap { display: flex; align-items: center; gap: 6px; }\r
-      .think-wrap select#reasoning-effort {\r
-        background: var(--elevated); border: 1px solid var(--border); border-radius: 8px;\r
-        padding: 7px 8px; color: var(--text); font-size: 13px;\r
-      }\r
-      .think-wrap select#reasoning-effort:disabled { opacity: .5; }\r
-      .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: 0 0 9px; }\r
-      .status-dot.ok { background: #22c55e; }\r
-      .status-dot.err { background: var(--danger); }\r
-      .topbar .spacer { flex: 1; }\r
-      .messages { flex: 1; overflow-y: auto; padding: 20px 0 12px; scroll-behavior: smooth; }\r
-      .msg-list { max-width: 768px; margin: 0 auto; padding: 0 18px; display: flex; flex-direction: column; gap: 22px; }\r
-      .msg { display: flex; flex-direction: column; gap: 8px; }\r
-      .msg .role { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }\r
-      .msg.user .bubble {\r
-        background: var(--user-bubble); align-self: flex-end; max-width: 85%;\r
-        padding: 10px 14px; border-radius: var(--radius); border-top-right-radius: 4px;\r
-        white-space: pre-wrap; word-break: break-word;\r
-      }\r
-      .msg.assistant .content { color: var(--text); }\r
-      .msg-images { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }\r
-      .msg-images img { max-width: 200px; max-height: 200px; border-radius: 8px; border: 1px solid var(--border); }\r
-      .think {\r
-        border: 1px solid var(--border); border-radius: 10px; background: var(--elevated);\r
-        margin-bottom: 8px; overflow: hidden;\r
-      }\r
-      .think summary {\r
-        cursor: pointer; padding: 8px 12px; font-size: 13px; color: var(--muted);\r
-        list-style: none; display: flex; align-items: center; gap: 6px; user-select: none;\r
-      }\r
-      .think summary::-webkit-details-marker { display: none; }\r
-      .think summary::before { content: "\\25B6"; font-size: 9px; transition: transform .15s; }\r
-      .think[open] summary::before { transform: rotate(90deg); }\r
-      .think .think-body { padding: 0 12px 10px; font-size: 13px; color: var(--muted); white-space: pre-wrap; word-break: break-word; }\r
-      .msg-meta { font-size: 12px; color: var(--muted); display: flex; gap: 10px; align-items: center; }\r
-      .msg-meta .regen { border: none; background: transparent; color: var(--muted); padding: 2px 6px; border-radius: 6px; }\r
-      .msg-meta .regen:hover { color: var(--text); background: var(--elevated); }\r
-\r
-      .empty { text-align: center; color: var(--muted); padding: 60px 20px; }\r
-      .empty h1 { font-size: 22px; margin: 0 0 6px; color: var(--text); font-weight: 600; }\r
-\r
-      /* markdown rendering */\r
-      .md p { margin: 0 0 12px; }\r
-      .md p:last-child { margin-bottom: 0; }\r
-      .md h1,.md h2,.md h3,.md h4 { margin: 18px 0 8px; line-height: 1.3; font-weight: 600; }\r
-      .md h1 { font-size: 1.5em; } .md h2 { font-size: 1.3em; } .md h3 { font-size: 1.15em; }\r
-      .md ul,.md ol { margin: 0 0 12px; padding-left: 24px; }\r
-      .md li { margin: 3px 0; }\r
-      .md a { color: var(--accent); }\r
-      .md blockquote { border-left: 3px solid var(--border); margin: 0 0 12px; padding: 2px 14px; color: var(--muted); }\r
-      .md code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: .9em; }\r
-      .md :not(pre) > code { background: var(--elevated); padding: 1px 5px; border-radius: 5px; }\r
-      .md pre { position: relative; margin: 0 0 12px; border-radius: 10px; overflow: hidden; border: 1px solid var(--border); }\r
-      .md pre .code-head {\r
-        display: flex; justify-content: space-between; align-items: center;\r
-        padding: 6px 12px; font-size: 12px; color: #adbac7;\r
-        background: #2d333b; border-bottom: 1px solid var(--border);\r
-      }\r
-      .md pre code { display: block; padding: 12px 14px; overflow-x: auto; background: #0d1117; }\r
-      .md pre .copy-btn {\r
-        border: none; background: transparent; color: #adbac7; font-size: 12px; padding: 2px 6px; border-radius: 5px;\r
-      }\r
-      .md pre .copy-btn:hover { background: rgba(255,255,255,.1); color: #fff; }\r
-      .md pre .code-actions { display: flex; align-items: center; gap: 6px; }\r
-      .md pre .html-preview {\r
-        display: block; width: 100%; min-height: 200px; max-height: 80vh;\r
-        border: 0; background: #fff; resize: vertical;\r
-      }\r
-      .md table { border-collapse: collapse; margin: 0 0 12px; display: block; overflow-x: auto; }\r
-      .md th,.md td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; }\r
-      .md hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }\r
-      .md img { max-width: 100%; border-radius: 8px; }\r
-\r
-      /* ---------- Composer ---------- */\r
-      .composer-wrap { flex: 0 0 auto; padding: 10px 18px 18px; }\r
-      .composer {\r
-        max-width: 768px; margin: 0 auto; background: var(--elevated);\r
-        border: 1px solid var(--border); border-radius: 22px; padding: 8px 8px 8px 14px;\r
-        display: flex; align-items: flex-end; gap: 6px;\r
-      }\r
-      .composer textarea {\r
-        flex: 1; background: transparent; border: none; outline: none; resize: none;\r
-        max-height: 200px; padding: 8px 2px; line-height: 1.5; color: var(--text);\r
-      }\r
-      .composer .c-actions { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }\r
-      .composer .think-bar { display: flex; align-items: center; gap: 4px; padding-right: 2px; }\r
-      .composer .pill {\r
-        border: 1px solid var(--border); background: var(--elevated-hover); color: var(--text);\r
-        border-radius: 14px; padding: 0 10px; font-size: 12px; height: 32px; white-space: nowrap;\r
-      }\r
-      .composer .pill.on { background: var(--accent); color: #fff; border-color: var(--accent); }\r
-      .composer select#reasoning-effort {\r
-        background: var(--elevated-hover); border: 1px solid var(--border); color: var(--text);\r
-        border-radius: 14px; padding: 0 6px; font-size: 12px; height: 32px; max-width: 84px;\r
-      }\r
-      .composer select#reasoning-effort:disabled { opacity: .45; }\r
-      .composer .c-btn {\r
-        width: 36px; height: 36px; border-radius: 50%; border: none;\r
-        background: var(--accent); color: #fff; display: inline-flex; align-items: center; justify-content: center;\r
-      }\r
-      .composer .c-btn:disabled { opacity: .5; }\r
-      .composer .c-btn.send:hover:not(:disabled) { background: var(--accent-strong); }\r
-      .composer .c-btn.stop { background: var(--danger); }\r
-      .composer .c-btn.attach { background: var(--elevated-hover); color: var(--text); }\r
-      .composer .c-btn.attach[hidden] { display: none; }\r
-      .composer .c-btn.attach.active { background: var(--accent); color: #fff; }\r
-      .attach-input { display: none; }\r
-      .attach-preview { max-width: 768px; margin: 0 auto 8px; display: flex; flex-wrap: wrap; gap: 8px; }\r
-      .attach-preview:empty { display: none; }\r
-      .attach-preview .ap { position: relative; }\r
-      .attach-preview img { width: 64px; height: 64px; object-fit: cover; border-radius: 8px; border: 1px solid var(--border); }\r
-      .attach-preview .ap-rm {\r
-        position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; border-radius: 50%;\r
-        background: var(--danger); color: #fff; border: none; font-size: 11px; line-height: 18px; padding: 0;\r
-      }\r
-      .composer-hint { max-width: 768px; margin: 6px auto 0; text-align: center; font-size: 12px; color: var(--muted); }\r
-\r
-      /* ---------- Settings modal ---------- */\r
-      .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.55); display: none; z-index: 50; }\r
-      .overlay.open { display: flex; align-items: center; justify-content: center; padding: 20px; }\r
-      .modal {\r
-        background: var(--bg); border: 1px solid var(--border); border-radius: 16px;\r
-        width: 100%; max-width: 560px; max-height: 88vh; overflow-y: auto; padding: 22px;\r
-      }\r
-      .modal h2 { margin: 0 0 4px; font-size: 18px; }\r
-      .modal .sub { color: var(--muted); font-size: 13px; margin: 0 0 18px; }\r
-      .field { margin-bottom: 16px; }\r
-      .field label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 5px; }\r
-      .field .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }\r
-      .field input[type=text], .field input[type=password], .field input[type=number],\r
-      .field textarea, .field select {\r
-        width: 100%; background: var(--elevated); border: 1px solid var(--border);\r
-        border-radius: 8px; padding: 9px 11px; color: var(--text); outline: none;\r
-      }\r
-      .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--accent); }\r
-      .field textarea { resize: vertical; min-height: 70px; }\r
-      .row { display: flex; gap: 12px; } .row .field { flex: 1; }\r
-      .range-row { display: flex; align-items: center; gap: 12px; }\r
-      .range-row input[type=range] { flex: 1; accent-color: var(--accent); }\r
-      .range-row .val { width: 52px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 13px; }\r
-      .switch { display: inline-flex; align-items: center; gap: 8px; }\r
-      .switch input { accent-color: var(--accent); width: 16px; height: 16px; }\r
-      .modal-foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 8px; }\r
-      .btn { border: 1px solid var(--border); background: var(--elevated); color: var(--text); border-radius: 8px; padding: 9px 16px; }\r
-      .btn:hover { background: var(--elevated-hover); }\r
-      .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }\r
-      .btn.primary:hover { background: var(--accent-strong); }\r
-      .banner {\r
-        background: rgba(239,68,68,.12); border: 1px solid var(--danger); color: var(--text);\r
-        padding: 8px 12px; border-radius: 8px; font-size: 13px; margin-bottom: 12px; display: none;\r
-      }\r
-      .mcp-bar { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }\r
-      .mcp-summary { color: var(--muted); font-size: 13px; }\r
-      .mcp-srv { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px; font-size: 13px; }\r
-      .mcp-srv .mcp-srv-head { display: flex; align-items: center; gap: 8px; }\r
-      .mcp-srv .mcp-label { font-weight: 600; }\r
-      .mcp-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: 0 0 8px; }\r
-      .mcp-dot.ok { background: #22c55e; } .mcp-dot.err { background: var(--danger); } .mcp-dot.busy { background: #eab308; }\r
-      .mcp-srv .mcp-state { color: var(--muted); font-size: 12px; }\r
-      .mcp-srv .mcp-err { color: var(--danger); font-size: 12px; margin-top: 4px; word-break: break-word; }\r
-      .mcp-tools { margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }\r
-      .mcp-tool-chip { display: inline-block; background: var(--elevated); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; margin: 2px 2px 0 0; }\r
-      .msg.tool .tool-body {\r
-        background: var(--elevated); border: 1px dashed var(--border); border-radius: 8px;\r
-        padding: 8px 10px; font-size: 12px; color: var(--muted); white-space: pre-wrap; word-break: break-word;\r
-      }\r
-      .msg .toolcalls { font-size: 12px; color: var(--muted); margin-top: 4px; }\r
-      .toast {\r
-        position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);\r
-        background: var(--elevated); border: 1px solid var(--border); color: var(--text);\r
-        padding: 10px 16px; border-radius: 10px; font-size: 13px; opacity: 0;\r
-        transition: opacity .2s; z-index: 100; pointer-events: none;\r
-      }\r
-      .toast.show { opacity: 1; }\r
-\r
-      @media (max-width: 720px) {\r
-        .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 40; box-shadow: 2px 0 12px rgba(0,0,0,.3); }\r
-        .sidebar.collapsed { margin-left: calc(-1 * var(--sidebar-w)); }\r
-        .topbar select#model { max-width: 140px; }\r
-      }\r
-    </style>\r
-  </head>\r
-  <body>\r
-    <div class="app">\r
-      <!-- Sidebar -->\r
-      <aside class="sidebar" id="sidebar">\r
-        <div class="sidebar-head">\r
-          <button class="btn-new" id="btn-new" title="New chat">+ New chat</button>\r
-        </div>\r
-        <div class="conv-list" id="conv-list"></div>\r
-        <div class="sidebar-foot">\r
-          <button class="icon-btn" id="btn-settings" title="Settings">Settings</button>\r
-          <button class="icon-btn" id="btn-theme" title="Switch theme">Dark mode</button>\r
-        </div>\r
-      </aside>\r
-\r
-      <!-- Main -->\r
-      <main class="main">\r
-        <div class="topbar">\r
-          <button class="icon-btn" id="btn-menu" title="Toggle sidebar" style="flex:0 0 auto;width:38px;justify-content:center;">&#9776;</button>\r
-          <span class="status-dot" id="status-dot" title="Connection status"></span>\r
-          <div class="model-wrap">\r
-            <select id="model" title="Model"></select>\r
-          </div>\r
-          <div class="spacer"></div>\r
-        </div>\r
-\r
-        <div class="messages" id="messages">\r
-          <div class="msg-list" id="msg-list"></div>\r
-        </div>\r
-\r
-        <div class="composer-wrap">\r
-          <div class="attach-preview" id="attach-preview"></div>\r
-          <div class="composer">\r
-            <textarea id="input" rows="1" placeholder="Message the model&#8230;  (Enter to send, Shift+Enter for newline)"></textarea>\r
-            <div class="c-actions">\r
-              <div class="think-bar">\r
-                <button class="pill" id="btn-think" type="button" title="Toggle deep thinking">Think: on</button>\r
-                <select id="reasoning-effort" title="Reasoning effort (GLM-5.2+)"></select>\r
-              </div>\r
-              <button class="c-btn attach" id="btn-attach" title="Attach image (vision models)" hidden>&#128206;</button>\r
-              <button class="c-btn send" id="btn-send" title="Send">&#8593;</button>\r
-            </div>\r
-          </div>\r
-          <div class="composer-hint" id="hint"></div>\r
-          <input type="file" class="attach-input" id="attach-input" accept="image/*" multiple />\r
-        </div>\r
-      </main>\r
-    </div>\r
-\r
-    <!-- Settings modal -->\r
-    <div class="overlay" id="overlay">\r
-      <div class="modal" role="dialog" aria-modal="true">\r
-        <h2>Settings</h2>\r
-        <p class="sub">Auto-saved to this browser. The proxy API key is sent on every request.</p>\r
-        <div class="banner" id="banner"></div>\r
-\r
-        <div class="field">\r
-          <label for="s-apikey">Proxy API key</label>\r
-          <input type="password" id="s-apikey" autocomplete="off" placeholder="(leave blank if proxy has no key)" />\r
-          <div class="hint">Sent as <code>Authorization: Bearer &lt;key&gt;</code>.</div>\r
-        </div>\r
-\r
-        <div class="field">\r
-          <label for="s-system">System prompt</label>\r
-          <textarea id="s-system" placeholder="e.g. You are a concise senior engineer."></textarea>\r
-        </div>\r
-\r
-        <div class="row">\r
-          <div class="field">\r
-            <label>Temperature</label>\r
-            <div class="range-row">\r
-              <input type="range" id="s-temp" min="0" max="1" step="0.01" />\r
-              <span class="val" id="s-temp-val">1.00</span>\r
-            </div>\r
-          </div>\r
-          <div class="field">\r
-            <label>Top-p</label>\r
-            <div class="range-row">\r
-              <input type="range" id="s-topp" min="0.01" max="1" step="0.01" />\r
-              <span class="val" id="s-topp-val">0.95</span>\r
-            </div>\r
-          </div>\r
-        </div>\r
-\r
-        <div class="row">\r
-          <div class="field">\r
-            <label for="s-maxtok">Max output tokens</label>\r
-            <input type="number" id="s-maxtok" min="1" max="131072" step="1" />\r
-          </div>\r
-          <div class="field">\r
-            <label>Sampling</label>\r
-            <div class="switch" style="margin-top:10px;">\r
-              <input type="checkbox" id="s-dosample" />\r
-              <span>do_sample (disable for deterministic output)</span>\r
-            </div>\r
-          </div>\r
-        </div>\r
-\r
-        <div class="field">\r
-          <label>MCP tool calling</label>\r
-          <div class="switch" style="margin-bottom:8px;">\r
-            <input type="checkbox" id="s-mcpenable" />\r
-            <span>Enable tools (when off, no tools are sent even if servers are connected)</span>\r
-          </div>\r
-          <label for="s-mcp" style="margin-top:6px;">MCP servers (one per line)</label>\r
-          <textarea id="s-mcp" placeholder="https://mcp.example.com/mcp&#10;https://mcp.github.com/mcp,ghp_xxx&#10;http://localhost:3001/mcp"></textarea>\r
-          <div class="hint">Format: <code>URL</code> or <code>URL,key</code> (comma-separated). Key sent as <code>Authorization: Bearer</code>. If a server needs the key in the URL, embed it there directly. Caution: keys are stored in plaintext in localStorage.</div>\r
-        </div>\r
-\r
-        <div class="field">\r
-          <label for="s-cors">CORS proxy (optional)</label>\r
-          <input type="text" id="s-cors" placeholder="https://corsproxy.io/?url=   (leave blank for no CORS)" />\r
-          <div class="hint">Needed when servers block browser CORS.</div>\r
-        </div>\r
-\r
-        <div class="field">\r
-          <label>MCP connection</label>\r
-          <div class="mcp-bar">\r
-            <button class="btn" id="btn-mcp-connect" type="button">Connect all</button>\r
-            <button class="btn" id="btn-mcp-disconnect" type="button">Disconnect</button>\r
-            <span class="mcp-summary" id="mcp-summary"></span>\r
-          </div>\r
-          <div id="mcp-status"></div>\r
-        </div>\r
-\r
-        <div class="field">\r
-          <label>Input</label>\r
-          <div class="switch">\r
-            <input type="checkbox" id="s-enter" />\r
-            <span>Enter to send (Shift+Enter = newline)</span>\r
-          </div>\r
-        </div>\r
-\r
-        <div class="modal-foot">\r
-          <button class="btn" id="btn-clear-all" title="Delete all conversations and reset settings">Reset all</button>\r
-          <button class="btn primary" id="btn-close-settings">Done</button>\r
-        </div>\r
-      </div>\r
-    </div>\r
-\r
-    <div class="toast" id="toast"></div>\r
-\r
-    <script>\r
-    (function () {\r
-      "use strict";\r
-      var STORE = "zcode_webui_state_v1";\r
-      // Known model catalog (used as a fallback when /v1/models is unreachable,\r
-      // e.g. before the proxy key has been entered).\r
-      var KNOWN_MODELS = [\r
-        "glm-4.5-air", "glm-4.6", "glm-4.6v", "glm-4.7", "glm-5",\r
-        "glm-5-turbo", "glm-5v-turbo", "glm-5.1", "glm-5.2"\r
-      ];\r
-\r
-      var DEFAULT_SETTINGS = {\r
-        apiKey: "",\r
-        model: "glm-4.6",\r
-        systemPrompt: "",\r
-        temperature: 1.0,\r
-        topP: 0.95,\r
-        maxTokens: 4096,\r
-        doSample: true,\r
-        thinkingEnabled: true,\r
-        reasoningEffort: "max",\r
-        mcpEnabled: true,          // master toggle: only send tools when on\r
-        mcpServers: [],            // [{url, authKey}] \u2014 "URL" or "URL,key" per line\r
-        mcpCorsProxy: "",          // optional prefix (or {url} template) for browser CORS bypass\r
-        theme: "system",\r
-        enterToSend: true\r
-      };\r
-\r
-      // ---- state ----\r
-      var state = loadState();\r
-      var pendingImages = [];      // {name, dataUrl} attached to next user msg\r
-      var abortCtrl = null;        // current stream controller\r
-      var busy = false;            // generating?\r
-      var systemThemeDark = matchMedia("(prefers-color-scheme: dark)").matches;\r
-\r
-      // ---- dom ----\r
-      var $ = function (id) { return document.getElementById(id); };\r
-      var msgList = $("msg-list"), messages = $("messages");\r
-      var inputEl = $("input"), sendBtn = $("btn-send"), attachBtn = $("btn-attach");\r
-      var modelSel = $("model"), effortSel = $("reasoning-effort"), btnThink = $("btn-think");\r
-      var convListEl = $("conv-list"), statusDot = $("status-dot");\r
-      var sidebar = $("sidebar"), overlay = $("overlay"), toastEl = $("toast");\r
-      var hintEl = $("hint");\r
-\r
-      // =========================================================\r
-      // persistence\r
-      // =========================================================\r
-      function loadState() {\r
-        try {\r
-          var raw = localStorage.getItem(STORE);\r
-          if (raw) {\r
-            var s = JSON.parse(raw);\r
-            s.settings = Object.assign({}, DEFAULT_SETTINGS, s.settings || {});\r
-            s.conversations = Array.isArray(s.conversations) ? s.conversations : [];\r
-            s.activeId = s.activeId || (s.conversations[0] && s.conversations[0].id) || null;\r
-            return s;\r
-          }\r
-        } catch (e) { console.warn("load state failed", e); }\r
-        return { settings: Object.assign({}, DEFAULT_SETTINGS), conversations: [], activeId: null };\r
-      }\r
-      function saveState() {\r
-        try { localStorage.setItem(STORE, JSON.stringify(state)); }\r
-        catch (e) { toast("Storage full \\u2014 older sessions not saved."); }\r
-      }\r
-      function activeConv() {\r
-        return state.conversations.find(function (c) { return c.id === state.activeId; }) || null;\r
-      }\r
-      function newConv() {\r
-        var c = { id: rid(), title: "New chat", messages: [], model: state.settings.model, createdAt: Date.now() };\r
-        state.conversations.unshift(c);\r
-        state.activeId = c.id;\r
-        saveState();\r
-        renderSidebar(); renderMessages(); inputEl.focus();\r
-      }\r
-      function rid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }\r
-\r
-      // =========================================================\r
-      // rendering\r
-      // =========================================================\r
-      function renderSidebar() {\r
-        convListEl.innerHTML = "";\r
-        state.conversations.forEach(function (c) {\r
-          var row = document.createElement("div");\r
-          row.className = "conv" + (c.id === state.activeId ? " active" : "");\r
-          var title = document.createElement("span");\r
-          title.className = "conv-title"; title.textContent = c.title || "New chat";\r
-          var del = document.createElement("button");\r
-          del.className = "conv-del"; del.innerHTML = "\\u2715"; del.title = "Delete";\r
-          del.onclick = function (e) { e.stopPropagation(); deleteConv(c.id); };\r
-          row.onclick = function () { state.activeId = c.id; saveState(); renderSidebar(); renderMessages(); };\r
-          row.appendChild(title); row.appendChild(del);\r
-          convListEl.appendChild(row);\r
-        });\r
-      }\r
-      function deleteConv(id) {\r
-        var i = state.conversations.findIndex(function (c) { return c.id === id; });\r
-        if (i < 0) return;\r
-        state.conversations.splice(i, 1);\r
-        if (state.activeId === id) state.activeId = state.conversations[0] ? state.conversations[0].id : null;\r
-        saveState(); renderSidebar(); renderMessages();\r
-      }\r
-\r
-      function renderMessages() {\r
-        msgList.innerHTML = "";\r
-        var c = activeConv();\r
-        if (!c || c.messages.length === 0) { emptyState(); return; }\r
-        c.messages.forEach(function (m, idx) {\r
-          msgList.appendChild(buildMsg(m, idx === c.messages.length - 1));\r
-        });\r
-        scrollBottom(true);\r
-      }\r
-      function emptyState() {\r
-        var d = document.createElement("div");\r
-        d.className = "empty";\r
-        d.innerHTML = "<h1>zcode-proxy</h1><p>Chat with GLM models through your proxy. Pick a model above and start typing.</p>";\r
-        msgList.appendChild(d);\r
-      }\r
-\r
-      function buildMsg(m, isLast) {\r
-        var wrap = document.createElement("div");\r
-        wrap.className = "msg " + m.role;\r
-        var role = document.createElement("div"); role.className = "role";\r
-        role.textContent = m.role === "user" ? "You" : "Assistant";\r
-        wrap.appendChild(role);\r
-\r
-        if (m.images && m.images.length) {\r
-          var imgWrap = document.createElement("div"); imgWrap.className = "msg-images";\r
-          m.images.forEach(function (src) {\r
-            var im = document.createElement("img"); im.src = src; imgWrap.appendChild(im);\r
-          });\r
-          wrap.appendChild(imgWrap);\r
-        }\r
-\r
-        if (m.role === "tool") {\r
-          var tbody = document.createElement("div"); tbody.className = "tool-body";\r
-          tbody.textContent = "\u{1F527} tool result\\n" + (m.content || "");\r
-          wrap.appendChild(tbody);\r
-          return wrap;\r
-        }\r
-\r
-        if (m.role === "user") {\r
-          var bubble = document.createElement("div"); bubble.className = "bubble";\r
-          bubble.textContent = m.content || ""; wrap.appendChild(bubble);\r
-        } else {\r
-          var body = document.createElement("div"); body.className = "content md";\r
-          if (m.reasoning) {\r
-            var t = document.createElement("details"); t.className = "think"; t.open = true;\r
-            var sum = document.createElement("summary"); sum.textContent = "Thinking\\u2026";\r
-            var tb = document.createElement("div"); tb.className = "think-body"; tb.textContent = m.reasoning;\r
-            t.appendChild(sum); t.appendChild(tb);\r
-            body.appendChild(t);\r
-          }\r
-          body.innerHTML = renderMarkdown(m.content || "");\r
-          enhanceCode(body);\r
-          if (m.toolCalls && m.toolCalls.length) {\r
-            var tc = document.createElement("div"); tc.className = "toolcalls";\r
-            tc.textContent = "\u{1F527} called: " + m.toolCalls.map(function (x) { return x.name; }).join(", ");\r
-            body.appendChild(tc);\r
-          }\r
-          wrap.appendChild(body);\r
-          wrap.appendChild(meta(m, isLast));\r
-        }\r
-        return wrap;\r
-      }\r
-      function meta(m, isLast) {\r
-        var d = document.createElement("div"); d.className = "msg-meta";\r
-        if (m.model) { var s = document.createElement("span"); s.textContent = m.model; d.appendChild(s); }\r
-        if (m.truncated) { var t = document.createElement("span"); t.textContent = "\\u00b7 truncated (max tokens)"; d.appendChild(t); }\r
-        if (m.role === "assistant" && isLast && !busy) {\r
-          var b = document.createElement("button"); b.className = "regen"; b.textContent = "\\u21bb Regenerate";\r
-          b.onclick = regenerate; d.appendChild(b);\r
-        }\r
-        return d;\r
-      }\r
-\r
-      // =========================================================\r
-      // markdown\r
-      // =========================================================\r
-      function renderMarkdown(text) {\r
-        if (typeof marked === "undefined") return escapeHtml(text);\r
-        try {\r
-          marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false });\r
-          var html = marked.parse(text);\r
-          if (typeof DOMPurify !== "undefined") html = DOMPurify.sanitize(html);\r
-          return html;\r
-        } catch (e) { return escapeHtml(text); }\r
-      }\r
-      function escapeHtml(s) {\r
-        return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");\r
-      }\r
-      // Tiny script appended to rendered HTML so the sandboxed iframe can tell\r
-      // its parent how tall the content is (auto-height). Split "<script" so the\r
-      // host parser never sees a real end-tag inside this string.\r
-      var RESIZE_SCRIPT = '<' + 'script>(function(){function r(){try{parent.postMessage({__zcpPreview:true,h:document.documentElement.scrollHeight},"*")}catch(e){}}window.addEventListener("load",r);setTimeout(r,60);setTimeout(r,400);setTimeout(r,1200);})();<' + '/script>';\r
-      var previewListenerAdded = false;\r
-      function ensurePreviewListener() {\r
-        if (previewListenerAdded) return;\r
-        previewListenerAdded = true;\r
-        window.addEventListener("message", function (ev) {\r
-          var d = ev.data;\r
-          if (!d || d.__zcpPreview !== true || typeof d.h !== "number") return;\r
-          var frames = document.querySelectorAll("iframe.html-preview");\r
-          for (var i = 0; i < frames.length; i++) {\r
-            if (frames[i].contentWindow === ev.source) {\r
-              var h = Math.max(120, Math.min(2000, d.h | 0));\r
-              frames[i].style.height = h + "px";\r
-              break;\r
-            }\r
-          }\r
-        });\r
-      }\r
-      function toggleHtmlPreview(pre, code, btn, label, raw) {\r
-        var frame = pre.querySelector("iframe.html-preview");\r
-        if (!frame) {\r
-          ensurePreviewListener();\r
-          frame = document.createElement("iframe");\r
-          frame.className = "html-preview";\r
-          // allow-scripts (no allow-same-origin): JS runs but the iframe is a\r
-          // null origin that cannot touch the parent page's DOM/storage.\r
-          frame.setAttribute("sandbox", "allow-scripts");\r
-          frame.setAttribute("srcdoc", raw + RESIZE_SCRIPT);\r
-          pre.appendChild(frame);\r
-        }\r
-        var showPreview = btn.textContent === "preview";\r
-        code.style.display = showPreview ? "none" : "";\r
-        frame.style.display = showPreview ? "" : "none";\r
-        btn.textContent = showPreview ? "code" : "preview";\r
-        label.textContent = showPreview ? "preview" : "html";\r
-      }\r
-      function enhanceCode(root) {\r
-        var pres = root.querySelectorAll("pre > code:not([data-hl])");\r
-        pres.forEach(function (code) {\r
-          var pre = code.parentElement;\r
-          var raw = code.textContent;\r
-          var lang = (code.className.match(/language-([\\w+-]+)/) || [])[1] || "";\r
-          var head = document.createElement("div"); head.className = "code-head";\r
-          var label = document.createElement("span"); label.textContent = lang || "code";\r
-          var actions = document.createElement("span"); actions.className = "code-actions";\r
-          var cp = document.createElement("button"); cp.className = "copy-btn"; cp.textContent = "copy";\r
-          cp.onclick = function () {\r
-            navigator.clipboard.writeText(raw).then(function () {\r
-              cp.textContent = "copied"; setTimeout(function () { cp.textContent = "copy"; }, 1200);\r
-            });\r
-          };\r
-          // In-page render toggle for HTML blocks (sandboxed iframe preview).\r
-          if (/^html$/i.test(lang)) {\r
-            var pv = document.createElement("button"); pv.className = "copy-btn"; pv.textContent = "preview";\r
-            pv.title = "Render this HTML live (sandboxed)";\r
-            pv.onclick = function () { toggleHtmlPreview(pre, code, pv, label, raw); };\r
-            actions.appendChild(pv);\r
-          }\r
-          actions.appendChild(cp);\r
-          head.appendChild(label); head.appendChild(actions);\r
-          pre.insertBefore(head, code);\r
-          code.setAttribute("data-hl", "1");\r
-          if (typeof hljs !== "undefined") { try { hljs.highlightElement(code); } catch (e) {} }\r
-        });\r
-        root.querySelectorAll("a[href]").forEach(function (a) {\r
-          a.target = "_blank"; a.rel = "noopener noreferrer";\r
-        });\r
-      }\r
-\r
-      // =========================================================\r
-      // theme\r
-      // =========================================================\r
-      function applyTheme() {\r
-        var t = state.settings.theme;\r
-        var dark = t === "dark" || (t === "system" && systemThemeDark);\r
-        document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");\r
-        var b = $("btn-theme");\r
-        if (b) {\r
-          // Label shows the mode you'll switch TO.\r
-          b.textContent = dark ? "Light mode" : "Dark mode";\r
-          b.title = "Switch to " + (dark ? "light" : "dark") + " theme";\r
-        }\r
-      }\r
-      matchMedia("(prefers-color-scheme: dark)").addEventListener("change", function (e) {\r
-        systemThemeDark = e.matches; if (state.settings.theme === "system") applyTheme();\r
-      });\r
-\r
-      // =========================================================\r
-      // models\r
-      // =========================================================\r
-      function populateModels(list) {\r
-        modelSel.innerHTML = "";\r
-        (list.length ? list : KNOWN_MODELS).forEach(function (id) {\r
-          var o = document.createElement("option"); o.value = id; o.textContent = id;\r
-          modelSel.appendChild(o);\r
-        });\r
-        if (state.settings.model && Array.from(modelSel.options).some(function (o) { return o.value === state.settings.model; })) {\r
-          modelSel.value = state.settings.model;\r
-        }\r
-        syncAttachVisibility();\r
-        if (typeof populateEffort === "function") { populateEffort(); syncThinkButton(); }\r
-      }\r
-      function fetchModels() {\r
-        var headers = {};\r
-        if (state.settings.apiKey) headers["authorization"] = "Bearer " + state.settings.apiKey;\r
-        fetch("/v1/models", { method: "GET", headers: headers })\r
-          .then(function (r) {\r
-            if (!r.ok) throw new Error("HTTP " + r.status);\r
-            return r.json();\r
-          })\r
-          .then(function (j) {\r
-            var ids = (j.data || []).map(function (m) { return m.id; });\r
-            populateModels(ids); setStatus("ok");\r
-          })\r
-          .catch(function () {\r
-            populateModels(KNOWN_MODELS);\r
-            setStatus(state.settings.apiKey ? "err" : "idle");\r
-          });\r
-      }\r
-      function setStatus(s) {\r
-        statusDot.className = "status-dot" + (s === "ok" ? " ok" : s === "err" ? " err" : "");\r
-        statusDot.title = s === "ok" ? "Connected" : s === "err" ? "Request failed (check key / proxy)" : "Set proxy API key in settings";\r
-      }\r
-      function isVisionModel(id) { return /v/i.test(id || ""); }\r
-      function syncAttachVisibility() { attachBtn.hidden = !isVisionModel(modelSel.value); }\r
-\r
-      // =========================================================\r
-      // request building\r
-      // =========================================================\r
-      function buildRequestMessages(conv) {\r
-        var msgs = [];\r
-        if (state.settings.systemPrompt && state.settings.systemPrompt.trim()) {\r
-          msgs.push({ role: "system", content: state.settings.systemPrompt.trim() });\r
-        }\r
-        conv.messages.forEach(function (m) {\r
-          if (m.role === "user" && m.images && m.images.length) {\r
-            var parts = m.images.map(function (src) {\r
-              return { type: "image_url", image_url: { url: src } };\r
-            });\r
-            parts.push({ type: "text", text: m.content || "" });\r
-            msgs.push({ role: "user", content: parts });\r
-          } else if (m.role === "assistant" && m.toolCalls && m.toolCalls.length) {\r
-            msgs.push({\r
-              role: "assistant",\r
-              content: m.content || "",\r
-              tool_calls: m.toolCalls.map(function (tc) {\r
-                return { id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments || "{}" } };\r
-              }),\r
-            });\r
-          } else if (m.role === "tool") {\r
-            msgs.push({ role: "tool", tool_call_id: m.toolCallId, content: m.content || "" });\r
-          } else {\r
-            msgs.push({ role: m.role, content: m.content || "" });\r
-          }\r
-        });\r
-        return msgs;\r
-      }\r
-      function buildBody(conv) {\r
-        var model = conv.model || state.settings.model;\r
-        var body = {\r
-          model: model,\r
-          messages: buildRequestMessages(conv),\r
-          stream: true,\r
-          temperature: Number(state.settings.temperature),\r
-          top_p: Number(state.settings.topP),\r
-          max_tokens: Number(state.settings.maxTokens),\r
-          do_sample: !!state.settings.doSample\r
-        };\r
-        if (state.settings.thinkingEnabled) {\r
-          body.thinking = { type: "enabled" };\r
-          if (isReasoningModel(model)) body.reasoning_effort = state.settings.reasoningEffort;\r
-        } else {\r
-          body.thinking = { type: "disabled" };\r
-        }\r
-        var fnTools = gatherMcpTools();\r
-        if (fnTools.length) { body.tools = fnTools; body.tool_choice = "auto"; }\r
-        return body;\r
-      }\r
-      function isReasoningModel(id) {\r
-        // reasoning_effort is only honored by GLM-5.2 and above per BigModel docs.\r
-        return /glm-5\\.[2-9]|glm-[6-9]/i.test(id || "");\r
-      }\r
-      // =========================================================\r
-      // MCP \u2014 client-managed (browser-direct, optional CORS proxy).\r
-      // The webui connects to each server, lists its tools, injects them as\r
-      // function tools, and auto-executes tool calls the model returns.\r
-      // =========================================================\r
-      var mcpState = {};          // url -> {sessionId, tools[], connected, error, status}\r
-      var mcpToolMap = {};        // tool name -> {url, name}\r
-      var mcpRpcId = 0;\r
-      function nextRpcId() { return ++mcpRpcId; }\r
-\r
-      function applyCorsProxy(url) {\r
-        var cp = (state.settings.mcpCorsProxy || "").trim();\r
-        if (!cp) return url;\r
-        if (cp.indexOf("{url}") >= 0) return cp.replace("{url}", encodeURIComponent(url));\r
-        return cp + encodeURIComponent(url);\r
-      }\r
-      // POST one JSON-RPC message. Resolves {status, contentType, sessionId, body}.\r
-      // Auth: sent only as Authorization: Bearer (KoboldAI parity). If a server\r
-      // needs the key in the URL, embed it directly in the server URL line.\r
-      function mcpFetch(server, rpc) {\r
-        var st = mcpState[server.url] || (mcpState[server.url] = {});\r
-        var headers = { "content-type": "application/json", "accept": "application/json, text/event-stream" };\r
-        if (st.sessionId) headers["mcp-session-id"] = st.sessionId;\r
-        if (server.authKey) headers["authorization"] = "Bearer " + server.authKey;\r
-        return fetch(applyCorsProxy(server.url), {\r
-          method: "POST", headers: headers, body: JSON.stringify(rpc),\r
-        }).then(function (r) {\r
-          return r.text().then(function (t) {\r
-            return {\r
-              ok: r.ok, status: r.status,\r
-              contentType: r.headers.get("content-type") || "",\r
-              sessionId: r.headers.get("mcp-session-id") || "",\r
-              body: t,\r
-            };\r
-          });\r
-        });\r
-      }\r
-      // streamable-http servers may answer with SSE (data: lines) or plain JSON.\r
-      function parseMcpResponse(resp) {\r
-        var body = resp.body || "";\r
-        var looksSSE = resp.contentType.indexOf("text/event-stream") >= 0 || body.indexOf("data:") === 0;\r
-        if (looksSSE) {\r
-          var parsed = null;\r
-          body.split("\\n").forEach(function (ln) {\r
-            if (ln.indexOf("data:") === 0) {\r
-              var d = ln.slice(5).trim();\r
-              if (d) { try { parsed = JSON.parse(d); } catch (e) {} }\r
-            }\r
-          });\r
-          return parsed;\r
-        }\r
-        try { return JSON.parse(body); } catch (e) { return null; }\r
-      }\r
-      function mcpCall(server, method, params) {\r
-        var rpc = { jsonrpc: "2.0", id: nextRpcId(), method: method };\r
-        if (params) rpc.params = params;\r
-        return mcpFetch(server, rpc).then(function (resp) {\r
-          var st = mcpState[server.url];\r
-          if (resp.sessionId && st && !st.sessionId) st.sessionId = resp.sessionId;\r
-          var json = parseMcpResponse(resp);\r
-          if (!json) throw new Error("MCP " + method + " on " + server.url + " returned no JSON (HTTP " + resp.status + ")");\r
-          if (json.error) throw new Error("MCP error" + (json.error.code != null ? " (" + json.error.code + ")" : "") + ": " + (json.error.message || JSON.stringify(json.error)));\r
-          return json;\r
-        });\r
-      }\r
-      // initialize + tools/list for one server. Resolves to tools[].\r
-      function mcpConnect(server) {\r
-        return mcpCall(server, "initialize", {\r
-          protocolVersion: "2024-11-05", capabilities: {},\r
-          clientInfo: { name: "zcode-proxy-webui", version: "1.0" },\r
-        }).then(function () {\r
-          // required notification before tools/list on stateful servers\r
-          return mcpFetch(server, { jsonrpc: "2.0", method: "notifications/initialized" });\r
-        }).then(function () {\r
-          return mcpCall(server, "tools/list", {});\r
-        }).then(function (j) {\r
-          return (j.result && j.result.tools) || [];\r
-        });\r
-      }\r
-      // Build function-tool entries from every connected server + refresh the\r
-      // tool name -> {url, name} routing map. No tools when MCP is disabled.\r
-      function gatherMcpTools() {\r
-        var out = []; mcpToolMap = {};\r
-        if (!state.settings.mcpEnabled) return out;\r
-        state.settings.mcpServers.forEach(function (s) {\r
-          var st = mcpState[s.url];\r
-          if (st && st.connected && st.tools) {\r
-            st.tools.forEach(function (t) {\r
-              if (mcpToolMap[t.name]) return; // dedupe across servers (first wins)\r
-              mcpToolMap[t.name] = { url: s.url, name: t.name };\r
-              out.push({\r
-                type: "function",\r
-                function: {\r
-                  name: t.name,\r
-                  description: (t.description || t.name).slice(0, 1024),\r
-                  parameters: t.inputSchema || { type: "object", properties: {} },\r
-                },\r
-              });\r
-            });\r
-          }\r
-        });\r
-        return out;\r
-      }\r
-      // Execute one model tool_call against its MCP server. Resolves to text.\r
-      function execMcpTool(tc) {\r
-        var map = mcpToolMap[tc.name];\r
-        if (!map) return Promise.reject(new Error("Unknown tool: " + tc.name));\r
-        var server = state.settings.mcpServers.find(function (s) { return s.url === map.url; });\r
-        if (!server) return Promise.reject(new Error("MCP server not configured: " + map.url));\r
-        var args = {};\r
-        try { args = JSON.parse(tc.arguments || "{}"); } catch (e) { args = {}; }\r
-        return mcpCall(server, "tools/call", { name: map.name, arguments: args }).then(function (j) {\r
-          var res = j.result;\r
-          if (!res) return "(no result)";\r
-          if (Array.isArray(res.content)) {\r
-            return res.content.map(function (c) { return c.type === "text" ? c.text : JSON.stringify(c); }).join("\\n");\r
-          }\r
-          return JSON.stringify(res);\r
-        });\r
-      }\r
-\r
-      // Parse the MCP textarea (KoboldAI format: "URL" or "URL,key" per line).\r
-      function parseServersFromTextarea() {\r
-        return $("s-mcp").value.split("\\n").map(function (ln) {\r
-          var line = ln.trim();\r
-          if (!line) return null;\r
-          var parts = line.split(",");\r
-          var url = (parts[0] || "").trim();\r
-          var key = (parts[1] || "").trim();\r
-          if (!url) return null;\r
-          return { url: url, authKey: key };\r
-        }).filter(function (s) { return s.url; });\r
-      }\r
-      function connectAllMcp() {\r
-        var servers = parseServersFromTextarea();\r
-        state.settings.mcpServers = servers;\r
-        state.settings.mcpCorsProxy = $("s-cors").value.trim();\r
-        state.settings.mcpEnabled = $("s-mcpenable").checked;\r
-        saveState();\r
-        mcpState = {};              // fresh sessions each connect\r
-        renderMcpStatus(servers);\r
-        var chain = Promise.resolve();\r
-        servers.forEach(function (s) {\r
-          chain = chain.then(function () {\r
-            var st = mcpState[s.url] = { connected: false, tools: [], sessionId: "", error: "", status: "connecting" };\r
-            renderMcpStatus(servers);\r
-            return mcpConnect(s).then(function (tools) {\r
-              st.connected = true; st.tools = tools || []; st.error = ""; st.status = "ok";\r
-            }, function (err) {\r
-              st.connected = false; st.tools = []; st.error = String((err && err.message) || err); st.status = "error";\r
-            }).then(function () { renderMcpStatus(servers); });\r
-          });\r
-        });\r
-        chain.then(updateMcpSummary, updateMcpSummary);\r
-      }\r
-      function disconnectMcp() {\r
-        mcpState = {};\r
-        renderMcpStatus(state.settings.mcpServers);\r
-        updateMcpSummary();\r
-      }\r
-      function renderMcpStatus(servers) {\r
-        var box = $("mcp-status"); if (!box) return;\r
-        box.innerHTML = "";\r
-        (servers || state.settings.mcpServers || []).forEach(function (s) {\r
-          var st = mcpState[s.url] || { connected: false, tools: [], status: "", error: "" };\r
-          var row = document.createElement("div"); row.className = "mcp-srv";\r
-          var head = document.createElement("div"); head.className = "mcp-srv-head";\r
-          var dot = document.createElement("span");\r
-          dot.className = "mcp-dot " + (st.status === "ok" ? "ok" : st.status === "error" ? "err" : st.status === "connecting" ? "busy" : "");\r
-          var urlEl = document.createElement("span"); urlEl.className = "mcp-label"; urlEl.textContent = s.url; urlEl.title = s.url;\r
-          var info = document.createElement("span"); info.className = "mcp-state";\r
-          if (st.status === "connecting") info.textContent = "connecting\\u2026";\r
-          else if (st.status === "ok") info.textContent = "connected \\u00b7 " + (st.tools ? st.tools.length : 0) + " tools";\r
-          else if (st.status === "error") info.textContent = "failed";\r
-          else info.textContent = "not connected";\r
-          head.appendChild(dot); head.appendChild(urlEl); head.appendChild(info);\r
-          row.appendChild(head);\r
-          if (st.error) { var e = document.createElement("div"); e.className = "mcp-err"; e.textContent = st.error; row.appendChild(e); }\r
-          if (st.tools && st.tools.length) {\r
-            var tw = document.createElement("div"); tw.className = "mcp-tools";\r
-            st.tools.forEach(function (t) {\r
-              var c = document.createElement("span"); c.className = "mcp-tool-chip";\r
-              c.textContent = t.name; c.title = t.description || "";\r
-              tw.appendChild(c);\r
-            });\r
-            row.appendChild(tw);\r
-          }\r
-          box.appendChild(row);\r
-        });\r
-      }\r
-      function updateMcpSummary() {\r
-        var el = $("mcp-summary"); if (!el) return;\r
-        var servers = state.settings.mcpServers || [];\r
-        var connected = 0, tools = 0;\r
-        servers.forEach(function (s) {\r
-          var st = mcpState[s.url];\r
-          if (st && st.connected) { connected++; tools += (st.tools ? st.tools.length : 0); }\r
-        });\r
-        el.textContent = connected + "/" + servers.length + " servers \\u00b7 " + tools + " tools";\r
-      }\r
-\r
-      // =========================================================\r
-      // send / stream\r
-      // =========================================================\r
-      function send() {\r
-        if (busy) return;\r
-        var text = inputEl.value.trim();\r
-        if (!text && pendingImages.length === 0) return;\r
-        // Block image input for non-vision models with a clear message.\r
-        if (pendingImages.length && !isVisionModel(state.settings.model)) {\r
-          toast("This model does not support image input. Select a vision model (name contains 'v', e.g. glm-4.6v).");\r
-          return;\r
-        }\r
-        var c = activeConv(); if (!c) { newConv(); c = activeConv(); }\r
-        var images = pendingImages.map(function (p) { return p.dataUrl; });\r
-        c.messages.push({ role: "user", content: text, images: images.length ? images : undefined });\r
-        if (c.messages.filter(function (m) { return m.role === "user"; }).length === 1 && text) {\r
-          c.title = text.slice(0, 40);\r
-        }\r
-        inputEl.value = ""; autoGrow(); pendingImages = []; renderAttachPreview(); renderSidebar();\r
-        renderMessages();\r
-        runCompletion(c);\r
-      }\r
-\r
-      function regenerate() {\r
-        if (busy) return;\r
-        var c = activeConv(); if (!c) return;\r
-        while (c.messages.length && c.messages[c.messages.length - 1].role === "assistant") c.messages.pop();\r
-        renderMessages();\r
-        runCompletion(c);\r
-      }\r
-\r
-      function runCompletion(conv) {\r
-        setBusy(true);\r
-        runToolLoop(conv, 0);\r
-      }\r
-\r
-      // One assistant turn per call; recurses while the model requests tools.\r
-      function runToolLoop(conv, depth) {\r
-        if (depth > 8) {\r
-          toast("Stopped after 8 tool rounds.");\r
-          finalizeLoop();\r
-          return;\r
-        }\r
-        var assistant = { role: "assistant", content: "", reasoning: "", model: conv.model || state.settings.model, truncated: false };\r
-        conv.messages.push(assistant);\r
-        renderMessages();\r
-\r
-        streamOnce(conv, assistant).then(function (toolCalls) {\r
-          if (toolCalls && toolCalls.length) {\r
-            assistant.toolCalls = toolCalls;\r
-            saveState(); renderMessages();\r
-            // Auto-execute every tool call against its MCP server, sequentially.\r
-            var seq = Promise.resolve();\r
-            toolCalls.forEach(function (tc) {\r
-              seq = seq.then(function () {\r
-                return execMcpTool(tc).then(function (result) {\r
-                  conv.messages.push({ role: "tool", toolCallId: tc.id, content: result });\r
-                }, function (err) {\r
-                  conv.messages.push({ role: "tool", toolCallId: tc.id, content: "Error: " + String((err && err.message) || err) });\r
-                });\r
-              });\r
-            });\r
-            seq.then(function () {\r
-              saveState(); renderMessages(); scrollBottom(true);\r
-              runToolLoop(conv, depth + 1);   // feed results back to the model\r
-            });\r
-          } else {\r
-            finalizeLoop();\r
-          }\r
-        });\r
-\r
-        function finalizeLoop() {\r
-          setBusy(false);\r
-          abortCtrl = null;\r
-          saveState();\r
-          renderSidebar();\r
-        }\r
-      }\r
-\r
-      // Stream one completion. Resolves to an array of accumulated tool calls\r
-      // (empty/null when the model just replied with text).\r
-      function streamOnce(conv, assistant) {\r
-        return new Promise(function (resolve) {\r
-          abortCtrl = new AbortController();\r
-          var toolAccum = {};     // index -> {id, name, arguments}\r
-          var finished = false;\r
-\r
-          fetch("/v1/chat/completions", {\r
-            method: "POST",\r
-            headers: {\r
-              "content-type": "application/json",\r
-              "authorization": state.settings.apiKey ? "Bearer " + state.settings.apiKey : "",\r
-            },\r
-            body: JSON.stringify(buildBody(conv)),\r
-            signal: abortCtrl.signal,\r
-          }).then(function (r) {\r
-            if (!r.ok || !r.body) {\r
-              return r.text().then(function (t) {\r
-                assistant.content = "**Request failed (" + r.status + ").**\\n\\n\`\`\`\\n" + (t || r.statusText).slice(0, 800) + "\\n\`\`\`";\r
-                updateStreamingDom(assistant, true);\r
-                resolve(null);\r
-                throw new Error("__stop__");\r
-              });\r
-            }\r
-            var reader = r.body.getReader();\r
-            var dec = new TextDecoder();\r
-            var buf = "";\r
-            var lastRender = 0;\r
-            function pump() {\r
-              return reader.read().then(function (chunk) {\r
-                if (chunk.done) { return; }\r
-                buf += dec.decode(chunk.value, { stream: true });\r
-                var lines = buf.split("\\n");\r
-                buf = lines.pop();\r
-                for (var i = 0; i < lines.length; i++) {\r
-                  var line = lines[i].trim();\r
-                  if (!line || line.indexOf("data:") !== 0) continue;\r
-                  var data = line.slice(5).trim();\r
-                  if (data === "[DONE]") { finished = true; break; }\r
-                  var json; try { json = JSON.parse(data); } catch (e) { continue; }\r
-                  var choice = json.choices && json.choices[0];\r
-                  if (!choice) continue;\r
-                  var d = choice.delta || {};\r
-                  if (d.reasoning_content) assistant.reasoning += d.reasoning_content;\r
-                  if (d.content) assistant.content += d.content;\r
-                  if (d.tool_calls) {\r
-                    d.tool_calls.forEach(function (tc) {\r
-                      var idx = tc.index || 0;\r
-                      var slot = toolAccum[idx] = toolAccum[idx] || { id: "", name: "", arguments: "" };\r
-                      if (tc.id) slot.id = tc.id;\r
-                      if (tc.function) {\r
-                        if (tc.function.name) slot.name = tc.function.name;\r
-                        if (tc.function.arguments) slot.arguments += tc.function.arguments;\r
-                      }\r
-                    });\r
-                  }\r
-                  if (choice.finish_reason === "length") assistant.truncated = true;\r
-                }\r
-                var now = Date.now();\r
-                if (now - lastRender > 33) { lastRender = now; updateStreamingDom(assistant, false); }\r
-                if (finished) { return; }\r
-                return pump();\r
-              });\r
-            }\r
-            return pump().then(function () {\r
-              updateStreamingDom(assistant, true);\r
-              var tcs = Object.keys(toolAccum).map(function (k) { return toolAccum[k]; }).filter(function (t) { return t.id && t.name; });\r
-              if (!assistant.content && !assistant.reasoning && !tcs.length) {\r
-                assistant.content = "_(empty response)_"; updateStreamingDom(assistant, true);\r
-              }\r
-              resolve(tcs.length ? tcs : null);\r
-            });\r
-          }).catch(function (e) {\r
-            if (e && e.message === "__stop__") return;\r
-            if (e && e.name === "AbortError") {\r
-              assistant.content += "\\n\\n_\\u2026stopped._"; updateStreamingDom(assistant, true);\r
-            } else {\r
-              assistant.content = "**Error:** " + escapeHtml(String((e && e.message) || e));\r
-              updateStreamingDom(assistant, true);\r
-            }\r
-            resolve(null);\r
-          });\r
-        });\r
-      }\r
-\r
-      function updateStreamingDom(assistant, done) {\r
-        var last = msgList.lastChild;\r
-        if (!last || !last.classList || !last.classList.contains("msg")) { renderMessages(); last = msgList.lastChild; }\r
-        if (!last) return;\r
-        var body = last.querySelector(".content");\r
-        if (!body) return;\r
-        var think = body.querySelector(".think");\r
-        if (assistant.reasoning) {\r
-          if (!think) {\r
-            think = document.createElement("details"); think.className = "think"; think.open = true;\r
-            var sum = document.createElement("summary");\r
-            var tb = document.createElement("div"); tb.className = "think-body";\r
-            think.appendChild(sum); think.appendChild(tb);\r
-            body.insertBefore(think, body.firstChild);\r
-          }\r
-          think.querySelector(".think-body").textContent = assistant.reasoning;\r
-          think.querySelector("summary").textContent = done ? "Thought process" : "Thinking\\u2026";\r
-          if (done) think.open = false;\r
-        }\r
-        if (assistant.content) {\r
-          body.innerHTML = renderMarkdown(assistant.content);\r
-          enhanceCode(body);\r
-          if (think) body.insertBefore(think, body.firstChild); // keep thinking on top\r
-        }\r
-        if (done) {\r
-          var oldMeta = last.querySelector(".msg-meta"); if (oldMeta) oldMeta.remove();\r
-          last.appendChild(meta(assistant, true));\r
-        }\r
-        scrollBottom();\r
-      }\r
-\r
-      function setBusy(b) {\r
-        busy = b;\r
-        sendBtn.className = "c-btn " + (b ? "stop" : "send");\r
-        sendBtn.innerHTML = b ? "\\u25a0" : "\\u2191";\r
-        sendBtn.title = b ? "Stop" : "Send";\r
-        hintEl.textContent = b ? "Generating \\u2014 press Stop to interrupt." : "";\r
-      }\r
-      function stop() { if (abortCtrl) { try { abortCtrl.abort(); } catch (e) {} } }\r
-\r
-      // =========================================================\r
-      // autoscroll\r
-      // =========================================================\r
-      function nearBottom() {\r
-        return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 120;\r
-      }\r
-      function scrollBottom(force) {\r
-        if (force || nearBottom()) messages.scrollTop = messages.scrollHeight;\r
-      }\r
-\r
-      // =========================================================\r
-      // composer helpers\r
-      // =========================================================\r
-      function autoGrow() {\r
-        inputEl.style.height = "auto";\r
-        inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + "px";\r
-      }\r
-      function renderAttachPreview() {\r
-        var box = $("attach-preview"); box.innerHTML = "";\r
-        pendingImages.forEach(function (p, i) {\r
-          var w = document.createElement("div"); w.className = "ap";\r
-          var img = document.createElement("img"); img.src = p.dataUrl;\r
-          var rm = document.createElement("button"); rm.className = "ap-rm"; rm.innerHTML = "\\u2715";\r
-          rm.onclick = function () { pendingImages.splice(i, 1); renderAttachPreview(); };\r
-          w.appendChild(img); w.appendChild(rm); box.appendChild(w);\r
-        });\r
-      }\r
-      function readImages(files) {\r
-        Array.from(files).forEach(function (f) {\r
-          if (!/image\\//.test(f.type)) return;\r
-          var r = new FileReader();\r
-          r.onload = function () { pendingImages.push({ name: f.name, dataUrl: r.result }); renderAttachPreview(); };\r
-          r.readAsDataURL(f);\r
-        });\r
-      }\r
-\r
-      // =========================================================\r
-      // settings modal\r
-      // =========================================================\r
-      function openSettings() { syncSettingsForm(); renderMcpStatus(state.settings.mcpServers); updateMcpSummary(); overlay.classList.add("open"); }\r
-      function closeSettings() { overlay.classList.remove("open"); }\r
-      function syncSettingsForm() {\r
-        var s = state.settings;\r
-        $("s-apikey").value = s.apiKey;\r
-        $("s-system").value = s.systemPrompt;\r
-        $("s-temp").value = s.temperature; $("s-temp-val").textContent = Number(s.temperature).toFixed(2);\r
-        $("s-topp").value = s.topP; $("s-topp-val").textContent = Number(s.topP).toFixed(2);\r
-        $("s-maxtok").value = s.maxTokens;\r
-        $("s-dosample").checked = s.doSample;\r
-        $("s-mcpenable").checked = s.mcpEnabled !== false;\r
-        $("s-mcp").value = (s.mcpServers || []).map(function (m) {\r
-          return m.authKey ? (m.url + "," + m.authKey) : m.url;\r
-        }).join("\\n");\r
-        $("s-cors").value = s.mcpCorsProxy || "";\r
-        $("s-enter").checked = s.enterToSend;\r
-        $("banner").style.display = s.apiKey ? "none" : "block";\r
-        $("banner").textContent = "No proxy API key set. If your proxy requires one, requests will return 401.";\r
-      }\r
-      function readSettingsForm() {\r
-        var s = state.settings;\r
-        s.apiKey = $("s-apikey").value.trim();\r
-        s.systemPrompt = $("s-system").value;\r
-        s.temperature = parseFloat($("s-temp").value);\r
-        s.topP = parseFloat($("s-topp").value);\r
-        s.maxTokens = parseInt($("s-maxtok").value, 10) || 4096;\r
-        s.doSample = $("s-dosample").checked;\r
-        s.mcpEnabled = $("s-mcpenable").checked;\r
-        s.mcpServers = $("s-mcp").value.split("\\n").map(function (ln) {\r
-          var parts = ln.trim().split(",");\r
-          var url = (parts[0] || "").trim();\r
-          if (!url) return null;\r
-          return { url: url, authKey: (parts[1] || "").trim() };\r
-        }).filter(Boolean);\r
-        s.mcpCorsProxy = $("s-cors").value.trim();\r
-        s.enterToSend = $("s-enter").checked;\r
-        saveState();\r
-      }\r
-\r
-      // =========================================================\r
-      // toast\r
-      // =========================================================\r
-      var toastTimer;\r
-      function toast(msg) {\r
-        toastEl.textContent = msg; toastEl.classList.add("show");\r
-        clearTimeout(toastTimer); toastTimer = setTimeout(function () { toastEl.classList.remove("show"); }, 2600);\r
-      }\r
-\r
-      // =========================================================\r
-      // wiring\r
-      // =========================================================\r
-      $("btn-new").onclick = newConv;\r
-      $("btn-settings").onclick = openSettings;\r
-      $("btn-close-settings").onclick = function () { readSettingsForm(); closeSettings(); fetchModels(); populateEffort(); syncThinkButton(); };\r
-      $("btn-clear-all").onclick = function () {\r
-        if (!confirm("Delete ALL conversations and reset settings? This cannot be undone.")) return;\r
-        localStorage.removeItem(STORE);\r
-        state = loadState(); saveState(); applyTheme(); renderSidebar(); renderMessages();\r
-        syncSettingsForm(); populateModels(KNOWN_MODELS); toast("Reset complete.");\r
-      };\r
-      $("btn-theme").onclick = function () {\r
-        var cur = document.documentElement.getAttribute("data-theme");\r
-        state.settings.theme = cur === "dark" ? "light" : "dark";\r
-        saveState(); applyTheme();\r
-      };\r
-      $("btn-menu").onclick = function () { sidebar.classList.toggle("collapsed"); };\r
-      $("btn-mcp-connect").onclick = connectAllMcp;\r
-      $("btn-mcp-disconnect").onclick = disconnectMcp;\r
-      overlay.onclick = function (e) { if (e.target === overlay) closeSettings(); };\r
-\r
-      $("s-temp").addEventListener("input", function () { $("s-temp-val").textContent = parseFloat($("s-temp").value).toFixed(2); });\r
-      $("s-topp").addEventListener("input", function () { $("s-topp-val").textContent = parseFloat($("s-topp").value).toFixed(2); });\r
-      $("s-apikey").addEventListener("input", function () {\r
-        $("banner").style.display = $("s-apikey").value.trim() ? "none" : "block";\r
-      });\r
-\r
-      modelSel.onchange = function () {\r
-        state.settings.model = modelSel.value;\r
-        var c = activeConv(); if (c) c.model = modelSel.value;\r
-        // If images were queued for a vision model and the user switched to a\r
-        // non-vision one, drop them and explain.\r
-        if (pendingImages.length && !isVisionModel(modelSel.value)) {\r
-          pendingImages = []; renderAttachPreview();\r
-          toast("Switched to a non-vision model \\u2014 attached images were removed.");\r
-        }\r
-        saveState(); syncAttachVisibility(); populateEffort();\r
-      };\r
-      // GLM-5.2 only has two distinct reasoning-effort levels (low/medium map\r
-      // to high, xhigh maps to max), so expose just high and max. Other models\r
-      // get a disabled placeholder (reasoning_effort is GLM-5.2+ only).\r
-      function populateEffort() {\r
-        var model = modelSel.value;\r
-        effortSel.innerHTML = "";\r
-        if (isReasoningModel(model)) {\r
-          ["max", "high"].forEach(function (v) {\r
-            var o = document.createElement("option");\r
-            o.value = v; o.textContent = v;\r
-            effortSel.appendChild(o);\r
-          });\r
-          var cur = state.settings.reasoningEffort;\r
-          effortSel.value = (cur === "high") ? "high" : "max";\r
-          effortSel.disabled = !state.settings.thinkingEnabled;\r
-        } else {\r
-          var o = document.createElement("option");\r
-          o.value = ""; o.textContent = "n/a";\r
-          effortSel.appendChild(o);\r
-          effortSel.disabled = true;\r
-        }\r
-      }\r
-      function syncThinkButton() {\r
-        var on = state.settings.thinkingEnabled;\r
-        btnThink.classList.toggle("on", on);\r
-        btnThink.textContent = on ? "Think: on" : "Think: off";\r
-        btnThink.title = on ? "Deep thinking on \\u2014 click to turn off" : "Deep thinking off \\u2014 click to turn on";\r
-        // Repopulate so the effort dropdown's disabled state tracks the toggle\r
-        // (populateEffort sets disabled = !thinkingEnabled for reasoning models).\r
-        populateEffort();\r
-      }\r
-      effortSel.onchange = function () {\r
-        state.settings.reasoningEffort = effortSel.value || "max";\r
-        saveState();\r
-      };\r
-      btnThink.onclick = function () {\r
-        state.settings.thinkingEnabled = !state.settings.thinkingEnabled;\r
-        saveState(); syncThinkButton();\r
-      };\r
-\r
-      attachBtn.onclick = function () { $("attach-input").click(); };\r
-      $("attach-input").onchange = function (e) { readImages(e.target.files); e.target.value = ""; };\r
-      // drag & drop onto composer\r
-      var composer = document.querySelector(".composer");\r
-      ["dragover", "dragenter"].forEach(function (ev) {\r
-        composer.addEventListener(ev, function (e) { e.preventDefault(); composer.style.borderColor = "var(--accent)"; });\r
-      });\r
-      ["dragleave", "drop"].forEach(function (ev) {\r
-        composer.addEventListener(ev, function (e) { e.preventDefault(); composer.style.borderColor = ""; });\r
-      });\r
-      composer.addEventListener("drop", function (e) {\r
-        if (!isVisionModel(modelSel.value)) { toast("Select a vision model (name contains 'v') to attach images."); return; }\r
-        if (e.dataTransfer && e.dataTransfer.files) readImages(e.dataTransfer.files);\r
-      });\r
-\r
-      inputEl.addEventListener("input", autoGrow);\r
-      inputEl.addEventListener("keydown", function (e) {\r
-        if (e.key === "Enter" && !e.shiftKey && state.settings.enterToSend && !e.isComposing) { e.preventDefault(); send(); }\r
-        else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); }\r
-      });\r
-      sendBtn.onclick = function () { if (busy) stop(); else send(); };\r
-\r
-      // =========================================================\r
-      // boot\r
-      // =========================================================\r
-      applyTheme();\r
-      populateModels(KNOWN_MODELS);\r
-      renderSidebar(); renderMessages();\r
-      populateEffort(); syncThinkButton();\r
-      fetchModels();\r
-      autoGrow();\r
-      inputEl.focus();\r
-      if (!state.conversations.length) newConv();\r
-    })();\r
-    </script>\r
-  </body>\r
-</html>\r
-`;
-
-// src/provider/providers.ts
-var ZAI_PROVIDER = {
-  id: "zai",
-  displayName: "Z.AI",
-  anthropicBaseURL: "https://api.z.ai/api/anthropic",
-  openaiBaseURL: "https://api.z.ai/api/coding/paas/v4",
-  bizHost: "https://api.z.ai"
-};
-var BIGMODEL_PROVIDER = {
-  id: "bigmodel",
-  displayName: "BigModel / \u667A\u8C31",
-  anthropicBaseURL: "https://open.bigmodel.cn/api/anthropic",
-  openaiBaseURL: "https://open.bigmodel.cn/api/coding/paas/v4",
-  bizHost: "https://open.bigmodel.cn"
-};
-var PROVIDERS = {
-  zai: ZAI_PROVIDER,
-  bigmodel: BIGMODEL_PROVIDER
-};
-function getProvider(id2) {
-  const def = PROVIDERS[id2];
-  if (!def) {
-    throw new Error(`Unknown provider: "${id2}"`);
-  }
-  return def;
-}
-
-// src/auth/types.ts
-function credentialString(cred) {
-  if (cred.secret) {
-    return `${cred.apiKey}.${cred.secret}`;
-  }
-  return cred.apiKey;
-}
-
-// src/proxy/upstream.ts
-init_identity();
-
-// src/proxy/trace-headers.ts
-var QUERY_PREFIX = "query_";
-var SUBAGENT_PREFIX = "subagent_agent_";
-var SESSION_PREFIXES = ["sess_", SUBAGENT_PREFIX];
-function resolveSessionType(ctx) {
-  const explicit = ctx.sessionType?.trim();
-  if (explicit === "main" || explicit === "subagent" || explicit === "other") return explicit;
-  if (ctx.sessionId?.startsWith(SUBAGENT_PREFIX) && ctx.sessionId.length > SUBAGENT_PREFIX.length) return "subagent";
-  return "main";
-}
-function buildZcodeTraceHeaders(ctx = {}) {
-  const queryId = ctx.queryId ? stripHeaderInternalPrefixes(ctx.queryId, [QUERY_PREFIX]) : void 0;
-  const sessionId = ctx.sessionId ? stripHeaderInternalPrefixes(ctx.sessionId, SESSION_PREFIXES) : void 0;
-  return {
-    "x-request-id": ctx.requestId ?? crypto.randomUUID(),
-    "x-zcode-session-type": resolveSessionType(ctx),
-    "x-zcode-trace-id": ctx.traceId ?? crypto.randomUUID(),
-    ...queryId ? { "x-query-id": queryId } : {},
-    ...sessionId ? { "x-session-id": sessionId } : {}
-  };
-}
-function stripHeaderInternalPrefixes(value2, prefixes) {
-  let out = value2;
-  for (const prefix2 of prefixes) {
-    if (out.startsWith(prefix2) && out.length > prefix2.length) out = out.slice(prefix2.length);
-  }
-  return out || value2;
-}
-
-// src/proxy/client-session.ts
-var import_node_crypto = __toESM(require("node:crypto"), 1);
-function createClientSessionResolver(now = () => Date.now()) {
-  const nodes = /* @__PURE__ */ new Map();
-  const sessions = /* @__PURE__ */ new Map();
-  function remember(nodeHash, session, config) {
-    const stored = { ...session, nodeHash, lastSeenAt: now() };
-    nodes.set(nodeHash, stored);
-    sessions.set(stored.sessionId, stored);
-    prune(config);
-  }
-  function prune(config) {
-    const cutoff = now() - config.ttlSeconds * 1e3;
-    for (const [hash, node] of nodes.entries()) {
-      if (node.lastSeenAt < cutoff) nodes.delete(hash);
-    }
-    for (const [id2, node] of sessions.entries()) {
-      if (node.lastSeenAt < cutoff) sessions.delete(id2);
-    }
-    while (sessions.size > config.maxSessions) {
-      let oldestId = "";
-      let oldestAt = Infinity;
-      for (const [id2, node] of sessions.entries()) {
-        if (node.lastSeenAt < oldestAt) {
-          oldestAt = node.lastSeenAt;
-          oldestId = id2;
-        }
-      }
-      if (!oldestId) break;
-      sessions.delete(oldestId);
-      for (const [hash, node] of nodes.entries()) {
-        if (node.sessionId === oldestId) nodes.delete(hash);
-      }
-    }
-  }
-  function action(config) {
-    return config.mode;
-  }
-  return {
-    resolve(req, body2, format, model, config) {
-      if (config.mode === "off") return { source: "none", action: "off", confidence: 0 };
-      prune(config);
-      const explicitTrace = requestTraceContext(req, body2);
-      if (explicitTrace.sessionId) return explicitResult(explicitTrace, config);
-      const canonical = canonicalize(body2, format, model);
-      if (!canonical) {
-        if (hasTraceContext(explicitTrace)) return explicitResult(explicitTrace, config);
-        return { source: "none", action: action(config), confidence: 0 };
-      }
-      const nodeHash = hashJson(canonical.identity);
-      const existing = nodes.get(nodeHash);
-      if (existing) {
-        remember(nodeHash, existing, config);
-        return withTraceContext(result("lineage", action(config), existing, 0.95), explicitTrace);
-      }
-      const parent2 = findLinearParent(canonical, nodes);
-      if (parent2) {
-        remember(nodeHash, parent2, config);
-        return withTraceContext(result("lineage", action(config), parent2, 0.9), explicitTrace);
-      }
-      const fresh = newSession();
-      remember(nodeHash, fresh, config);
-      return withTraceContext(result("lineage", action(config), fresh, 0.75), explicitTrace);
-    }
-  };
-}
-var defaultClientSessionResolver = createClientSessionResolver();
-function result(source, action, node, confidence) {
-  return {
-    source,
-    action,
-    confidence,
-    sessionId: node.sessionId,
-    upstreamSessionId: node.upstreamSessionId
-  };
-}
-function requestTraceContext(req, body2) {
-  const bodyTrace = bodyMetadataTrace(body2);
-  return {
-    requestId: firstHeader(req.headers, ["x-request-id"]) ?? bodyTrace.requestId,
-    traceId: firstHeader(req.headers, ["x-zcode-trace-id"]) ?? bodyTrace.traceId,
-    queryId: firstHeader(req.headers, ["x-query-id"]) ?? bodyTrace.queryId,
-    sessionId: firstHeader(req.headers, ["x-opencode-session", "x-claude-code-session-id", "x-session-id", "x-parent-session-id", "helicone-session-id"]) ?? bodyTrace.sessionId
-  };
-}
-function explicitResult(trace, config) {
-  return {
-    source: "explicit",
-    action: config.mode,
-    confidence: 1,
-    ...trace.requestId ? { requestId: trace.requestId } : {},
-    ...trace.traceId ? { traceId: trace.traceId } : {},
-    ...trace.queryId ? { queryId: trace.queryId } : {},
-    ...trace.sessionId ? { sessionId: trace.sessionId, upstreamSessionId: trace.sessionId } : {}
-  };
-}
-function withTraceContext(session, trace) {
-  if (!trace.requestId && !trace.traceId && !trace.queryId) return session;
-  return {
-    ...session,
-    ...trace.requestId ? { requestId: trace.requestId } : {},
-    ...trace.traceId ? { traceId: trace.traceId } : {},
-    ...trace.queryId ? { queryId: trace.queryId } : {}
-  };
-}
-function hasTraceContext(trace) {
-  return Boolean(trace.requestId || trace.traceId || trace.queryId || trace.sessionId);
-}
-function firstHeader(headers2, names) {
-  for (const name2 of names) {
-    const value2 = headers2.get(name2);
-    if (value2 && value2.trim()) return value2.trim();
-  }
-  return null;
-}
-function bodyMetadataTrace(body2) {
-  if (!body2) return {};
-  try {
-    const parsed = JSON.parse(body2);
-    const metadata = parsed?.metadata;
-    if (!metadata || typeof metadata !== "object") return {};
-    return {
-      requestId: stringProperty(metadata, ["requestId", "request_id"]),
-      traceId: stringProperty(metadata, ["traceId", "trace_id"]),
-      queryId: stringProperty(metadata, ["queryId", "query_id"]),
-      sessionId: stringProperty(metadata, ["sessionId", "session_id", "conversationId", "conversation_id"])
-    };
-  } catch {
-    return {};
-  }
-}
-function stringProperty(obj, names) {
-  for (const name2 of names) {
-    const value2 = obj[name2];
-    if (typeof value2 === "string" && value2.trim()) return value2.trim();
-  }
-  return void 0;
-}
-function canonicalize(body2, format, fallbackModel) {
-  if (!body2) return null;
-  let parsed;
-  try {
-    parsed = JSON.parse(body2);
-  } catch {
-    return null;
-  }
-  if (!parsed || typeof parsed !== "object") return null;
-  const model = typeof parsed.model === "string" ? parsed.model : fallbackModel;
-  const messages = Array.isArray(parsed.messages) ? parsed.messages : [];
-  if (messages.length === 0) return null;
-  const identity = {
-    format,
-    model,
-    system: parsed.system,
-    developer: messages.filter((m) => typeof m === "object" && m !== null && m.role === "developer"),
-    tools: parsed.tools,
-    tool_choice: parsed.tool_choice,
-    messages
-  };
-  return { model, identity, messages };
-}
-function findLinearParent(canonical, nodes) {
-  if (canonical.messages.length < 3) return null;
-  const prefix2 = {
-    ...canonical.identity,
-    messages: canonical.messages.slice(0, -2)
-  };
-  if (prefix2.messages.length === 0) return null;
-  return nodes.get(hashJson(prefix2)) ?? null;
-}
-function newSession() {
-  const upstreamSessionId = crypto.randomUUID();
-  return {
-    nodeHash: "",
-    sessionId: `ses_${upstreamSessionId.replace(/-/g, "").slice(0, 12)}`,
-    upstreamSessionId,
-    lastSeenAt: Date.now()
-  };
-}
-function hashJson(value2) {
-  return hashString(stableStringify(value2));
-}
-function hashString(value2) {
-  return import_node_crypto.default.createHash("sha256").update(value2, "utf-8").digest("hex");
-}
-function stableStringify(value2) {
-  if (value2 === null || typeof value2 !== "object") return JSON.stringify(value2);
-  if (Array.isArray(value2)) return `[${value2.map(stableStringify).join(",")}]`;
-  const obj = value2;
-  return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
-}
-
-// src/proxy/session-context.ts
-function resolveSessionContext(input) {
-  if (input.config.clientIdentity.mode === "off") return void 0;
-  const resolver = input.resolver ?? defaultClientSessionResolver;
-  return resolver.resolve(input.clientReq, input.body, input.upstreamFormat, input.model, input.config.clientIdentity);
-}
-function shouldUseExactTraceHeaders(plan, session) {
-  return plan === "start-plan" || hasExplicitTraceHeaders(session) || shouldForwardSessionId(session);
-}
-function shouldForwardSessionId(session) {
-  return session?.source === "explicit" || session?.action === "enforce";
-}
-function sessionIdForHeader(session) {
-  if (!session || !shouldForwardSessionId(session)) return void 0;
-  return session.upstreamSessionId ?? session.sessionId;
-}
-function hasExplicitTraceHeaders(session) {
-  return Boolean(session?.requestId || session?.traceId || session?.queryId);
-}
-
-// src/proxy/upstream.ts
-var ANTHROPIC_VERSION = "2023-06-01";
-var STARTPLAN_ANTHROPIC_BASE = "https://zcode.z.ai/api/v1/zcode-plan";
-var STRIP_HEADERS = /* @__PURE__ */ new Set([
-  "host",
-  "authorization",
-  "x-api-key",
-  "anthropic-version",
-  "content-length",
-  "connection",
-  "proxy-authorization",
-  "proxy-authenticate",
-  "transfer-encoding",
-  "x-request-id",
-  "x-zcode-trace-id",
-  "x-zcode-session-type",
-  "x-query-id",
-  "x-session-id",
-  // V4 signing headers are proxy-generated only; inbound copies must never
-  // reach the upstream (spoofed values would either fail verification or
-  // silently disable proxy signing via the existing-header guard).
-  "x-client-ts",
-  "x-client-version",
-  "x-client-sig",
-  "x-client-nonce",
-  "x-app-id",
-  "x-client-pow",
-  "x-client-sign-verified"
-]);
-function buildUpstreamURL(format, provider, plan = "coding-plan") {
-  if (plan === "start-plan") {
-    return `${STARTPLAN_ANTHROPIC_BASE}/anthropic/v1/messages`;
-  }
-  if (format === "anthropic") {
-    return `${provider.anthropicBaseURL}/v1/messages`;
-  }
-  return `${provider.openaiBaseURL}/chat/completions`;
-}
-function buildAuthHeaders(format, cred, identity, plan = "coding-plan", clientSession) {
-  const credStr = plan === "start-plan" && cred.jwt ? cred.jwt : credentialString(cred);
-  const base = {
-    ...buildIdentityHeaders(identity),
-    ...buildTraceHeaders(plan, clientSession)
-  };
-  if (format === "anthropic") {
-    if (plan === "start-plan" && cred.jwt) {
-      base["authorization"] = `Bearer ${cred.jwt}`;
-    } else {
-      base["x-api-key"] = credStr;
-    }
-    base["anthropic-version"] = ANTHROPIC_VERSION;
-  } else {
-    base["authorization"] = `Bearer ${credStr}`;
-  }
-  return base;
-}
-function buildTraceHeaders(plan, clientSession) {
-  if (shouldUseExactTraceHeaders(plan, clientSession)) {
-    return buildZcodeTraceHeaders({
-      requestId: clientSession?.requestId,
-      traceId: clientSession?.traceId,
-      queryId: clientSession?.queryId,
-      sessionId: sessionIdForHeader(clientSession)
-    });
-  }
-  const headers2 = {
-    "x-request-id": crypto.randomUUID(),
-    // ZCode 3.9.1 attributes every model request; a forwarded conversation turn is the main-agent loop.
-    "x-zcode-session-type": "main",
-    "x-zcode-trace-id": crypto.randomUUID()
-  };
-  if (plan !== "start-plan") {
-    headers2["x-query-id"] = crypto.randomUUID();
-    headers2["x-session-id"] = crypto.randomUUID();
-  }
-  return headers2;
-}
-function collectPassthroughHeaders(req) {
-  const result3 = {};
-  for (const [key, value2] of req.headers.entries()) {
-    const lower = key.toLowerCase();
-    if (STRIP_HEADERS.has(lower)) continue;
-    if (lower === "anthropic-beta") {
-      result3[lower] = value2;
-    }
-  }
-  return result3;
-}
-function buildUpstreamHeaderPairs(clientReq, format, cred, identity, plan = "coding-plan", extraHeaders, clientSession) {
-  const clientAcceptEncoding = clientReq.headers.get("accept-encoding") ?? "gzip";
-  return [
-    ["content-type", "application/json"],
-    ["accept-encoding", clientAcceptEncoding],
-    ...Object.entries(collectPassthroughHeaders(clientReq)),
-    ...Object.entries(buildAuthHeaders(format, cred, identity, plan, clientSession)),
-    ...Object.entries(extraHeaders ?? {})
-  ];
-}
-function buildUpstreamRequest(clientReq, format, provider, cred, body2, identity, plan = "coding-plan", extraHeaders, clientSession) {
-  const url2 = buildUpstreamURL(format, provider, plan);
-  const headerPairs = buildUpstreamHeaderPairs(clientReq, format, cred, identity, plan, extraHeaders, clientSession);
-  const init = {
-    method: "POST",
-    headers: Object.fromEntries(headerPairs)
-  };
-  if (body2 !== void 0) {
-    init.body = body2;
-  }
-  return new Request(url2, init);
-}
-
-// src/proxy/endpoint-routing.ts
-init_identity();
-var DEFAULT_ORIGIN = "https://zcode.z.ai";
-var CONFIG_PATH = "/api/v1/agent/configs";
-var SUCCESS_TTL_MS = 3e5;
-var FAILURE_COOLDOWN_MS = 3e4;
-var REQUEST_TIMEOUT_MS = 3e3;
-var MAX_MAPPING_ENTRIES = 256;
-function normalizePath(pathname) {
-  if (pathname === "/") return "/";
-  return pathname.replace(/\/+$/u, "") || "/";
-}
-function routingKey(url2) {
-  const port = url2.port || "443";
-  return `${url2.protocol}//${url2.hostname.toLowerCase()}:${port}${normalizePath(url2.pathname)}`;
-}
-function parseMappingUrl(value2, field) {
-  if (typeof value2 !== "string") throw new Error(`mapping.${field} must be a string`);
-  const parsed = new URL(value2);
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) {
-    throw new Error(`mapping.${field} URL is not a plain https URL`);
-  }
-  return parsed;
-}
-var EndpointRoutingService = class {
-  configUrl;
-  identity;
-  credential;
-  fetchImpl;
-  now;
-  successTtlMs;
-  failureCooldownMs;
-  requestTimeoutMs;
-  onSnapshot;
-  snapshot;
-  retryAfter = 0;
-  refreshPromise;
-  constructor(opts) {
-    this.configUrl = `${(opts.origin?.trim() || DEFAULT_ORIGIN).replace(/\/+$/u, "")}${CONFIG_PATH}`;
-    this.identity = opts.identity;
-    this.credential = opts.credential;
-    this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.now = opts.now ?? Date.now;
-    this.successTtlMs = opts.successTtlMs ?? SUCCESS_TTL_MS;
-    this.failureCooldownMs = opts.failureCooldownMs ?? FAILURE_COOLDOWN_MS;
-    this.requestTimeoutMs = opts.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
-    this.onSnapshot = opts.onSnapshot;
-  }
-  /** True when at least one successful snapshot has been fetched. */
-  hasSnapshot() {
-    return this.snapshot !== void 0;
-  }
-  /**
-   * Resolve a request URL through the mapping table. Never throws: any error
-   * resolves to `{ routed: false, url }` so the caller keeps the original URL.
-   * The optional `credential` (coding-plan key) is attached as `x-api-key` on
-   * a mapping refresh fetch, mirroring the client's `sourceHeaders`.
-   */
-  async resolve(url2, credential) {
-    let parsed;
-    try {
-      parsed = new URL(url2);
-    } catch {
-      return { routed: false, url: url2 };
-    }
-    try {
-      await this.ensureFresh(credential);
-    } catch {
-    }
-    const target2 = this.snapshot?.mapping.get(routingKey(parsed));
-    if (!target2) return { routed: false, url: url2 };
-    const rewritten = new URL(target2);
-    rewritten.search = parsed.search;
-    return { routed: true, url: rewritten.href };
-  }
-  async ensureFresh(credential) {
-    const now = this.now();
-    if (this.snapshot && this.snapshot.expiresAt > now || this.retryAfter > now) return;
-    const pending = this.refreshPromise ?? this.beginRefresh(credential);
-    await pending;
-  }
-  beginRefresh(credential) {
-    const promise = this.refresh(credential).finally(() => {
-      if (this.refreshPromise === promise) this.refreshPromise = void 0;
-    });
-    this.refreshPromise = promise;
-    return promise;
-  }
-  async refresh(credential) {
-    const identityHeaders = Object.fromEntries(
-      Object.entries(buildIdentityHeaders(this.identity)).filter(([name2]) => name2 !== "X-ZCode-Agent")
-    );
-    const headers2 = {
-      ...identityHeaders,
-      Accept: "application/json"
-    };
-    const key = credential ?? this.credential?.();
-    if (key) headers2["x-api-key"] = key;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.requestTimeoutMs);
-    try {
-      const resp = await this.fetchImpl(this.configUrl, {
-        method: "GET",
-        headers: headers2,
-        redirect: "manual",
-        signal: controller.signal
-      });
-      if (resp.status < 200 || resp.status >= 300) throw new Error(`agent_configs_http_${resp.status}`);
-      const parsed = await resp.json();
-      const envelope = parsed;
-      if (!envelope || typeof envelope !== "object" || envelope.code !== 0) {
-        throw new Error("agent_configs_nonzero_code");
-      }
-      const data2 = envelope.data;
-      const entries2 = data2?.proxyEndpoint?.mapping;
-      const list = Array.isArray(entries2) ? entries2 : [];
-      if (list.length > MAX_MAPPING_ENTRIES) throw new Error("agent_configs_too_many_mappings");
-      const mapping = /* @__PURE__ */ new Map();
-      for (const entry of list) {
-        const raw = entry;
-        const from = parseMappingUrl(raw.from, "from");
-        const to = parseMappingUrl(raw.to, "to");
-        const key2 = routingKey(from);
-        if (mapping.has(key2)) throw new Error("agent_configs_duplicate_from");
-        mapping.set(key2, to.href);
-      }
-      this.snapshot = { expiresAt: this.now() + this.successTtlMs, mapping };
-      this.retryAfter = 0;
-      this.onSnapshot?.(mapping.size);
-    } catch {
-      this.retryAfter = this.now() + this.failureCooldownMs;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-};
-var defaultRouting = null;
-var defaultRoutingKey = "";
-function identityCacheKey(identity) {
-  return JSON.stringify([identity.appVersion, identity.sourceTitle, identity.refererOrigin, identity.deviceMid ?? ""]);
-}
-function getDefaultEndpointRouting(config) {
-  if (!config.endpointRouting.enabled) return null;
-  const key = `${config.endpointRouting.origin}
-${identityCacheKey(config.identity)}`;
-  if (!defaultRouting || key !== defaultRoutingKey) {
-    defaultRouting = new EndpointRoutingService({
-      origin: config.endpointRouting.origin,
-      identity: config.identity
-    });
-    defaultRoutingKey = key;
-  }
-  return defaultRouting;
-}
-
-// src/proxy/client-signing.ts
-init_identity();
-var DEFAULT_ORIGIN2 = "https://zcode.z.ai";
-var GATE_PATH = "/api/v1/agent/configs";
-var HANDSHAKE_PATH = "/api/paas/c1f3a7e2/v2/client";
-var APP_ID = "zcode";
-var POW_BITS = 8;
-var NONCE_BYTES = 16;
-var POW_NONCE_BYTES = 12;
-var KDF_SALT = "WD_CLIENT_SIGN_KDF_SALT";
-var KDF_INFO_HMAC = "getSignKey_hmac";
-var KDF_INFO_ED25519 = "ed25519_priv";
-var HANDSHAKE_METHOD = "get_sign_key";
-var GATE_TTL_MS = 36e5;
-var GATE_FAILURE_COOLDOWN_MS = 6e4;
-var GATE_UNAVAILABLE_COOLDOWN_MS = 3e4;
-var GATE_TIMEOUT_MS = 15e3;
-var HANDSHAKE_TIMEOUT_MS = 1e4;
-var VERIFY_SIGNATURE_INVALID = "VERIFY_SIGNATURE_INVALID";
-var VERIFY_APIKEY_EXPIRED = "VERIFY_APIKEY_EXPIRED";
-var UNSIGNED_PATHS = /* @__PURE__ */ new Set([
-  "/api/v1/zcode-plan/anthropic/v1/messages",
-  "/api/v1/zcode-plan/chat/completions",
-  "/api/v1/off-peak/anthropic/v1/messages"
-]);
-var SIGNING_HEADER_NAMES = /* @__PURE__ */ new Set([
-  "x-client-ts",
-  "x-client-version",
-  "x-client-sig",
-  "x-client-nonce",
-  "x-app-id",
-  "x-client-pow",
-  "x-client-sign-verified"
-]);
-var encoder = new TextEncoder();
-function encodeUtf8(value2) {
-  const bytes = encoder.encode(value2);
-  const out = new Uint8Array(bytes.byteLength);
-  out.set(bytes);
-  return out;
-}
-function bytesToBase64(bytes) {
-  let binary = "";
-  for (const b of bytes) binary += String.fromCharCode(b);
-  return btoa(binary);
-}
-function bytesToHex(bytes) {
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
-function randomHex(byteCount) {
-  return bytesToHex(crypto.getRandomValues(new Uint8Array(byteCount)));
-}
-function base64ToBytes(value2) {
-  if (!value2 || value2.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value2)) {
-    throw new Error("invalid base64");
-  }
-  const binary = atob(value2);
-  const out = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) out[i] = binary.charCodeAt(i);
-  return out;
-}
-async function hkdfBytes(secret, info) {
-  const key = await crypto.subtle.importKey("raw", encodeUtf8(secret), "HKDF", false, ["deriveBits"]);
-  return new Uint8Array(await crypto.subtle.deriveBits(
-    { name: "HKDF", hash: "SHA-256", salt: encodeUtf8(KDF_SALT), info: encodeUtf8(info) },
-    key,
-    256
-  ));
-}
-async function handshakeSignature(secret, message) {
-  const bits = await hkdfBytes(secret, KDF_INFO_HMAC);
-  try {
-    const key = await crypto.subtle.importKey("raw", bits, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-    const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, encodeUtf8(message)));
-    try {
-      return bytesToBase64(mac);
-    } finally {
-      mac.fill(0);
-    }
-  } finally {
-    bits.fill(0);
-  }
-}
-async function decryptSigningPrivateKey(apiKeyId, secret, privateCipher) {
-  const cipher = base64ToBytes(privateCipher);
-  if (cipher.byteLength <= 12 + 16) throw new Error("privateCipher is too short");
-  const aesKeyBits = await hkdfBytes(secret, KDF_INFO_ED25519);
-  try {
-    const aesKey = await crypto.subtle.importKey("raw", aesKeyBits, "AES-GCM", false, ["decrypt"]);
-    const plain = new Uint8Array(
-      await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: cipher.slice(0, 12), additionalData: encodeUtf8(apiKeyId), tagLength: 128 },
-        aesKey,
-        cipher.slice(12)
-      )
-    );
-    try {
-      const pkcs8 = base64ToBytes(new TextDecoder().decode(plain));
-      return await crypto.subtle.importKey("pkcs8", pkcs8, "Ed25519", false, ["sign"]);
-    } finally {
-      plain.fill(0);
-    }
-  } finally {
-    aesKeyBits.fill(0);
-  }
-}
-async function signBusinessMessage(privateKey, message) {
-  const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", privateKey, encodeUtf8(message)));
-  try {
-    return bytesToBase64(sig);
-  } finally {
-    sig.fill(0);
-  }
-}
-function hasLeadingZeroBits(bytes, bits) {
-  const fullBytes = Math.floor(bits / 8);
-  for (let i = 0; i < fullBytes; i++) {
-    if (bytes[i] !== 0) return false;
-  }
-  const remainder = bits % 8;
-  if (remainder === 0) return true;
-  const mask = 255 << 8 - remainder & 255;
-  return ((bytes[fullBytes] ?? 255) & mask) === 0;
-}
-async function createProofOfWork(apiKeyId, sessionId, ts, signal2) {
-  const seedDigest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", encodeUtf8(`${apiKeyId}
-${APP_ID}
-${sessionId}
-${ts}`))
-  );
-  const seed2 = bytesToHex(seedDigest).slice(0, 32);
-  const nonce = randomHex(POW_NONCE_BYTES);
-  for (let counter = 0; counter <= 4294967295; counter++) {
-    signal2?.throwIfAborted();
-    const candidate = `${nonce}${counter.toString(16).padStart(8, "0")}`;
-    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encodeUtf8(`${seed2}
-${candidate}`)));
-    if (hasLeadingZeroBits(digest, POW_BITS)) return candidate;
-  }
-  throw new Error("Unable to solve client request proof of work");
-}
-function parseSigningCredential(credential) {
-  const dot = credential.indexOf(".");
-  if (dot <= 0 || dot !== credential.lastIndexOf(".")) return void 0;
-  const apiKeyId = credential.slice(0, dot);
-  const apiKeySecret = credential.slice(dot + 1);
-  if (!apiKeyId.trim() || !apiKeySecret.trim()) return void 0;
-  return { apiKeyId, apiKeySecret };
-}
-function isUnsignedPath(pathname) {
-  let path2 = pathname;
-  try {
-    path2 = decodeURIComponent(pathname);
-  } catch {
-  }
-  path2 = path2.replace(/\/+$/u, "");
-  return UNSIGNED_PATHS.has(path2);
-}
-function findHeader(pairs, name2) {
-  const lower = name2.toLowerCase();
-  for (const [key, value2] of pairs) {
-    if (key.toLowerCase() === lower) return value2;
-  }
-  return void 0;
-}
-var ClientSigningManager = class {
-  gateUrl;
-  identity;
-  fetchImpl;
-  now;
-  states = /* @__PURE__ */ new Map();
-  notedKeys = /* @__PURE__ */ new Set();
-  onEvent;
-  constructor(opts) {
-    this.gateUrl = `${(opts.origin?.trim() || DEFAULT_ORIGIN2).replace(/\/+$/u, "")}${GATE_PATH}`;
-    this.identity = opts.identity;
-    this.fetchImpl = opts.fetchImpl ?? fetch;
-    this.now = opts.now ?? Date.now;
-    this.onEvent = opts.onEvent;
-  }
-  /**
-   * Add the V4 signing headers to an upstream header-pair list. Returns the
-   * input pairs unchanged whenever signing does not apply: exempt path,
-   * bypass, non-signable credential, missing session id, gate off/unreachable,
-   * or handshake failure. Never throws.
-   */
-  async sign(url2, pairs, cred) {
-    return (await this.signWithStatus(url2, pairs, cred)).pairs;
-  }
-  /**
-   * `sign` with a `signed` flag so the retry ladder can distinguish
-   * "signed but rejected" from "never signed" without identity checks on the
-   * returned array reference. Cheap local eligibility checks (credential
-   * separator, session id) run BEFORE the gate probe so non-signable
-   * credentials never pay for network fetches.
-   */
-  async signWithStatus(url2, pairs, cred) {
-    let parsed;
-    try {
-      parsed = new URL(url2);
-    } catch {
-      return { pairs, signed: false };
-    }
-    if (parsed.protocol !== "https:") return { pairs, signed: false };
-    if (isUnsignedPath(parsed.pathname)) return { pairs, signed: false };
-    if (pairs.some(([k]) => k.toLowerCase() === "x-client-sig")) return { pairs, signed: false };
-    const stateKey = `${parsed.origin}
-${cred.credential}`;
-    const state2 = this.stateFor(stateKey);
-    if (state2.bypass) return { pairs, signed: false };
-    const parsedCred = parseSigningCredential(cred.credential);
-    if (!parsedCred) {
-      this.noteOnce(stateKey, "credential has no {apiKeyId}.{apiKeySecret} separator \u2014 signing skipped");
-      return { pairs, signed: false };
-    }
-    const sessionId = findHeader(pairs, "x-session-id")?.trim();
-    if (!sessionId) {
-      this.noteOnce(stateKey, "upstream request has no x-session-id \u2014 signing skipped");
-      return { pairs, signed: false };
-    }
-    if (!await this.gateEnabled(state2, cred)) return { pairs, signed: false };
-    let privateKey;
-    try {
-      privateKey = await this.ensurePrivateKey(state2, stateKey, parsedCred, parsed.origin);
-    } catch {
-      this.noteOnce(stateKey, "signing handshake failed \u2014 sending unsigned");
-      this.invalidateState(stateKey);
-      return { pairs, signed: false };
-    }
-    const signedPairs = await this.buildSignedPairs(stateKey, pairs, privateKey, parsedCred, sessionId, cred.appVersion);
-    return signedPairs ? { pairs: signedPairs, signed: true } : { pairs, signed: false };
-  }
-  async buildSignedPairs(stateKey, pairs, privateKey, parsedCred, sessionId, appVersion) {
-    const ts = String(Date.now());
-    const nonce = randomHex(NONCE_BYTES);
-    let pow;
-    let sig;
-    try {
-      pow = await createProofOfWork(parsedCred.apiKeyId, sessionId, ts);
-      sig = await signBusinessMessage(
-        privateKey,
-        `${parsedCred.apiKeyId}
-${ts}
-${appVersion}
-${sessionId}
-${nonce}`
-      );
-    } catch (err) {
-      if (err.name !== "AbortError") {
-        this.noteOnce(stateKey, `signing failed (${err.message}) \u2014 sending unsigned`);
-      }
-      return null;
-    }
-    const cleaned = pairs.filter(([k]) => {
-      const lower = k.toLowerCase();
-      return !SIGNING_HEADER_NAMES.has(lower) && lower !== "x-session-id";
-    });
-    return [
-      ...cleaned,
-      ["X-Client-Ts", ts],
-      ["X-Client-Version", appVersion],
-      ["X-Client-Sig", sig],
-      // canonical case replaces the lowercase trace copy in this append position
-      // (mirrors the client's i.set("X-Session-Id") Headers.set semantics)
-      ["X-Session-Id", sessionId],
-      ["X-Client-Nonce", nonce],
-      ["X-App-Id", APP_ID],
-      ["X-Client-Pow", pow]
-    ];
-  }
-  /**
-   * True when the response is a signing rejection the client retries on:
-   * HTTP 401 whose envelope mentions VERIFY_SIGNATURE_INVALID / VERIFY_APIKEY_EXPIRED.
-   * Reads a clone; the response body stays consumable by the caller.
-   */
-  async isVerifyFailure(resp) {
-    if (resp.status !== 401) return false;
-    try {
-      const body2 = await resp.clone().json();
-      if (!body2 || typeof body2 !== "object" || Array.isArray(body2)) return false;
-      const data2 = body2.data;
-      const error2 = body2.error;
-      const candidates = [body2.msg, body2.reason, data2?.reason, error2?.reason, error2?.message];
-      return candidates.some((v) => v === VERIFY_SIGNATURE_INVALID || v === VERIFY_APIKEY_EXPIRED);
-    } catch {
-      return false;
-    }
-  }
-  /** Drop the cached signing key for a (origin, credential) pair after a VERIFY rejection. */
-  invalidate(url2, credential) {
-    try {
-      const stateKey = `${new URL(url2).origin}
-${credential}`;
-      this.invalidateState(stateKey);
-    } catch {
-    }
-  }
-  /** Permanently stop signing for a (origin, credential) pair (two VERIFY rejections). */
-  setBypass(url2, credential) {
-    try {
-      const stateKey = `${new URL(url2).origin}
-${credential}`;
-      const state2 = this.stateFor(stateKey);
-      state2.bypass = true;
-      this.invalidateState(stateKey);
-      this.onEvent?.("client-signing: VERIFY rejection persisted \u2014 bypassing signing for this credential");
-    } catch {
-    }
-  }
-  invalidateState(stateKey) {
-    const state2 = this.states.get(stateKey);
-    if (!state2) return;
-    state2.epoch += 1;
-    state2.privKey = void 0;
-    state2.handshake = void 0;
-  }
-  stateFor(stateKey) {
-    let state2 = this.states.get(stateKey);
-    if (!state2) {
-      state2 = { gateEnabled: false, gateExpiresAt: 0, gateNegUntil: 0, epoch: 0, bypass: false };
-      this.states.set(stateKey, state2);
-    }
-    return state2;
-  }
-  async gateEnabled(state2, cred) {
-    const now = this.now();
-    if (state2.gateExpiresAt > now) return state2.gateEnabled;
-    if (state2.gateNegUntil > now) return false;
-    if (state2.gatePromise) return state2.gatePromise;
-    const promise = this.probeGate(state2, cred).finally(() => {
-      if (state2.gatePromise === promise) state2.gatePromise = void 0;
-    });
-    state2.gatePromise = promise;
-    return promise;
-  }
-  async probeGate(state2, cred) {
-    const now = this.now();
-    let outcome;
-    try {
-      outcome = await this.fetchGate(cred);
-    } catch {
-      state2.gateNegUntil = now + GATE_FAILURE_COOLDOWN_MS;
-      return false;
-    }
-    state2.gateEnabled = outcome === "enabled";
-    if (outcome === "unavailable") {
-      state2.gateNegUntil = now + GATE_UNAVAILABLE_COOLDOWN_MS;
-    } else {
-      state2.gateExpiresAt = now + GATE_TTL_MS;
-      state2.gateNegUntil = 0;
-    }
-    if (state2.gateEnabled) this.onEvent?.("client-signing: server enabled codingPlanSignature \u2014 signing requests");
-    return state2.gateEnabled;
-  }
-  async fetchGate(cred) {
-    const identityHeaders = Object.fromEntries(
-      Object.entries(buildIdentityHeaders(this.identity)).filter(([name2]) => name2 !== "X-ZCode-Agent" && name2 !== "X-Device-Mid")
-    );
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), GATE_TIMEOUT_MS);
-    try {
-      const resp = await this.fetchImpl(this.gateUrl, {
-        method: "GET",
-        headers: { ...identityHeaders, "x-api-key": cred.credential },
-        redirect: "manual",
-        signal: controller.signal
-      });
-      if (!resp.ok) return "unavailable";
-      const parsed = await resp.json();
-      if (!parsed || parsed.code !== 0) return "unavailable";
-      const data2 = parsed.data;
-      if (!data2 || !Object.prototype.hasOwnProperty.call(data2, "codingPlanSignature")) return "disabled";
-      const signature = data2.codingPlanSignature;
-      return signature?.enable === true ? "enabled" : "disabled";
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  async ensurePrivateKey(state2, stateKey, parsedCred, origin) {
-    if (state2.privKey) return state2.privKey;
-    if (state2.handshake) return state2.handshake;
-    const epoch = state2.epoch;
-    const handshake = this.performHandshake(parsedCred, origin).then((key) => {
-      if (state2.epoch !== epoch) throw new Error("signing key changed during handshake");
-      state2.privKey = key;
-      return key;
-    });
-    const clear = () => {
-      if (state2.handshake === handshake) state2.handshake = void 0;
-    };
-    handshake.then(clear, clear);
-    state2.handshake = handshake;
-    return handshake;
-  }
-  async performHandshake(parsedCred, origin) {
-    const ts = String(Date.now());
-    const nonce = randomHex(NONCE_BYTES);
-    const sig = await handshakeSignature(
-      parsedCred.apiKeySecret,
-      `${HANDSHAKE_METHOD}
-${parsedCred.apiKeyId}
-${ts}
-${nonce}`
-    );
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), HANDSHAKE_TIMEOUT_MS);
-    try {
-      const resp = await this.fetchImpl(`${origin}${HANDSHAKE_PATH}`, {
-        method: "POST",
-        headers: { Authorization: `${parsedCred.apiKeyId}.${parsedCred.apiKeySecret}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ apiKey: `${parsedCred.apiKeyId}.${parsedCred.apiKeySecret}`, nonce, sig, ts }),
-        redirect: "manual",
-        signal: controller.signal
-      });
-      if (resp.status !== 200) throw new Error(`handshake_http_${resp.status}`);
-      const envelope = await resp.json();
-      if (envelope.code === 500) throw new Error("handshake_server_500");
-      if (envelope.code !== 200) throw new Error(`handshake_rejected: ${String(envelope.msg)}`);
-      const cipher = envelope.data?.privateCipher;
-      if (typeof cipher !== "string" || !cipher) throw new Error("handshake_omitted_privateCipher");
-      return await decryptSigningPrivateKey(parsedCred.apiKeyId, parsedCred.apiKeySecret, cipher);
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  noteOnce(stateKey, message) {
-    if (this.notedKeys.has(stateKey)) return;
-    this.notedKeys.add(stateKey);
-    this.onEvent?.(`client-signing: ${message}`);
-  }
-};
-async function sendWithClientSigning(signer, params) {
-  const { url: url2, headerPairs, credential, appVersion, send, debug } = params;
-  if (!signer) return send(headerPairs);
-  const first = await signer.signWithStatus(url2, headerPairs, { credential, appVersion });
-  let resp = await send(first.pairs);
-  if (!first.signed || !await signer.isVerifyFailure(resp)) return resp;
-  debug?.("401 VERIFY_SIGNATURE_* \u2014 invalidating signing key and retrying once");
-  signer.invalidate(url2, credential);
-  const second = await signer.signWithStatus(url2, headerPairs, { credential, appVersion });
-  resp = await send(second.pairs);
-  if (!second.signed || !await signer.isVerifyFailure(resp)) return resp;
-  signer.setBypass(url2, credential);
-  debug?.("401 VERIFY_SIGNATURE_* twice \u2014 sending unsigned (signing bypassed)");
-  return send(headerPairs);
-}
-var defaultSigner = null;
-var defaultSignerKey = "";
-function identityCacheKey2(identity) {
-  return JSON.stringify([identity.appVersion, identity.sourceTitle, identity.refererOrigin, identity.deviceMid ?? ""]);
-}
-function getDefaultClientSigning(config) {
-  if (!config.clientSigning.enabled) return null;
-  const key = `${config.clientSigning.origin}
-${identityCacheKey2(config.identity)}`;
-  if (!defaultSigner || key !== defaultSignerKey) {
-    defaultSigner = new ClientSigningManager({
-      identity: config.identity,
-      origin: config.clientSigning.origin
-    });
-    defaultSignerKey = key;
-  }
-  return defaultSigner;
-}
-
-// src/proxy/ordered-transport.ts
-var import_node_net = require("node:net");
-var import_node_tls = require("node:tls");
-var CRLF = "\r\n";
-var HEADER_END = new Uint8Array([13, 10, 13, 10]);
-var HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
-async function sendOrderedUpstreamRequest(req) {
-  const url2 = new URL(req.url);
-  const bodyBytes = bodyToBytes(req.body);
-  const requestHead = buildRequestHead(url2, req.method ?? "POST", req.headers, bodyBytes.byteLength);
-  const socket = await openSocket(url2);
-  return await new Promise((resolve, reject) => {
-    let headerBuffer = new Uint8Array(0);
-    let responseStarted = false;
-    let postWrite = false;
-    let bodyController = null;
-    let chunkedDecoder = null;
-    let remainingContentLength = null;
-    const bodyStream = new ReadableStream({
-      start(controller) {
-        bodyController = controller;
-      },
-      cancel() {
-        socket.destroy();
-      }
-    });
-    function fail(err) {
-      if (!responseStarted && postWrite) {
-        try {
-          err.postWrite = true;
-        } catch {
-        }
-      }
-      if (responseStarted) bodyController?.error(err);
-      else reject(err);
-      socket.destroy();
-    }
-    function finish() {
-      if (chunkedDecoder && !chunkedDecoder.done) {
-        try {
-          bodyController?.error(new Error("upstream chunked body truncated"));
-        } catch {
-        }
-        socket.destroy();
-        return;
-      }
-      try {
-        bodyController?.close();
-      } catch {
-      }
-    }
-    function pushBody(bytes) {
-      if (!bodyController || bytes.byteLength === 0) return;
-      if (chunkedDecoder) {
-        chunkedDecoder.push(bytes, bodyController);
-        if (chunkedDecoder.done) finish();
-        return;
-      }
-      if (remainingContentLength !== null) {
-        const next = bytes.slice(0, remainingContentLength);
-        remainingContentLength -= next.byteLength;
-        if (next.byteLength > 0) bodyController.enqueue(next);
-        if (remainingContentLength === 0) finish();
-        return;
-      }
-      bodyController.enqueue(bytes);
-    }
-    socket.on("data", (chunk) => {
-      try {
-        const bytes = new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-        if (!responseStarted) {
-          headerBuffer = concatBytes(headerBuffer, bytes);
-          const headerEnd = indexOfBytes(headerBuffer, HEADER_END);
-          if (headerEnd < 0) return;
-          const headerBytes = headerBuffer.slice(0, headerEnd);
-          const rest = headerBuffer.slice(headerEnd + HEADER_END.byteLength);
-          const parsed = parseResponseHeaders(headerBytes);
-          responseStarted = true;
-          const transferEncoding = parsed.headers.get("transfer-encoding")?.toLowerCase() ?? "";
-          if (transferEncoding.split(",").map((s) => s.trim()).includes("chunked")) {
-            parsed.headers.delete("transfer-encoding");
-            chunkedDecoder = new ChunkedDecoder();
-          } else {
-            const contentLength2 = parsed.headers.get("content-length");
-            remainingContentLength = contentLength2 ? Number.parseInt(contentLength2, 10) : null;
-            if (!Number.isFinite(remainingContentLength)) remainingContentLength = null;
-          }
-          let responseBody = bodyStream;
-          if (req.decompress && parsed.headers.get("content-encoding")?.toLowerCase() === "gzip") {
-            parsed.headers.delete("content-encoding");
-            parsed.headers.delete("content-length");
-            const gzip = new DecompressionStream("gzip");
-            responseBody = bodyStream.pipeThrough(gzip);
-          }
-          resolve(new Response(responseBody, {
-            status: parsed.status,
-            statusText: parsed.statusText,
-            headers: parsed.headers
-          }));
-          pushBody(rest);
-          return;
-        }
-        pushBody(bytes);
-      } catch (err) {
-        fail(err);
-      }
-    });
-    socket.once("error", fail);
-    socket.once("end", () => {
-      if (!responseStarted) {
-        reject(new Error("upstream closed before sending response headers"));
-        return;
-      }
-      finish();
-    });
-    socket.write(requestHead);
-    if (bodyBytes.byteLength > 0) socket.write(bodyBytes);
-    postWrite = true;
-  });
-}
-function openSocket(url2) {
-  const isHttps = url2.protocol === "https:";
-  if (!isHttps && url2.protocol !== "http:") {
-    return Promise.reject(new Error(`Unsupported upstream protocol: ${url2.protocol}`));
-  }
-  const port = Number(url2.port || (isHttps ? 443 : 80));
-  return new Promise((resolve, reject) => {
-    const onConnect = () => {
-      socket.off("error", reject);
-      resolve(socket);
-    };
-    const socket = isHttps ? (0, import_node_tls.connect)({ host: url2.hostname, port, servername: url2.hostname }, onConnect) : (0, import_node_net.connect)({ host: url2.hostname, port }, onConnect);
-    socket.once("error", reject);
-  });
-}
-function buildRequestHead(url2, method2, headers2, contentLength2) {
-  const path2 = `${url2.pathname || "/"}${url2.search}`;
-  const lines = [
-    `${method2} ${path2} HTTP/1.1`,
-    `Host: ${url2.host}`,
-    ...headers2.map(headerLine),
-    `Content-Length: ${contentLength2}`,
-    "Connection: close",
-    "",
-    ""
-  ];
-  return lines.join(CRLF);
-}
-function headerLine([name2, value2]) {
-  if (!HEADER_NAME.test(name2)) throw new Error(`Invalid upstream header name: ${name2}`);
-  if (/[\r\n]/.test(value2)) throw new Error(`Invalid upstream header value for ${name2}`);
-  return `${name2}: ${value2}`;
-}
-function bodyToBytes(body2) {
-  if (body2 === void 0) return new Uint8Array(0);
-  if (typeof body2 === "string") return new TextEncoder().encode(body2);
-  return body2;
-}
-function parseResponseHeaders(bytes) {
-  const text = new TextDecoder("latin1").decode(bytes);
-  const lines = text.split(CRLF);
-  const statusLine = lines.shift() ?? "";
-  const match = /^HTTP\/\d(?:\.\d)?\s+(\d{3})(?:\s+(.*))?$/.exec(statusLine);
-  if (!match) throw new Error(`Invalid upstream status line: ${statusLine}`);
-  const headers2 = new Headers();
-  for (const line of lines) {
-    if (!line) continue;
-    const idx = line.indexOf(":");
-    if (idx <= 0) continue;
-    headers2.append(line.slice(0, idx), line.slice(idx + 1).trimStart());
-  }
-  return { status: Number(match[1]), statusText: match[2] ?? "", headers: headers2 };
-}
-var ChunkedDecoder = class {
-  buffer = new Uint8Array(0);
-  expectedSize = null;
-  done = false;
-  push(bytes, controller) {
-    if (this.done) return;
-    this.buffer = concatBytes(this.buffer, bytes);
-    while (!this.done) {
-      if (this.expectedSize === null) {
-        const lineEnd = indexOfCrlf(this.buffer);
-        if (lineEnd < 0) return;
-        const line = new TextDecoder("latin1").decode(this.buffer.slice(0, lineEnd));
-        const sizeHex = line.split(";", 1)[0].trim();
-        const size = Number.parseInt(sizeHex, 16);
-        if (!Number.isFinite(size)) throw new Error(`Invalid chunk size: ${line}`);
-        this.buffer = this.buffer.slice(lineEnd + 2);
-        this.expectedSize = size;
-        if (size === 0) {
-          this.done = true;
-          return;
-        }
-      }
-      if (this.buffer.byteLength < this.expectedSize + 2) return;
-      const chunk = this.buffer.slice(0, this.expectedSize);
-      controller.enqueue(chunk);
-      this.buffer = this.buffer.slice(this.expectedSize + 2);
-      this.expectedSize = null;
-    }
-  }
-};
-function concatBytes(a, b) {
-  const out = new Uint8Array(a.byteLength + b.byteLength);
-  if (a.byteLength > 0) out.set(a, 0);
-  if (b.byteLength > 0) out.set(b, a.byteLength);
-  return out;
-}
-function indexOfBytes(haystack, needle) {
-  outer: for (let i = 0; i <= haystack.byteLength - needle.byteLength; i++) {
-    for (let j = 0; j < needle.byteLength; j++) {
-      if (haystack[i + j] !== needle[j]) continue outer;
-    }
-    return i;
-  }
-  return -1;
-}
-function indexOfCrlf(bytes) {
-  for (let i = 0; i < bytes.byteLength - 1; i++) {
-    if (bytes[i] === 13 && bytes[i + 1] === 10) return i;
-  }
-  return -1;
-}
-
-// src/proxy/zcode_system.json
-var zcode_system_default = [
-  {
-    type: "text",
-    text: "You are ZCode, an interactive coding agent",
-    cache_control: {
-      type: "ephemeral"
-    }
-  },
-  {
-    type: "text",
-    text: "\nYou are an interactive ZCode agent that helps users with software engineering tasks.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF challenges, and educational contexts. Refuse requests for destructive techniques, DoS attacks, mass targeting, supply chain compromise, or detection evasion for malicious purposes. Dual-use security tools (C2 frameworks, credential testing, exploit development) require clear authorization context: pentesting engagements, CTF competitions, security research, or defensive use cases.\n\n# Harness\n- Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.\n- Tools run behind a user-selected permission mode; a denied call means the user declined it \u2014 adjust, don't retry verbatim.\n- The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.\n- Prefer the dedicated file/search tools over shell commands when one fits. Independent tool calls can run in parallel in one response.\n- Reference code as `file_path:line_number` \u2014 it's clickable.",
-    cache_control: {
-      type: "ephemeral"
-    }
-  },
-  {
-    type: "text",
-    text: "# Environment\nYou have been invoked in the following environment:\n- Primary working directory: unknown\n- Is a git repository: no\n- Platform: unknown\n- Shell: unknown\n- OS Version: unknown",
-    cache_control: {
-      type: "ephemeral"
-    }
-  }
-];
-
-// src/proxy/system-prompt.ts
-var ZCODE_SYSTEM_BLOCKS = zcode_system_default;
-function buildStartPlanSystem(existingSystem, currentModel) {
-  const official = ZCODE_SYSTEM_BLOCKS.map((b) => structuredClone(b));
-  if (currentModel && currentModel.trim().length > 0) {
-    official.push({
-      type: "text",
-      text: `- You are powered by the model named ${currentModel}.`,
-      cache_control: { type: "ephemeral" }
-    });
-  }
-  const userBlocks = normalizeUserSystem(existingSystem);
-  return [...official, ...userBlocks];
-}
-function normalizeUserSystem(system) {
-  if (system == null) return [];
-  if (typeof system === "string") {
-    const text = system.trim();
-    return text ? [{ type: "text", text }] : [];
-  }
-  if (!Array.isArray(system)) return [];
-  const out = [];
-  for (const item of system) {
-    if (typeof item === "string") {
-      if (item.trim()) out.push({ type: "text", text: item });
-    } else if (item && typeof item === "object") {
-      const b = item;
-      if (b.type === "text" && typeof b.text === "string" && b.text.trim()) {
-        out.push({
-          type: "text",
-          text: b.text,
-          ...typeof b.cache_control === "object" && b.cache_control !== null ? { cache_control: b.cache_control } : {}
-        });
-      }
-    }
-  }
-  return out;
-}
-
-// src/proxy/body-transformer.ts
-function transformRequestBody(body2, ctx) {
-  if (body2 === void 0 || body2.length === 0) return body2;
-  let parsed;
-  try {
-    parsed = JSON.parse(body2);
-  } catch {
-    return body2;
-  }
-  if (typeof parsed !== "object" || parsed === null) return body2;
-  let modified = false;
-  if (ctx.format === "openai") {
-    if (ctx.startPlan) {
-      modified = applyStartPlanOpenAISystem(parsed) || modified;
-    }
-    modified = applyStreamOptionsIncludeUsage(parsed) || modified;
-  }
-  if (ctx.format === "anthropic") {
-    const obj = parsed;
-    if (ctx.startPlan) {
-      modified = applyStartPlanSystem(obj) || modified;
-    }
-    modified = applyAnthropicCacheControl(obj) || modified;
-    if (ctx.userId) {
-      modified = applyAnthropicUserId(obj, ctx.userId) || modified;
-    }
-  }
-  return modified ? JSON.stringify(parsed) : body2;
-}
-function applyStreamOptionsIncludeUsage(body2) {
-  if (body2.stream !== true) return false;
-  const existing = body2.stream_options;
-  if (isPlainObject(existing) && existing.include_usage === true) {
-    return false;
-  }
-  const merged = isPlainObject(existing) ? { ...existing } : {};
-  merged.include_usage = true;
-  body2.stream_options = merged;
-  return true;
-}
-function isPlainObject(v) {
-  return typeof v === "object" && v !== null;
-}
-function applyAnthropicCacheControl(body2) {
-  const messages = body2.messages;
-  if (!Array.isArray(messages) || messages.length === 0) return false;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const msg = messages[i];
-    if (typeof msg !== "object" || msg === null) continue;
-    if (msg.role === "system") continue;
-    if (typeof msg.content === "string") {
-      msg.content = [{ type: "text", text: msg.content, cache_control: { type: "ephemeral" } }];
-      return true;
-    }
-    if (Array.isArray(msg.content) && msg.content.length > 0) {
-      const lastBlock = msg.content[msg.content.length - 1];
-      if (typeof lastBlock === "object" && lastBlock !== null && !lastBlock.cache_control) {
-        lastBlock.cache_control = { type: "ephemeral" };
-        return true;
-      }
-    }
-    return false;
-  }
-  return false;
-}
-function applyAnthropicUserId(body2, userId) {
-  const existing = body2.metadata;
-  if (isPlainObject(existing) && existing.user_id === userId) {
-    return false;
-  }
-  body2.metadata = {
-    ...isPlainObject(existing) ? existing : {},
-    user_id: userId
-  };
-  return true;
-}
-function applyStartPlanSystem(body2) {
-  const model = typeof body2.model === "string" ? body2.model : void 0;
-  body2.system = buildStartPlanSystem(body2.system, model);
-  return true;
-}
-function applyStartPlanOpenAISystem(body2) {
-  const messages = body2.messages;
-  if (!Array.isArray(messages)) return false;
-  const model = typeof body2.model === "string" ? body2.model : void 0;
-  const official = buildStartPlanSystem(void 0, model).map((block) => ({
-    role: "system",
-    content: typeof block === "object" && block !== null && "text" in block ? String(block.text) : ""
-  }));
-  body2.messages = [...official, ...messages];
-  return true;
-}
-
 // src/proxy/handler.ts
-var import_node_zlib = require("node:zlib");
-
-// src/provider/models.ts
-var MODELS = [
-  { id: "glm-4.5-air", name: "GLM 4.5 Air", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
-  { id: "glm-4.6", name: "GLM 4.6", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
-  { id: "glm-4.6v", name: "GLM 4.6V", contextWindow: 2e5, maxOutputTokens: 128e3 },
-  { id: "glm-4.7", name: "GLM 4.7", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
-  { id: "glm-5", name: "GLM 5", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
-  { id: "glm-5-turbo", name: "GLM 5 Turbo", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
-  { id: "glm-5v-turbo", name: "GLM 5V Turbo", contextWindow: 2e5, maxOutputTokens: 128e3 },
-  { id: "glm-5.1", name: "GLM 5.1", contextWindow: 2e5, maxOutputTokens: 128e3, reasoning: true },
-  { id: "glm-5.2", name: "GLM 5.2", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true },
-  { id: "glm-5.3", name: "GLM 5.3", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true },
-  // start-plan gateway serves the -flash variant (used by claimed trial plans
-  // like the weekend package); advertised so client-side discovery lists it.
-  { id: "glm-5.3-flash", name: "GLM 5.3 Flash", contextWindow: 1e6, maxOutputTokens: 128e3, reasoning: true }
-];
-
-// src/provider/reasoning.ts
-var GLM53_DEFAULT_EFFORT = "max";
-var GLM53_THINKING_BUDGETS = {
-  low: 8e3,
-  high: 16e3,
-  max: 32e3
-};
-var GLM53_MIN_THINKING_BUDGET = 1024;
-var GLM53_ANSWER_RESERVE = 1024;
-var GLM53_MODEL_PATTERN = /glm-5\.3(?![0-9])/i;
-function isGlm53Model(model) {
-  if (!model) return false;
-  return GLM53_MODEL_PATTERN.test(model);
-}
-function normalizeGlm53Effort(effort) {
-  switch (effort) {
-    case "none":
-    case "minimal":
-    case "light":
-    case "low":
-      return "low";
-    case "medium":
-    case "high":
-      return "high";
-    case "xhigh":
-    case "max":
-    case "ultra":
-      return "max";
-    default:
-      return GLM53_DEFAULT_EFFORT;
-  }
-}
-function buildGlm53Reasoning(effort) {
-  return {
-    thinking: { type: "enabled", budget_tokens: GLM53_THINKING_BUDGETS[effort] },
-    output_config: { effort }
-  };
-}
-function fitGlm53Budget(budget, maxTokens) {
-  if (typeof maxTokens !== "number" || !Number.isFinite(maxTokens)) return budget;
-  const clamped = Math.min(budget, Math.floor(maxTokens) - GLM53_ANSWER_RESERVE);
-  return clamped >= GLM53_MIN_THINKING_BUDGET ? clamped : void 0;
-}
-
-// src/translator/openai-to-anthropic.ts
-var DEFAULT_MAX_TOKENS = 4096;
-function translateRequestOpenAIToAnthropic(req) {
-  const systemMessages = req.messages.filter((m) => m.role === "system");
-  const nonSystemMessages = req.messages.filter((m) => m.role !== "system");
-  const system = systemMessages.length > 0 ? systemMessages.map((m) => extractText(m)).join("\n\n") : void 0;
-  const anthropicMessages = translateMessagesWithToolCoalescing(nonSystemMessages);
-  const result3 = {
-    model: req.model,
-    messages: anthropicMessages,
-    max_tokens: req.max_tokens ?? resolveDefaultMaxTokens(req.model)
-  };
-  if (system) result3.system = system;
-  if (req.temperature !== void 0) result3.temperature = req.temperature;
-  if (req.top_p !== void 0) result3.top_p = req.top_p;
-  if (req.stream !== void 0) result3.stream = req.stream;
-  if (req.stop) result3.stop_sequences = Array.isArray(req.stop) ? req.stop : [req.stop];
-  if (isGlm53Model(req.model)) {
-    const { thinking, output_config } = translateGlm53Reasoning(req, result3.max_tokens);
-    result3.thinking = thinking;
-    if (output_config) result3.output_config = output_config;
-  } else {
-    const thinking = translateThinking(req);
-    if (thinking) result3.thinking = thinking;
-  }
-  if (req.tools?.length && req.tool_choice !== "none") {
-    result3.tools = req.tools.map(translateToolOpenAIToAnthropic);
-  }
-  if (req.tool_choice !== void 0 && req.tool_choice !== "none") {
-    const translated = translateToolChoice(req.tool_choice);
-    if (translated) result3.tool_choice = translated;
-  }
-  return result3;
-}
-function translateThinking(req) {
-  const explicit = req.thinking;
-  if (explicit && typeof explicit === "object") {
-    if (explicit.type === "disabled") return { type: "disabled" };
-    if (explicit.type === "enabled" || explicit.type === "adaptive") {
-      const budget = explicit.budget_tokens ?? explicit.budgetTokens;
-      return {
-        type: explicit.type,
-        ...typeof budget === "number" && Number.isFinite(budget) && budget > 0 ? { budget_tokens: Math.floor(budget) } : {},
-        ...explicit.type === "adaptive" && typeof explicit.display === "boolean" ? { display: explicit.display } : {}
-      };
-    }
-  }
-  if (req.reasoning_effort === "none") return { type: "disabled" };
-  if (isReasoningModel(req.model)) return { type: "enabled" };
-  return void 0;
-}
-function isReasoningModel(model) {
-  return MODELS.some((m) => m.id === model && m.reasoning === true);
-}
-function resolveDefaultMaxTokens(model) {
-  if (!isGlm53Model(model)) return DEFAULT_MAX_TOKENS;
-  const catalogEntry = MODELS.find((m) => m.id === model);
-  return catalogEntry?.maxOutputTokens ?? DEFAULT_MAX_TOKENS;
-}
-function translateGlm53Reasoning(req, maxTokens) {
-  const explicit = req.thinking;
-  if (explicit && typeof explicit === "object" && explicit.type === "disabled") {
-    return { thinking: { type: "disabled" } };
-  }
-  const effort = normalizeGlm53Effort(req.reasoning_effort);
-  const base = buildGlm53Reasoning(effort);
-  let budget = base.thinking.budget_tokens;
-  if (explicit && typeof explicit === "object" && (explicit.type === "enabled" || explicit.type === "adaptive")) {
-    const explicitBudget = explicit.budget_tokens ?? explicit.budgetTokens;
-    if (typeof explicitBudget === "number" && Number.isFinite(explicitBudget)) {
-      const floored = Math.floor(explicitBudget);
-      if (floored > 0) budget = floored;
-    }
-  }
-  const fitted = fitGlm53Budget(budget, maxTokens);
-  return {
-    thinking: fitted !== void 0 ? { type: "enabled", budget_tokens: fitted } : { type: "enabled" },
-    output_config: base.output_config
-  };
-}
-function translateToolChoice(choice) {
-  if (choice === "auto") return { type: "auto" };
-  if (choice === "required") return { type: "any" };
-  if (typeof choice === "object" && choice.type === "function") {
-    return { type: "tool", name: choice.function.name };
-  }
-  return void 0;
-}
-function translateMessagesWithToolCoalescing(messages) {
-  const out = [];
-  let i = 0;
-  while (i < messages.length) {
-    const m = messages[i];
-    if (m.role === "tool" && m.tool_call_id) {
-      const results = [];
-      while (i < messages.length) {
-        const tool = messages[i];
-        const toolCallId = tool.tool_call_id;
-        if (tool.role !== "tool" || !toolCallId) break;
-        results.push({
-          type: "tool_result",
-          tool_use_id: toolCallId,
-          content: toolResultContent(tool)
-        });
-        i++;
-      }
-      out.push({ role: "user", content: results });
-      continue;
-    }
-    out.push(translateMessageOpenAIToAnthropic(m));
-    i++;
-  }
-  return out;
-}
-function translateMessageOpenAIToAnthropic(msg) {
-  if (msg.role === "assistant" && msg.tool_calls?.length) {
-    const blocks = [];
-    const text = extractText(msg);
-    if (text.length > 0) blocks.push({ type: "text", text });
-    for (const tc of msg.tool_calls) {
-      blocks.push({
-        type: "tool_use",
-        id: tc.id,
-        name: tc.function.name,
-        input: parseToolArguments(tc.function.arguments)
-      });
-    }
-    return { role: "assistant", content: blocks };
-  }
-  return {
-    role: msg.role === "assistant" ? "assistant" : "user",
-    content: translateContentOpenAIToAnthropic(msg)
-  };
-}
-function parseToolArguments(raw) {
-  if (!raw) return {};
-  try {
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-function toolResultContent(msg) {
-  if (typeof msg.content === "string") return msg.content;
-  if (!Array.isArray(msg.content)) return "";
-  if (msg.content.every((c) => c.type === "text")) {
-    const joined = msg.content.map((c) => c.text ?? "").join("");
-    return joined;
-  }
-  return msg.content.map((c) => {
-    if (c.type === "text") return { type: "text", text: c.text ?? "" };
-    if (c.type === "image_url" && c.image_url?.url) {
-      return imageUrlToAnthropicBlock(c.image_url.url);
-    }
-    return { type: "text", text: "" };
-  });
-}
-function parseDataUrl(url2) {
-  const m = /^data:([^;]+);base64,(.*)$/s.exec(url2);
-  if (!m) return void 0;
-  return { mediaType: m[1], data: m[2] };
-}
-function imageUrlToAnthropicBlock(url2) {
-  const parsed = parseDataUrl(url2);
-  if (parsed) {
-    return {
-      type: "image",
-      source: { type: "base64", media_type: parsed.mediaType, data: parsed.data }
-    };
-  }
-  if (/^https?:\/\//i.test(url2)) {
-    return { type: "image", source: { type: "url", url: url2 } };
-  }
-  return { type: "text", text: url2 };
-}
-function anthropicUsageToOpenAI(usage) {
-  const inputTokens = usage?.input_tokens ?? 0;
-  const outputTokens = usage?.output_tokens ?? 0;
-  const cacheRead = usage?.cache_read_input_tokens ?? 0;
-  const cacheCreation = usage?.cache_creation_input_tokens ?? 0;
-  const promptTokens = inputTokens + cacheRead + cacheCreation;
-  return {
-    prompt_tokens: promptTokens,
-    completion_tokens: outputTokens,
-    total_tokens: promptTokens + outputTokens,
-    // Presence-preserving: an upstream explicitly reporting 0 cache reads stays
-    // distinguishable from one reporting no cache breakdown at all.
-    ...usage?.cache_read_input_tokens != null ? { prompt_tokens_details: { cached_tokens: cacheRead } } : {}
-  };
-}
-function translateResponseAnthropicToOpenAI(resp, model) {
-  const textBlocks = resp.content.filter((b) => b.type === "text");
-  const toolUseBlocks = resp.content.filter((b) => b.type === "tool_use");
-  const thinkingBlocks = resp.content.filter((b) => b.type === "thinking");
-  const content2 = textBlocks.map((b) => b.text).join("") || null;
-  const reasoningContent = thinkingBlocks.map((b) => b.thinking ?? "").join("") || void 0;
-  const toolCalls = toolUseBlocks.length > 0 ? toolUseBlocks.map((b, i) => ({
-    id: b.id,
-    type: "function",
-    function: {
-      name: b.name,
-      arguments: JSON.stringify(b.input ?? {})
-    }
-  })) : void 0;
-  const finishReason = mapStopReasonToFinishReason(resp.stop_reason);
-  return {
-    id: resp.id,
-    object: "chat.completion",
-    created: Math.floor(Date.now() / 1e3),
-    model,
-    choices: [{
-      index: 0,
-      message: {
-        role: "assistant",
-        content: content2,
-        ...reasoningContent ? { reasoning_content: reasoningContent } : {},
-        ...toolCalls ? { tool_calls: toolCalls } : {}
-      },
-      finish_reason: finishReason
-    }],
-    usage: anthropicUsageToOpenAI(resp.usage)
-  };
-}
-function extractText(msg) {
-  if (typeof msg.content === "string") return msg.content;
-  if (Array.isArray(msg.content)) {
-    return msg.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("");
-  }
-  return "";
-}
-function translateContentOpenAIToAnthropic(msg) {
-  if (typeof msg.content === "string") return msg.content;
-  if (msg.content === null) return "";
-  if (Array.isArray(msg.content)) {
-    return msg.content.map((c) => {
-      if (c.type === "text") return { type: "text", text: c.text ?? "" };
-      if (c.type === "image_url" && c.image_url?.url) {
-        return imageUrlToAnthropicBlock(c.image_url.url);
-      }
-      return { type: "text", text: "" };
-    });
-  }
-  return "";
-}
-function translateToolOpenAIToAnthropic(tool) {
-  return {
-    name: tool.function.name,
-    ...tool.function.description ? { description: tool.function.description } : {},
-    ...tool.function.parameters ? { input_schema: tool.function.parameters } : {}
-  };
-}
-function mapStopReasonToFinishReason(stopReason) {
-  switch (stopReason) {
-    case "end_turn":
-    case "stop_sequence":
-      return "stop";
-    case "max_tokens":
-      return "length";
-    case "tool_use":
-      return "tool_calls";
-    default:
-      return null;
-  }
-}
-
-// src/translator/anthropic-to-openai.ts
-function translateRequestAnthropicToOpenAI(req) {
-  const messages = [];
-  if (req.system) {
-    const systemText = typeof req.system === "string" ? req.system : req.system.map((s) => s.text).join("\n");
-    messages.push({ role: "system", content: systemText });
-  }
-  for (const m of req.messages) {
-    messages.push(...translateMessageAnthropicToOpenAI(m));
-  }
-  const result3 = {
-    model: req.model,
-    messages,
-    ...req.temperature !== void 0 ? { temperature: req.temperature } : {},
-    ...req.top_p !== void 0 ? { top_p: req.top_p } : {},
-    ...req.stream !== void 0 ? { stream: req.stream } : {},
-    ...req.max_tokens !== void 0 ? { max_tokens: req.max_tokens } : {}
-  };
-  if (req.stop_sequences?.length) {
-    result3.stop = req.stop_sequences.length === 1 ? req.stop_sequences[0] : req.stop_sequences;
-  }
-  if (req.thinking) {
-    result3.thinking = req.thinking;
-  }
-  if (isGlm53Model(req.model) && req.output_config?.effort) {
-    result3.reasoning_effort = req.output_config.effort;
-  }
-  if (req.tools?.length) {
-    result3.tools = req.tools.map((t) => ({
-      type: "function",
-      function: {
-        name: t.name,
-        ...t.description ? { description: t.description } : {},
-        ...t.input_schema ? { parameters: t.input_schema } : {}
-      }
-    }));
-  }
-  if (req.tool_choice) {
-    const translated = mapToolChoiceAnthropicToOpenAI(req.tool_choice);
-    if (translated !== void 0) result3.tool_choice = translated;
-  }
-  return result3;
-}
-function mapToolChoiceAnthropicToOpenAI(choice) {
-  switch (choice.type) {
-    case "auto":
-      return "auto";
-    case "any":
-      return "required";
-    case "tool":
-      return { type: "function", function: { name: choice.name } };
-    default:
-      return void 0;
-  }
-}
-function translateResponseOpenAIToAnthropic(resp) {
-  const choice = resp.choices?.[0];
-  const content2 = [];
-  if (choice?.message?.reasoning_content) {
-    content2.push({ type: "thinking", thinking: choice.message.reasoning_content });
-  }
-  if (choice?.message?.content) {
-    const textContent = typeof choice.message.content === "string" ? choice.message.content : Array.isArray(choice.message.content) ? choice.message.content.filter((c) => c.type === "text").map((c) => c.text ?? "").join("") : "";
-    if (textContent) content2.push({ type: "text", text: textContent });
-  }
-  if (choice?.message?.tool_calls) {
-    for (const tc of choice.message.tool_calls) {
-      let input = {};
-      try {
-        input = JSON.parse(tc.function.arguments);
-      } catch {
-        input = {};
-      }
-      content2.push({
-        type: "tool_use",
-        id: tc.id,
-        name: tc.function.name,
-        input
-      });
-    }
-  }
-  const stopReason = mapFinishReasonToStopReason(choice?.finish_reason);
-  return {
-    id: resp.id,
-    type: "message",
-    role: "assistant",
-    content: content2.length > 0 ? content2 : [{ type: "text", text: "" }],
-    model: resp.model,
-    stop_reason: stopReason,
-    stop_sequence: null,
-    usage: openaiUsageToAnthropic(resp.usage)
-  };
-}
-function translateMessageAnthropicToOpenAI(m) {
-  if (typeof m.content === "string") {
-    return [{ role: m.role, content: m.content }];
-  }
-  const result3 = [];
-  const contentParts = [];
-  const toolCalls = [];
-  const reasoningParts = [];
-  for (const block of m.content) {
-    switch (block.type) {
-      case "text": {
-        contentParts.push({ type: "text", text: block.text });
-        break;
-      }
-      case "image": {
-        if (block.source.type === "base64") {
-          contentParts.push({
-            type: "image_url",
-            image_url: { url: `data:${block.source.media_type};base64,${block.source.data}` }
-          });
-        } else if (block.source.type === "url") {
-          contentParts.push({
-            type: "image_url",
-            image_url: { url: block.source.url }
-          });
-        }
-        break;
-      }
-      case "tool_use": {
-        toolCalls.push({
-          id: block.id,
-          type: "function",
-          function: { name: block.name, arguments: JSON.stringify(block.input ?? {}) }
-        });
-        break;
-      }
-      case "tool_result": {
-        result3.push({
-          role: "tool",
-          tool_call_id: block.tool_use_id,
-          content: toolResultContentToOpenAI(block.content, block.is_error === true)
-        });
-        break;
-      }
-      case "thinking": {
-        if (block.thinking.length > 0) reasoningParts.push(block.thinking);
-        break;
-      }
-      default:
-        break;
-    }
-  }
-  const hasReasoning = m.role === "assistant" && reasoningParts.length > 0;
-  if (contentParts.length > 0 || toolCalls.length > 0 || hasReasoning) {
-    const content2 = contentParts.length === 0 ? null : contentParts.length === 1 && contentParts[0].type === "text" ? contentParts[0].text ?? "" : contentParts;
-    result3.push({
-      role: m.role,
-      content: content2,
-      ...hasReasoning ? { reasoning_content: reasoningParts.join("\n") } : {},
-      ...toolCalls.length > 0 ? { tool_calls: toolCalls } : {}
-    });
-  }
-  if (result3.length === 0) {
-    result3.push({ role: m.role, content: null });
-  }
-  return result3;
-}
-function toolResultContentToOpenAI(content2, isError) {
-  const body2 = flattenToolResultContent(content2);
-  return isError && body2.length > 0 ? `[tool_error] ${body2}` : body2;
-}
-function flattenToolResultContent(content2) {
-  if (typeof content2 === "string") return content2;
-  if (!Array.isArray(content2)) return "";
-  const texts = content2.filter((b) => b.type === "text").map((b) => b.text);
-  if (texts.length > 0) return texts.join("");
-  return JSON.stringify(content2);
-}
-function mapFinishReasonToStopReason(finishReason) {
-  switch (finishReason) {
-    case "stop":
-      return "end_turn";
-    case "length":
-      return "max_tokens";
-    case "tool_calls":
-      return "tool_use";
-    case "content_filter":
-      return "end_turn";
-    default:
-      return null;
-  }
-}
-function openaiUsageToAnthropic(usage) {
-  const promptTokens = usage?.prompt_tokens ?? 0;
-  const cacheRead = usage?.cache_read_input_tokens ?? usage?.prompt_tokens_details?.cached_tokens ?? 0;
-  const cacheCreation = usage?.cache_creation_input_tokens ?? 0;
-  const inputTokens = Math.max(0, promptTokens - cacheRead - cacheCreation);
-  const result3 = {
-    input_tokens: inputTokens,
-    output_tokens: usage?.completion_tokens ?? 0
-  };
-  if (cacheRead > 0) result3.cache_read_input_tokens = cacheRead;
-  if (cacheCreation > 0) result3.cache_creation_input_tokens = cacheCreation;
-  return result3;
-}
-
-// src/translator/sse-translator.ts
-function parseSSEChunk(raw) {
-  const results = [];
-  const blocks = raw.split("\n\n");
-  for (const block of blocks) {
-    const lines = block.trim().split("\n").filter(Boolean);
-    if (lines.length === 0) continue;
-    let eventType = "";
-    let dataStr = "";
-    for (const line of lines) {
-      if (line.startsWith("event: ")) {
-        eventType = line.slice(7).trim();
-      } else if (line.startsWith("data: ")) {
-        dataStr = line.slice(6);
-      }
-    }
-    if (dataStr) {
-      try {
-        results.push({ event: eventType, data: JSON.parse(dataStr) });
-      } catch {
-      }
-    }
-  }
-  return results;
-}
-function initState(model) {
-  return {
-    messageId: "",
-    model,
-    roleSent: false,
-    usage: { input_tokens: 0, output_tokens: 0 },
-    toolCallIndex: 0,
-    blockIndexToToolCallIndex: /* @__PURE__ */ new Map(),
-    finishReasonSent: false
-  };
-}
-function mergeAnthropicUsage(target2, patch) {
-  if (!patch) return;
-  if (patch.input_tokens != null) target2.input_tokens = patch.input_tokens;
-  if (patch.output_tokens != null) target2.output_tokens = patch.output_tokens;
-  if (patch.cache_read_input_tokens != null) target2.cache_read_input_tokens = patch.cache_read_input_tokens;
-  if (patch.cache_creation_input_tokens != null) target2.cache_creation_input_tokens = patch.cache_creation_input_tokens;
-}
-function makeChunk(state2, delta, finishReason = null, usage) {
-  const chunk = {
-    id: state2.messageId || "chatcmpl-stream",
-    object: "chat.completion.chunk",
-    created: Math.floor(Date.now() / 1e3),
-    model: state2.model,
-    choices: [{
-      index: 0,
-      delta,
-      finish_reason: finishReason
-    }]
-  };
-  if (usage) chunk.usage = usage;
-  return `data: ${JSON.stringify(chunk)}
-
-`;
-}
-function anthropicSseToOpenaiSse(upstream, model = "glm-4.6") {
-  const state2 = initState(model);
-  const decoder = new TextDecoder();
-  const encoder2 = new TextEncoder();
-  let buffer2 = "";
-  return new ReadableStream({
-    async start(controller) {
-      const reader = upstream.getReader();
-      let errored = false;
-      try {
-        while (true) {
-          const { done, value: value2 } = await reader.read();
-          if (done) break;
-          buffer2 += decoder.decode(value2, { stream: true });
-          const blocks = buffer2.split("\n\n");
-          buffer2 = blocks.pop() ?? "";
-          for (const block of blocks) {
-            const parsed = parseSSEChunk(block);
-            for (const p of parsed) {
-              const output = translateEvent(state2, p);
-              if (output) {
-                controller.enqueue(encoder2.encode(output));
-              }
-            }
-          }
-        }
-        if (buffer2.trim()) {
-          const parsed = parseSSEChunk(buffer2);
-          for (const p of parsed) {
-            const output = translateEvent(state2, p);
-            if (output) controller.enqueue(encoder2.encode(output));
-          }
-        }
-        controller.enqueue(encoder2.encode("data: [DONE]\n\n"));
-      } catch (err) {
-        errored = true;
-        try {
-          controller.error(err);
-        } catch {
-        }
-      } finally {
-        if (!errored) {
-          try {
-            controller.close();
-          } catch {
-          }
-        }
-        reader.releaseLock();
-      }
-    }
-  });
-}
-function translateEvent(state2, sse) {
-  const data2 = sse.data;
-  switch (data2.type) {
-    case "message_start": {
-      const msg = data2.message;
-      state2.messageId = msg?.id ?? "msg_stream";
-      state2.model = msg?.model ?? state2.model;
-      mergeAnthropicUsage(state2.usage, msg?.usage);
-      if (!state2.roleSent) {
-        state2.roleSent = true;
-        return makeChunk(state2, { role: "assistant" });
-      }
-      return null;
-    }
-    case "content_block_start": {
-      if (data2.type !== "content_block_start") return null;
-      const block = data2.content_block;
-      const blockIdx = data2.index;
-      if (block.type === "tool_use") {
-        const myIndex = state2.toolCallIndex++;
-        state2.blockIndexToToolCallIndex.set(blockIdx, myIndex);
-        return makeChunk(state2, {
-          tool_calls: [{
-            index: myIndex,
-            id: block.id,
-            type: "function",
-            function: { name: block.name, arguments: "" }
-          }]
-        });
-      }
-      return null;
-    }
-    case "content_block_delta": {
-      if (data2.type !== "content_block_delta") return null;
-      const delta = data2.delta;
-      const blockIdx = data2.index;
-      if (delta.type === "text_delta") {
-        return makeChunk(state2, { content: delta.text });
-      }
-      if (delta.type === "thinking_delta") {
-        return makeChunk(state2, { reasoning_content: delta.thinking });
-      }
-      if (delta.type === "signature_delta") {
-        return null;
-      }
-      if (delta.type === "input_json_delta") {
-        const myIndex = state2.blockIndexToToolCallIndex.get(blockIdx);
-        if (myIndex === void 0) return null;
-        return makeChunk(state2, {
-          tool_calls: [{
-            index: myIndex,
-            function: { arguments: delta.partial_json ?? "" }
-          }]
-        });
-      }
-      return null;
-    }
-    case "message_delta": {
-      mergeAnthropicUsage(state2.usage, data2.usage);
-      if (data2.delta?.stop_reason && !state2.finishReasonSent) {
-        const finishReason = mapStopReason(data2.delta.stop_reason);
-        state2.finishReasonSent = true;
-        return makeChunk(state2, {}, finishReason, anthropicUsageToOpenAI(state2.usage));
-      }
-      return null;
-    }
-    case "message_stop": {
-      if (state2.finishReasonSent) return null;
-      state2.finishReasonSent = true;
-      return makeChunk(state2, {}, "stop", anthropicUsageToOpenAI(state2.usage));
-    }
-    case "ping":
-    case "content_block_stop":
-      return null;
-    default:
-      return null;
-  }
-}
-function mapStopReason(stopReason) {
-  switch (stopReason) {
-    case "end_turn":
-    case "stop_sequence":
-      return "stop";
-    case "max_tokens":
-      return "length";
-    case "tool_use":
-      return "tool_calls";
-    default:
-      return "stop";
-  }
-}
-function openaiSseToAnthropicSse(upstream, model = "glm-4.6") {
-  const encoder2 = new TextEncoder();
-  const decoder = new TextDecoder();
-  let buffer2 = "";
-  let messageStarted = false;
-  let blockIndex = 0;
-  let activeBlock = null;
-  const toolBlocks = /* @__PURE__ */ new Map();
-  const openToolBlockIndices = [];
-  let outputTokens = 0;
-  let latestUsage;
-  let pendingStopReason = null;
-  let contentClosed = false;
-  let messageDeltaSent = false;
-  let messageStopped = false;
-  const messageId = `msg_${Date.now()}`;
-  return new ReadableStream({
-    async start(controller) {
-      const reader = upstream.getReader();
-      let errored = false;
-      const enqueueAnthropicEvent = (eventType, data2) => {
-        controller.enqueue(encoder2.encode(formatAnthropicSSE(eventType, data2)));
-      };
-      const closeActiveBlock = () => {
-        if (!activeBlock) return;
-        enqueueAnthropicEvent("content_block_stop", {
-          type: "content_block_stop",
-          index: activeBlock.index
-        });
-        activeBlock = null;
-      };
-      const closeToolBlocks = () => {
-        for (const idx of openToolBlockIndices) {
-          enqueueAnthropicEvent("content_block_stop", {
-            type: "content_block_stop",
-            index: idx
-          });
-        }
-        openToolBlockIndices.length = 0;
-      };
-      const ensureActiveBlock = (type2) => {
-        if (activeBlock?.type === type2) return activeBlock.index;
-        closeActiveBlock();
-        const index = blockIndex++;
-        activeBlock = { type: type2, index };
-        enqueueAnthropicEvent("content_block_start", {
-          type: "content_block_start",
-          index,
-          content_block: type2 === "text" ? { type: "text", text: "" } : { type: "thinking", thinking: "", signature: "" }
-        });
-        return index;
-      };
-      const handleToolCalls = (toolCalls) => {
-        closeActiveBlock();
-        for (const tc of toolCalls) {
-          const idx = tc.index ?? 0;
-          let state2 = toolBlocks.get(idx);
-          if (!state2) {
-            state2 = { index: blockIndex++, id: "", name: "", started: false, pendingArgs: "" };
-            toolBlocks.set(idx, state2);
-          }
-          if (tc.id) state2.id = tc.id;
-          if (tc.function?.name) state2.name = tc.function.name;
-          if (!state2.started && state2.id && state2.name) {
-            state2.started = true;
-            enqueueAnthropicEvent("content_block_start", {
-              type: "content_block_start",
-              index: state2.index,
-              content_block: { type: "tool_use", id: state2.id, name: state2.name, input: {} }
-            });
-            openToolBlockIndices.push(state2.index);
-            if (state2.pendingArgs.length > 0) {
-              enqueueAnthropicEvent("content_block_delta", {
-                type: "content_block_delta",
-                index: state2.index,
-                delta: { type: "input_json_delta", partial_json: state2.pendingArgs }
-              });
-              state2.pendingArgs = "";
-            }
-          }
-          const argsDelta = tc.function?.arguments;
-          if (argsDelta) {
-            if (state2.started) {
-              enqueueAnthropicEvent("content_block_delta", {
-                type: "content_block_delta",
-                index: state2.index,
-                delta: { type: "input_json_delta", partial_json: argsDelta }
-              });
-            } else {
-              state2.pendingArgs += argsDelta;
-            }
-          }
-        }
-      };
-      const startPendingToolBlocks = () => {
-        const lateStarts = [];
-        for (const [openaiIdx, state2] of toolBlocks) {
-          if (state2.started) continue;
-          if (!state2.pendingArgs && !state2.id && !state2.name) continue;
-          state2.started = true;
-          lateStarts.push({
-            index: state2.index,
-            id: state2.id || `tool_call_${openaiIdx}`,
-            name: state2.name || "unknown_tool",
-            args: state2.pendingArgs
-          });
-          state2.pendingArgs = "";
-          openToolBlockIndices.push(state2.index);
-        }
-        lateStarts.sort((a, b) => a.index - b.index);
-        for (const ls of lateStarts) {
-          enqueueAnthropicEvent("content_block_start", {
-            type: "content_block_start",
-            index: ls.index,
-            content_block: { type: "tool_use", id: ls.id, name: ls.name, input: {} }
-          });
-          if (ls.args.length > 0) {
-            enqueueAnthropicEvent("content_block_delta", {
-              type: "content_block_delta",
-              index: ls.index,
-              delta: { type: "input_json_delta", partial_json: ls.args }
-            });
-          }
-        }
-      };
-      const closeContent = () => {
-        if (contentClosed) return;
-        contentClosed = true;
-        closeActiveBlock();
-        startPendingToolBlocks();
-        closeToolBlocks();
-      };
-      const finalizeStream = () => {
-        closeContent();
-        if (!messageDeltaSent) {
-          messageDeltaSent = true;
-          const usage = openaiUsageToAnthropic(latestUsage);
-          if (!latestUsage) usage.output_tokens = outputTokens;
-          enqueueAnthropicEvent("message_delta", {
-            type: "message_delta",
-            delta: {
-              stop_reason: pendingStopReason ?? "end_turn",
-              stop_sequence: null
-            },
-            usage
-          });
-        }
-        if (!messageStopped) {
-          messageStopped = true;
-          enqueueAnthropicEvent("message_stop", { type: "message_stop" });
-        }
-      };
-      try {
-        while (true) {
-          const { done, value: value2 } = await reader.read();
-          if (done) break;
-          buffer2 += decoder.decode(value2, { stream: true });
-          const lines = buffer2.split("\n");
-          buffer2 = lines.pop() ?? "";
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const dataStr = line.slice(6).trim();
-            if (dataStr === "[DONE]") {
-              finalizeStream();
-              continue;
-            }
-            try {
-              const chunk = JSON.parse(dataStr);
-              const choice = chunk.choices?.[0];
-              if (chunk.usage) {
-                latestUsage = chunk.usage;
-                outputTokens = chunk.usage.completion_tokens ?? outputTokens;
-              }
-              if (!messageStarted) {
-                messageStarted = true;
-                const startUsage = openaiUsageToAnthropic(chunk.usage);
-                enqueueAnthropicEvent("message_start", {
-                  type: "message_start",
-                  message: {
-                    id: chunk.id ?? messageId,
-                    type: "message",
-                    role: "assistant",
-                    content: [],
-                    model: chunk.model || model,
-                    stop_reason: null,
-                    stop_sequence: null,
-                    usage: startUsage
-                  }
-                });
-              }
-              if (choice?.delta?.content) {
-                const index = ensureActiveBlock("text");
-                enqueueAnthropicEvent("content_block_delta", {
-                  type: "content_block_delta",
-                  index,
-                  delta: { type: "text_delta", text: choice.delta.content }
-                });
-              }
-              if (choice?.delta?.reasoning_content) {
-                const index = ensureActiveBlock("thinking");
-                enqueueAnthropicEvent("content_block_delta", {
-                  type: "content_block_delta",
-                  index,
-                  delta: { type: "thinking_delta", thinking: choice.delta.reasoning_content }
-                });
-              }
-              if (choice?.delta?.tool_calls?.length) {
-                handleToolCalls(choice.delta.tool_calls);
-              }
-              if (choice?.finish_reason) {
-                pendingStopReason = mapFinishReason(choice.finish_reason);
-                closeContent();
-              }
-            } catch {
-            }
-          }
-        }
-        finalizeStream();
-      } catch (err) {
-        errored = true;
-        try {
-          controller.error(err);
-        } catch {
-        }
-      } finally {
-        if (!errored) {
-          try {
-            controller.close();
-          } catch {
-          }
-        }
-        reader.releaseLock();
-      }
-    }
-  });
-}
-function formatAnthropicSSE(eventType, data2) {
-  return `event: ${eventType}
-data: ${JSON.stringify(data2)}
-
-`;
-}
-function mapFinishReason(finishReason) {
-  switch (finishReason) {
-    case "stop":
-      return "end_turn";
-    case "length":
-      return "max_tokens";
-    case "tool_calls":
-      return "tool_use";
-    default:
-      return "end_turn";
-  }
-}
-
-// src/proxy/dump.ts
-var import_node_fs2 = require("node:fs");
-var DUMP_PATH = process.env.ZCODE_DUMP_UPSTREAM;
-var SENSITIVE_HEADERS = /* @__PURE__ */ new Set([
-  "authorization",
-  "x-api-key",
-  "proxy-authorization",
-  "proxy-api-key",
-  "x-zcode-captcha-verify-param",
-  "x-zcode-captcha-verify-region",
-  "cookie"
-]);
-function maskHeaderValue(key, value2) {
-  if (!SENSITIVE_HEADERS.has(key.toLowerCase())) return value2;
-  if (value2.length <= 12) return "<redacted>";
-  return `${value2.slice(0, 8)}\u2026${value2.slice(-4)} (len=${value2.length})`;
-}
-function dumpHeaders(headers2) {
-  const out = {};
-  for (const [k, v] of headers2.entries()) {
-    out[k] = maskHeaderValue(k, v);
-  }
-  return out;
-}
-function dumpBody(body2) {
-  if (body2 === void 0 || body2 === null) return void 0;
-  if (body2.length === 0) return "";
-  try {
-    return JSON.parse(body2);
-  } catch {
-    return body2;
-  }
-}
-function dumpPhase(reqId, phase, data2) {
-  if (!DUMP_PATH) return;
-  try {
-    const line = {
-      ts: (/* @__PURE__ */ new Date()).toISOString(),
-      reqId,
-      phase,
-      ...data2
-    };
-    (0, import_node_fs2.appendFileSync)(DUMP_PATH, JSON.stringify(line) + "\n", "utf-8");
-  } catch {
-  }
-}
-function dumpEnabled() {
-  return !!DUMP_PATH;
-}
-
-// src/proxy/handler.ts
-var captchaModule = null;
 async function loadCaptcha() {
   if (!captchaModule) captchaModule = await Promise.resolve().then(() => (init_captcha(), captcha_exports));
   return captchaModule;
@@ -115117,8 +114749,6 @@ function shouldUseOrderedTransport(config, clientSession, hasCustomFetchImpl) {
   if (hasCustomFetchImpl) return false;
   return clientSession?.action === "enforce" || clientSession?.source === "explicit";
 }
-var FETCH_AUTO_DECOMPRESSES = typeof Bun === "undefined";
-var AUTO_DECODED_ENCODINGS = /* @__PURE__ */ new Set(["gzip", "x-gzip", "deflate", "br"]);
 function stripAutoDecodedEncoding(resp) {
   const encoding = resp.headers.get("content-encoding")?.toLowerCase().trim() ?? "";
   if (!encoding) return resp;
@@ -115161,13 +114791,6 @@ async function readBody(req) {
   }
   return new TextDecoder().decode(bytes);
 }
-var MAX_INFLATED_BODY_BYTES = 64 * 1024 * 1024;
-var InflatedBodyTooLargeError = class extends Error {
-  constructor(limit) {
-    super(`gzip request body exceeds ${limit} bytes after decompression`);
-    this.name = "InflatedBodyTooLargeError";
-  }
-};
 async function inflateGzipBody(bytes) {
   const gunzip = new DecompressionStream("gzip");
   const source = new ReadableStream({
@@ -115389,8 +115012,6 @@ function peekBody(body2) {
     return { model: "-", stream: false };
   }
 }
-var reqCounter = 0;
-var headerPrinted = false;
 function localTime(ms) {
   const d = new Date(ms);
   const hh = String(d.getHours()).padStart(2, "0");
@@ -115401,8 +115022,6 @@ function localTime(ms) {
 function nextReqId() {
   return `#${String(++reqCounter).padStart(3, "0")}`;
 }
-var DEBUG_BODY_PREVIEW = 200;
-var SENSITIVE_HEADERS2 = /* @__PURE__ */ new Set(["authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization"]);
 function debugLine(reqId, msg) {
   console.log(`${reqId} debug: ${msg}`);
 }
@@ -115447,7 +115066,6 @@ function previewBody(body2) {
   if (flat.length <= DEBUG_BODY_PREVIEW) return flat;
   return `${flat.slice(0, DEBUG_BODY_PREVIEW)}\u2026(${flat.length} bytes total)`;
 }
-var COMPACT_LOG = process.env.ZCODE_LOG_FORMAT === "compact";
 function printHeader() {
   if (headerPrinted) return;
   headerPrinted = true;
@@ -115574,6 +115192,40 @@ function observeStream(reqId, format, meta, status, requestSentAt, body2, conten
   })().catch(() => {
   });
 }
+var import_node_zlib, captchaModule, FETCH_AUTO_DECOMPRESSES, AUTO_DECODED_ENCODINGS, MAX_INFLATED_BODY_BYTES, InflatedBodyTooLargeError, reqCounter, headerPrinted, DEBUG_BODY_PREVIEW, SENSITIVE_HEADERS2, COMPACT_LOG;
+var init_handler = __esm({
+  "src/proxy/handler.ts"() {
+    "use strict";
+    init_providers();
+    init_upstream();
+    init_endpoint_routing();
+    init_client_signing();
+    init_types();
+    init_ordered_transport();
+    init_body_transformer();
+    init_session_context();
+    import_node_zlib = require("node:zlib");
+    init_openai_to_anthropic();
+    init_anthropic_to_openai();
+    init_sse_translator();
+    init_dump();
+    captchaModule = null;
+    FETCH_AUTO_DECOMPRESSES = typeof Bun === "undefined";
+    AUTO_DECODED_ENCODINGS = /* @__PURE__ */ new Set(["gzip", "x-gzip", "deflate", "br"]);
+    MAX_INFLATED_BODY_BYTES = 64 * 1024 * 1024;
+    InflatedBodyTooLargeError = class extends Error {
+      constructor(limit) {
+        super(`gzip request body exceeds ${limit} bytes after decompression`);
+        this.name = "InflatedBodyTooLargeError";
+      }
+    };
+    reqCounter = 0;
+    headerPrinted = false;
+    DEBUG_BODY_PREVIEW = 200;
+    SENSITIVE_HEADERS2 = /* @__PURE__ */ new Set(["authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization"]);
+    COMPACT_LOG = process.env.ZCODE_LOG_FORMAT === "compact";
+  }
+});
 
 // src/server/routes-openai.ts
 async function handleChatCompletions(req, opts) {
@@ -115593,11 +115245,24 @@ function handleListModels() {
     headers: { "content-type": "application/json" }
   });
 }
+var init_routes_openai = __esm({
+  "src/server/routes-openai.ts"() {
+    "use strict";
+    init_handler();
+    init_models();
+  }
+});
 
 // src/server/routes-anthropic.ts
 async function handleMessages(req, opts) {
   return proxyRequest(req, "anthropic", opts);
 }
+var init_routes_anthropic = __esm({
+  "src/server/routes-anthropic.ts"() {
+    "use strict";
+    init_handler();
+  }
+});
 
 // src/translator/responses-types.ts
 function generateResponsesId(prefix2 = "resp_") {
@@ -115618,19 +115283,13 @@ function isHostedTool(t) {
 function isWebSearchTool(t) {
   return t.type === "web_search" || t.type === "web_search_preview";
 }
+var init_responses_types = __esm({
+  "src/translator/responses-types.ts"() {
+    "use strict";
+  }
+});
 
 // src/translator/responses-to-chat.ts
-var CUSTOM_TOOL_SCHEMA = {
-  type: "object",
-  properties: { input: { type: "string" } },
-  required: ["input"],
-  additionalProperties: false
-};
-var TOOL_SEARCH_PROXY_SCHEMA = {
-  type: "object",
-  properties: { query: { type: "string" }, limit: { type: "number" } },
-  additionalProperties: false
-};
 function responsesToChatCompletions(req) {
   const messages = [];
   if (typeof req.instructions === "string" && req.instructions.trim().length > 0) {
@@ -115920,12 +115579,30 @@ function mapToolChoice(raw, convertible, hasToolSearch) {
   }
   return void 0;
 }
-var ToolTranslationError = class extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "ToolTranslationError";
+var CUSTOM_TOOL_SCHEMA, TOOL_SEARCH_PROXY_SCHEMA, ToolTranslationError;
+var init_responses_to_chat = __esm({
+  "src/translator/responses-to-chat.ts"() {
+    "use strict";
+    init_responses_types();
+    CUSTOM_TOOL_SCHEMA = {
+      type: "object",
+      properties: { input: { type: "string" } },
+      required: ["input"],
+      additionalProperties: false
+    };
+    TOOL_SEARCH_PROXY_SCHEMA = {
+      type: "object",
+      properties: { query: { type: "string" }, limit: { type: "number" } },
+      additionalProperties: false
+    };
+    ToolTranslationError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "ToolTranslationError";
+      }
+    };
   }
-};
+});
 
 // src/translator/chat-to-responses.ts
 function chatCompletionsToResponses(resp, model, opts = {}) {
@@ -116575,6 +116252,12 @@ data: ${JSON.stringify(evt)}
 
 `;
 }
+var init_chat_to_responses = __esm({
+  "src/translator/chat-to-responses.ts"() {
+    "use strict";
+    init_responses_types();
+  }
+});
 
 // src/proxy/responses-handler.ts
 async function handleResponses(clientReq, opts) {
@@ -116839,11 +116522,34 @@ function buildStoredResponse(resp, input, instructions) {
     lastAccessedAt: Date.now()
   };
 }
+var init_responses_handler = __esm({
+  "src/proxy/responses-handler.ts"() {
+    "use strict";
+    init_body_transformer();
+    init_providers();
+    init_upstream();
+    init_endpoint_routing();
+    init_client_signing();
+    init_types();
+    init_openai_to_anthropic();
+    init_sse_translator();
+    init_responses_to_chat();
+    init_chat_to_responses();
+    init_responses_types();
+    init_handler();
+  }
+});
 
 // src/server/routes-responses.ts
 async function handleResponsesRoute(req, opts) {
   return handleResponses(req, opts);
 }
+var init_routes_responses = __esm({
+  "src/server/routes-responses.ts"() {
+    "use strict";
+    init_responses_handler();
+  }
+});
 
 // src/async/openai-stream-adapter.ts
 function anthropicSseToOpenaiSseWithKeepalive(upstream, model = "glm-4.6") {
@@ -116946,6 +116652,12 @@ function anthropicSseToOpenaiSseWithKeepalive(upstream, model = "glm-4.6") {
     emit("data: [DONE]\n\n");
   }
 }
+var init_openai_stream_adapter = __esm({
+  "src/async/openai-stream-adapter.ts"() {
+    "use strict";
+    init_sse_translator();
+  }
+});
 
 // src/async/types.ts
 function isTicketReady(s) {
@@ -116954,20 +116666,24 @@ function isTicketReady(s) {
 function isTicketExpired(s) {
   return s === "expired" || s === "not_found";
 }
-var OffPeakServerError = class extends Error {
-  httpStatus;
-  bizCode;
-  constructor(message, httpStatus, bizCode) {
-    super(message);
-    this.name = "OffPeakServerError";
-    this.httpStatus = httpStatus;
-    this.bizCode = bizCode;
+var OffPeakServerError;
+var init_types2 = __esm({
+  "src/async/types.ts"() {
+    "use strict";
+    OffPeakServerError = class extends Error {
+      httpStatus;
+      bizCode;
+      constructor(message, httpStatus, bizCode) {
+        super(message);
+        this.name = "OffPeakServerError";
+        this.httpStatus = httpStatus;
+        this.bizCode = bizCode;
+      }
+    };
   }
-};
+});
 
 // src/async/client.ts
-var DEFAULT_CONTROL_TIMEOUT_MS = 15e3;
-var MAX_BATCH_STATUS = 100;
 function createOffPeakClient(opts) {
   const origin = opts.origin.replace(/\/+$/, "");
   const credentials2 = opts.credentials;
@@ -117138,6 +116854,15 @@ function createOffPeakClient(opts) {
     }
   };
 }
+var DEFAULT_CONTROL_TIMEOUT_MS, MAX_BATCH_STATUS;
+var init_client = __esm({
+  "src/async/client.ts"() {
+    "use strict";
+    init_types2();
+    DEFAULT_CONTROL_TIMEOUT_MS = 15e3;
+    MAX_BATCH_STATUS = 100;
+  }
+});
 
 // src/async/keepalive.ts
 function keepaliveFrame(text = "keepalive") {
@@ -117146,10 +116871,13 @@ function keepaliveFrame(text = "keepalive") {
 
 `);
 }
+var init_keepalive = __esm({
+  "src/async/keepalive.ts"() {
+    "use strict";
+  }
+});
 
 // src/async/bridge.ts
-init_identity();
-var EXPIRED_MARKER = "off-peak-ticket-expired";
 function runAsyncBridge(opts) {
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
   const encoder2 = new TextEncoder();
@@ -117499,10 +117227,18 @@ function sleep(ms, signal2) {
     signal2?.addEventListener("abort", onAbort, { once: true });
   });
 }
+var EXPIRED_MARKER;
+var init_bridge = __esm({
+  "src/async/bridge.ts"() {
+    "use strict";
+    init_types2();
+    init_keepalive();
+    init_identity();
+    EXPIRED_MARKER = "off-peak-ticket-expired";
+  }
+});
 
 // src/async/handler.ts
-var MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
-var SINGLE_SPACE = new Uint8Array([32]);
 function buildCredentials(cred) {
   return {
     jwt: cred.jwt ?? "",
@@ -117877,6 +117613,21 @@ function reconstructAnthropicBatch(sseText) {
   if (!message.usage) message.usage = { input_tokens: 0, output_tokens: 0 };
   return message;
 }
+var MAX_REQUEST_BODY_BYTES, SINGLE_SPACE;
+var init_handler2 = __esm({
+  "src/async/handler.ts"() {
+    "use strict";
+    init_types();
+    init_handler();
+    init_body_transformer();
+    init_openai_to_anthropic();
+    init_openai_stream_adapter();
+    init_client();
+    init_bridge();
+    MAX_REQUEST_BODY_BYTES = 4 * 1024 * 1024;
+    SINGLE_SPACE = new Uint8Array([32]);
+  }
+});
 
 // src/server/routes-async.ts
 async function handleAsyncMessagesRoute(req, opts) {
@@ -117888,6 +117639,12 @@ async function handleAsyncChatRoute(req, opts) {
 async function handleAsyncHealthRoute(req, opts) {
   return handleAsyncHealth(req, opts);
 }
+var init_routes_async = __esm({
+  "src/server/routes-async.ts"() {
+    "use strict";
+    init_handler2();
+  }
+});
 
 // src/server/server.ts
 function createFetchHandler(opts) {
@@ -118112,37 +117869,22 @@ function corsHeaders() {
     "access-control-max-age": "86400"
   };
 }
-
-// src/android/control.ts
-var import_node_http3 = require("node:http");
+var import_node_http, import_node_stream;
+var init_server = __esm({
+  "src/server/server.ts"() {
+    "use strict";
+    import_node_http = require("node:http");
+    import_node_stream = require("node:stream");
+    init_webui();
+    init_routes_openai();
+    init_routes_anthropic();
+    init_routes_responses();
+    init_routes_async();
+    init_handler();
+  }
+});
 
 // src/auth/oauth.ts
-var import_node_http2 = require("node:http");
-var import_node_crypto3 = require("node:crypto");
-var ZCODE_API_BASE = "https://zcode.z.ai/api/v1";
-var ZCODE_TOKEN_ENDPOINT = `${ZCODE_API_BASE}/oauth/token`;
-var BIGMODEL_HOST = "https://bigmodel.cn";
-var BIGMODEL_APP_ID = "zcode";
-var LOGIN_TIMEOUT_MS = 3e5;
-var OAuthFlowClient = class {
-  constructor(provider, fetchImpl) {
-    this.provider = provider;
-    this.fetchImpl = fetchImpl;
-  }
-  provider;
-  fetchImpl;
-  /** Run the full flow end-to-end: surface authorize URL, wait, close. */
-  async authorize(onAuthorizeUrl, timeoutMs = LOGIN_TIMEOUT_MS) {
-    const started = await this.start();
-    onAuthorizeUrl?.(started.authorizeUrl);
-    try {
-      const tokens = await this.complete(started, timeoutMs);
-      return { accessToken: tokens.accessToken, provider: this.provider, userId: tokens.userId, jwt: tokens.jwt };
-    } finally {
-      await this.close();
-    }
-  }
-};
 async function requestZcodeEnvelope(fetchImpl, url2, init, label2) {
   const resp = await fetchImpl(url2, init);
   const raw = safeJsonParse(await resp.text());
@@ -118154,235 +117896,6 @@ async function requestZcodeEnvelope(fetchImpl, url2, init, label2) {
   }
   return raw.data;
 }
-var ZaiOAuthClient = class extends OAuthFlowClient {
-  constructor(fetchImpl = fetch, sleep2 = defaultSleep) {
-    super("zai", fetchImpl);
-    this.sleep = sleep2;
-  }
-  sleep;
-  flow = null;
-  pollToken = "";
-  start() {
-    this.flow = null;
-    this.pollToken = (0, import_node_crypto3.randomBytes)(32).toString("hex");
-    return (async () => {
-      const data2 = await requestZcodeEnvelope(
-        this.fetchImpl,
-        `${ZCODE_API_BASE}/oauth/cli/init`,
-        {
-          method: "POST",
-          headers: { authorization: `Bearer ${this.pollToken}`, "content-type": "application/json" },
-          body: JSON.stringify({ provider: this.provider })
-        },
-        "Z.AI login init"
-      );
-      if (!data2 || typeof data2.flow_id !== "string" || typeof data2.authorize_url !== "string" || typeof data2.expires_at !== "number" || typeof data2.poll_interval_sec !== "number") {
-        throw new Error("Z.AI login init: invalid response data");
-      }
-      this.flow = data2;
-      return { authorizeUrl: this.flow.authorize_url, callbackUrl: "", state: this.flow.flow_id };
-    })();
-  }
-  async complete(_started, timeoutMs = LOGIN_TIMEOUT_MS) {
-    const flow = this.flow;
-    if (!flow) throw new Error("Z.AI login not started");
-    const deadlineMs = Math.min(Date.now() + timeoutMs, flow.expires_at * 1e3);
-    const intervalMs = Math.max(1e3, flow.poll_interval_sec * 1e3);
-    for (; ; ) {
-      if (Date.now() >= deadlineMs) {
-        throw new Error("Authorization timed out. Please retry login.");
-      }
-      const data2 = await requestZcodeEnvelope(
-        this.fetchImpl,
-        `${ZCODE_API_BASE}/oauth/cli/poll/${encodeURIComponent(flow.flow_id)}`,
-        { method: "GET", headers: { authorization: `Bearer ${this.pollToken}` } },
-        "Z.AI login poll"
-      );
-      if (data2?.status === "ready") {
-        const accessToken = typeof data2.zai?.access_token === "string" ? data2.zai.access_token.trim() : "";
-        if (!accessToken) {
-          throw new Error("Z.AI login poll: response missing data.zai.access_token");
-        }
-        return {
-          accessToken,
-          jwt: typeof data2.token === "string" ? data2.token.trim() : void 0,
-          userId: typeof data2.user?.user_id === "string" ? data2.user.user_id : void 0
-        };
-      }
-      if (data2?.status === "failed") {
-        throw new Error("Authorization failed. Please retry login.");
-      }
-      if (data2?.status !== "pending") {
-        throw new Error(`Z.AI login poll: unexpected status ${String(data2?.status ?? "(none)")}`);
-      }
-      await this.sleep(Math.min(intervalMs, Math.max(0, deadlineMs - Date.now())));
-    }
-  }
-  async close() {
-    this.flow = null;
-  }
-};
-var AuthCodeOAuthClient = class extends OAuthFlowClient {
-  server = null;
-  callbackResult = null;
-  callbackWaiters = [];
-  constructor(config, fetchImpl = fetch) {
-    super(config.provider, fetchImpl);
-    this.config = config;
-  }
-  config;
-  /** Build the provider authorize URL with the localhost redirect + state. */
-  buildAuthorizeUrl(callbackUrl, state2) {
-    const params = new URLSearchParams({
-      appId: this.config.appId,
-      redirect: callbackUrl,
-      state: state2
-    });
-    return `${this.config.authorizeUrl}?${params.toString()}`;
-  }
-  /**
-   * Start the localhost callback server and return the authorize URL.
-   * Call `waitForCallback()` (or `authorize()`) afterwards, then `close()`.
-   *
-   * The bind port is `0` (OS-assigned random) unless the env var
-   * `ZCODE_OAUTH_CALLBACK_PORT` is set, in which case that exact port is used.
-   * The Android entry sets the env var so the Custom Tabs redirect URL is
-   * predictable across launches.
-   */
-  start() {
-    const state2 = (0, import_node_crypto3.randomBytes)(32).toString("hex");
-    const requestedPort = Number(process.env.ZCODE_OAUTH_CALLBACK_PORT ?? 0) || 0;
-    return new Promise((resolve, reject) => {
-      this.server = (0, import_node_http2.createServer)((req, res) => {
-        this.handleCallback(req, res, state2);
-      });
-      this.server.on("error", (err) => {
-        this.server = null;
-        reject(err);
-      });
-      this.server.listen(requestedPort, "127.0.0.1", () => {
-        const addr = this.server.address();
-        if (!addr || typeof addr !== "object") {
-          reject(new Error("Failed to bind localhost callback server"));
-          return;
-        }
-        const callbackUrl = `http://127.0.0.1:${addr.port}${this.config.callbackPath}`;
-        const authorizeUrl = this.buildAuthorizeUrl(callbackUrl, state2);
-        resolve({ authorizeUrl, callbackUrl, state: state2 });
-      });
-    });
-  }
-  handleCallback(req, res, expectedState) {
-    const url2 = new URL(req.url ?? "/", "http://127.0.0.1");
-    if (url2.pathname !== this.config.callbackPath) {
-      res.writeHead(404, { "Content-Type": "text/plain" });
-      res.end("Not found");
-      return;
-    }
-    const state2 = url2.searchParams.get("state") ?? "";
-    const code = url2.searchParams.get("authCode") ?? url2.searchParams.get("code") ?? "";
-    if (state2 !== expectedState || !code) {
-      res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
-      res.end("Authorization failed: state mismatch or missing code.");
-      if (!this.callbackResult) {
-        this.callbackResult = { code: "", error: "OAuth callback state mismatch or missing code." };
-        this.callbackWaiters.forEach((fn) => fn(this.callbackResult));
-      }
-      return;
-    }
-    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end("Authorization successful! You may close this window and return to the CLI.");
-    if (!this.callbackResult) {
-      this.callbackResult = { code, error: null };
-      this.callbackWaiters.forEach((fn) => fn(this.callbackResult));
-    }
-  }
-  /** Wait for the OAuth callback redirect. Resolves with the auth code. */
-  waitForCallback(timeoutMs = LOGIN_TIMEOUT_MS) {
-    if (this.callbackResult?.code) {
-      return Promise.resolve(this.callbackResult.code);
-    }
-    if (this.callbackResult?.error) {
-      return Promise.reject(new Error(this.callbackResult.error));
-    }
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error("Authorization timed out. Please retry login."));
-      }, timeoutMs);
-      this.callbackWaiters.push((result3) => {
-        clearTimeout(timer);
-        if (result3.error) {
-          reject(new Error(result3.error));
-        } else {
-          resolve(result3.code);
-        }
-      });
-    });
-  }
-  /**
-   * Exchange the auth code at the shared zcode.z.ai token endpoint.
-   * The ZCode server holds the app secret and performs the real provider exchange.
-   * Returns `{ accessToken, userId, jwt }`.
-   */
-  async exchangeCode(authCode, redirectUri, state2) {
-    const resp = await this.fetchImpl(this.config.tokenUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        provider: this.config.provider,
-        code: authCode,
-        redirect_uri: redirectUri,
-        state: state2
-      })
-    });
-    const raw = safeJsonParse(await resp.text());
-    if (!resp.ok || raw && typeof raw.code === "number" && raw.code !== 0) {
-      const label2 = this.config.provider;
-      throw new Error(
-        `${label2} token exchange failed: status=${resp.status} msg=${raw?.msg ?? "(none)"}`
-      );
-    }
-    const providerToken = raw?.data?.[this.config.accessTokenField];
-    const accessToken = providerToken?.access_token?.trim() ?? "";
-    if (!accessToken) {
-      throw new Error(`${this.config.provider} token response missing data.${this.config.accessTokenField}.access_token`);
-    }
-    const userId = raw?.data?.user?.user_id;
-    const jwt = raw?.data?.token?.trim() ?? void 0;
-    return { accessToken, userId: typeof userId === "string" ? userId : void 0, jwt };
-  }
-  /** Wait for the browser callback, then exchange the code. */
-  async complete(started, timeoutMs = LOGIN_TIMEOUT_MS) {
-    const code = await this.waitForCallback(timeoutMs);
-    return this.exchangeCode(code, started.callbackUrl, started.state);
-  }
-  async close() {
-    if (this.server) {
-      const server = this.server;
-      this.server = null;
-      server.closeAllConnections?.();
-      await new Promise((resolve) => {
-        server.close(() => resolve());
-      });
-    }
-  }
-};
-var BIGMODEL_AUTH_CODE_CONFIG = {
-  provider: "bigmodel",
-  authorizeUrl: `${BIGMODEL_HOST}/login`,
-  appId: BIGMODEL_APP_ID,
-  tokenUrl: ZCODE_TOKEN_ENDPOINT,
-  callbackPath: "/oauth/callback/bigmodel",
-  accessTokenField: "bigmodel"
-};
-var BigmodelOAuthClient = class extends AuthCodeOAuthClient {
-  constructor(fetchImpl = fetch, host2 = BIGMODEL_HOST, appId = BIGMODEL_APP_ID) {
-    super(
-      { ...BIGMODEL_AUTH_CODE_CONFIG, authorizeUrl: `${host2}/login`, appId },
-      fetchImpl
-    );
-  }
-};
 function defaultSleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -118393,11 +117906,269 @@ function safeJsonParse(text) {
     return null;
   }
 }
+var import_node_http2, import_node_crypto3, ZCODE_API_BASE, ZCODE_TOKEN_ENDPOINT, BIGMODEL_HOST, BIGMODEL_APP_ID, LOGIN_TIMEOUT_MS, OAuthFlowClient, ZaiOAuthClient, AuthCodeOAuthClient, BIGMODEL_AUTH_CODE_CONFIG, BigmodelOAuthClient;
+var init_oauth = __esm({
+  "src/auth/oauth.ts"() {
+    "use strict";
+    import_node_http2 = require("node:http");
+    import_node_crypto3 = require("node:crypto");
+    ZCODE_API_BASE = "https://zcode.z.ai/api/v1";
+    ZCODE_TOKEN_ENDPOINT = `${ZCODE_API_BASE}/oauth/token`;
+    BIGMODEL_HOST = "https://bigmodel.cn";
+    BIGMODEL_APP_ID = "zcode";
+    LOGIN_TIMEOUT_MS = 3e5;
+    OAuthFlowClient = class {
+      constructor(provider, fetchImpl) {
+        this.provider = provider;
+        this.fetchImpl = fetchImpl;
+      }
+      provider;
+      fetchImpl;
+      /** Run the full flow end-to-end: surface authorize URL, wait, close. */
+      async authorize(onAuthorizeUrl, timeoutMs = LOGIN_TIMEOUT_MS) {
+        const started = await this.start();
+        onAuthorizeUrl?.(started.authorizeUrl);
+        try {
+          const tokens = await this.complete(started, timeoutMs);
+          return { accessToken: tokens.accessToken, provider: this.provider, userId: tokens.userId, jwt: tokens.jwt };
+        } finally {
+          await this.close();
+        }
+      }
+    };
+    ZaiOAuthClient = class extends OAuthFlowClient {
+      constructor(fetchImpl = fetch, sleep2 = defaultSleep) {
+        super("zai", fetchImpl);
+        this.sleep = sleep2;
+      }
+      sleep;
+      flow = null;
+      pollToken = "";
+      start() {
+        this.flow = null;
+        this.pollToken = (0, import_node_crypto3.randomBytes)(32).toString("hex");
+        return (async () => {
+          const data2 = await requestZcodeEnvelope(
+            this.fetchImpl,
+            `${ZCODE_API_BASE}/oauth/cli/init`,
+            {
+              method: "POST",
+              headers: { authorization: `Bearer ${this.pollToken}`, "content-type": "application/json" },
+              body: JSON.stringify({ provider: this.provider })
+            },
+            "Z.AI login init"
+          );
+          if (!data2 || typeof data2.flow_id !== "string" || typeof data2.authorize_url !== "string" || typeof data2.expires_at !== "number" || typeof data2.poll_interval_sec !== "number") {
+            throw new Error("Z.AI login init: invalid response data");
+          }
+          this.flow = data2;
+          return { authorizeUrl: this.flow.authorize_url, callbackUrl: "", state: this.flow.flow_id };
+        })();
+      }
+      async complete(_started, timeoutMs = LOGIN_TIMEOUT_MS) {
+        const flow = this.flow;
+        if (!flow) throw new Error("Z.AI login not started");
+        const deadlineMs = Math.min(Date.now() + timeoutMs, flow.expires_at * 1e3);
+        const intervalMs = Math.max(1e3, flow.poll_interval_sec * 1e3);
+        for (; ; ) {
+          if (Date.now() >= deadlineMs) {
+            throw new Error("Authorization timed out. Please retry login.");
+          }
+          const data2 = await requestZcodeEnvelope(
+            this.fetchImpl,
+            `${ZCODE_API_BASE}/oauth/cli/poll/${encodeURIComponent(flow.flow_id)}`,
+            { method: "GET", headers: { authorization: `Bearer ${this.pollToken}` } },
+            "Z.AI login poll"
+          );
+          if (data2?.status === "ready") {
+            const accessToken = typeof data2.zai?.access_token === "string" ? data2.zai.access_token.trim() : "";
+            if (!accessToken) {
+              throw new Error("Z.AI login poll: response missing data.zai.access_token");
+            }
+            return {
+              accessToken,
+              jwt: typeof data2.token === "string" ? data2.token.trim() : void 0,
+              userId: typeof data2.user?.user_id === "string" ? data2.user.user_id : void 0
+            };
+          }
+          if (data2?.status === "failed") {
+            throw new Error("Authorization failed. Please retry login.");
+          }
+          if (data2?.status !== "pending") {
+            throw new Error(`Z.AI login poll: unexpected status ${String(data2?.status ?? "(none)")}`);
+          }
+          await this.sleep(Math.min(intervalMs, Math.max(0, deadlineMs - Date.now())));
+        }
+      }
+      async close() {
+        this.flow = null;
+      }
+    };
+    AuthCodeOAuthClient = class extends OAuthFlowClient {
+      server = null;
+      callbackResult = null;
+      callbackWaiters = [];
+      constructor(config, fetchImpl = fetch) {
+        super(config.provider, fetchImpl);
+        this.config = config;
+      }
+      config;
+      /** Build the provider authorize URL with the localhost redirect + state. */
+      buildAuthorizeUrl(callbackUrl, state2) {
+        const params = new URLSearchParams({
+          appId: this.config.appId,
+          redirect: callbackUrl,
+          state: state2
+        });
+        return `${this.config.authorizeUrl}?${params.toString()}`;
+      }
+      /**
+       * Start the localhost callback server and return the authorize URL.
+       * Call `waitForCallback()` (or `authorize()`) afterwards, then `close()`.
+       *
+       * The bind port is `0` (OS-assigned random) unless the env var
+       * `ZCODE_OAUTH_CALLBACK_PORT` is set, in which case that exact port is used.
+       * The Android entry sets the env var so the Custom Tabs redirect URL is
+       * predictable across launches.
+       */
+      start() {
+        const state2 = (0, import_node_crypto3.randomBytes)(32).toString("hex");
+        const requestedPort = Number(process.env.ZCODE_OAUTH_CALLBACK_PORT ?? 0) || 0;
+        return new Promise((resolve, reject) => {
+          this.server = (0, import_node_http2.createServer)((req, res) => {
+            this.handleCallback(req, res, state2);
+          });
+          this.server.on("error", (err) => {
+            this.server = null;
+            reject(err);
+          });
+          this.server.listen(requestedPort, "127.0.0.1", () => {
+            const addr = this.server.address();
+            if (!addr || typeof addr !== "object") {
+              reject(new Error("Failed to bind localhost callback server"));
+              return;
+            }
+            const callbackUrl = `http://127.0.0.1:${addr.port}${this.config.callbackPath}`;
+            const authorizeUrl = this.buildAuthorizeUrl(callbackUrl, state2);
+            resolve({ authorizeUrl, callbackUrl, state: state2 });
+          });
+        });
+      }
+      handleCallback(req, res, expectedState) {
+        const url2 = new URL(req.url ?? "/", "http://127.0.0.1");
+        if (url2.pathname !== this.config.callbackPath) {
+          res.writeHead(404, { "Content-Type": "text/plain" });
+          res.end("Not found");
+          return;
+        }
+        const state2 = url2.searchParams.get("state") ?? "";
+        const code = url2.searchParams.get("authCode") ?? url2.searchParams.get("code") ?? "";
+        if (state2 !== expectedState || !code) {
+          res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("Authorization failed: state mismatch or missing code.");
+          if (!this.callbackResult) {
+            this.callbackResult = { code: "", error: "OAuth callback state mismatch or missing code." };
+            this.callbackWaiters.forEach((fn) => fn(this.callbackResult));
+          }
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("Authorization successful! You may close this window and return to the CLI.");
+        if (!this.callbackResult) {
+          this.callbackResult = { code, error: null };
+          this.callbackWaiters.forEach((fn) => fn(this.callbackResult));
+        }
+      }
+      /** Wait for the OAuth callback redirect. Resolves with the auth code. */
+      waitForCallback(timeoutMs = LOGIN_TIMEOUT_MS) {
+        if (this.callbackResult?.code) {
+          return Promise.resolve(this.callbackResult.code);
+        }
+        if (this.callbackResult?.error) {
+          return Promise.reject(new Error(this.callbackResult.error));
+        }
+        return new Promise((resolve, reject) => {
+          const timer = setTimeout(() => {
+            reject(new Error("Authorization timed out. Please retry login."));
+          }, timeoutMs);
+          this.callbackWaiters.push((result3) => {
+            clearTimeout(timer);
+            if (result3.error) {
+              reject(new Error(result3.error));
+            } else {
+              resolve(result3.code);
+            }
+          });
+        });
+      }
+      /**
+       * Exchange the auth code at the shared zcode.z.ai token endpoint.
+       * The ZCode server holds the app secret and performs the real provider exchange.
+       * Returns `{ accessToken, userId, jwt }`.
+       */
+      async exchangeCode(authCode, redirectUri, state2) {
+        const resp = await this.fetchImpl(this.config.tokenUrl, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            provider: this.config.provider,
+            code: authCode,
+            redirect_uri: redirectUri,
+            state: state2
+          })
+        });
+        const raw = safeJsonParse(await resp.text());
+        if (!resp.ok || raw && typeof raw.code === "number" && raw.code !== 0) {
+          const label2 = this.config.provider;
+          throw new Error(
+            `${label2} token exchange failed: status=${resp.status} msg=${raw?.msg ?? "(none)"}`
+          );
+        }
+        const providerToken = raw?.data?.[this.config.accessTokenField];
+        const accessToken = providerToken?.access_token?.trim() ?? "";
+        if (!accessToken) {
+          throw new Error(`${this.config.provider} token response missing data.${this.config.accessTokenField}.access_token`);
+        }
+        const userId = raw?.data?.user?.user_id;
+        const jwt = raw?.data?.token?.trim() ?? void 0;
+        return { accessToken, userId: typeof userId === "string" ? userId : void 0, jwt };
+      }
+      /** Wait for the browser callback, then exchange the code. */
+      async complete(started, timeoutMs = LOGIN_TIMEOUT_MS) {
+        const code = await this.waitForCallback(timeoutMs);
+        return this.exchangeCode(code, started.callbackUrl, started.state);
+      }
+      async close() {
+        if (this.server) {
+          const server = this.server;
+          this.server = null;
+          server.closeAllConnections?.();
+          await new Promise((resolve) => {
+            server.close(() => resolve());
+          });
+        }
+      }
+    };
+    BIGMODEL_AUTH_CODE_CONFIG = {
+      provider: "bigmodel",
+      authorizeUrl: `${BIGMODEL_HOST}/login`,
+      appId: BIGMODEL_APP_ID,
+      tokenUrl: ZCODE_TOKEN_ENDPOINT,
+      callbackPath: "/oauth/callback/bigmodel",
+      accessTokenField: "bigmodel"
+    };
+    BigmodelOAuthClient = class extends AuthCodeOAuthClient {
+      constructor(fetchImpl = fetch, host2 = BIGMODEL_HOST, appId = BIGMODEL_APP_ID) {
+        super(
+          { ...BIGMODEL_AUTH_CODE_CONFIG, authorizeUrl: `${host2}/login`, appId },
+          fetchImpl
+        );
+      }
+    };
+  }
+});
 
 // src/auth/resolver.ts
-var ZAI_API_KEY_NAME = "zcode-api-key";
-var DEFAULT_ORG_MARKER = "\u9ED8\u8BA4\u673A\u6784";
-var DEFAULT_PROJECT_MARKER = "\u9ED8\u8BA4\u9879\u76EE";
 async function requestBizApi(fetchImpl, url2, authorization, init) {
   const resp = await fetchImpl(url2, {
     ...init,
@@ -118417,138 +118188,199 @@ async function requestBizApi(fetchImpl, url2, authorization, init) {
   }
   return body2.data ?? body2;
 }
-var KeyResolver = class {
-  constructor(fetchImpl = fetch) {
-    this.fetchImpl = fetchImpl;
-  }
-  fetchImpl;
-  async resolveZaiBizToken(accessToken) {
-    const resp = await this.fetchImpl("https://api.z.ai/api/auth/z/login", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: accessToken })
-    });
-    if (!resp.ok) {
-      throw new Error(`z/login failed: ${resp.status}`);
-    }
-    const data2 = await resp.json();
-    return data2.access_token ?? data2.accessToken ?? data2.data?.access_token;
-  }
-  async resolveCustomerInfo(host2, authorization) {
-    const data2 = await requestBizApi(
-      this.fetchImpl,
-      `${host2}/api/biz/customer/getCustomerInfo`,
-      authorization,
-      { method: "GET" }
-    );
-    const orgs = data2.organizations ?? data2.orgs ?? [];
-    if (!Array.isArray(orgs) || orgs.length === 0) {
-      throw new Error("No organizations found");
-    }
-    const org = orgs.find(
-      (o) => (o.organizationName ?? o.name ?? "").includes(DEFAULT_ORG_MARKER)
-    ) ?? orgs[0];
-    const orgId = org.organizationId ?? org.id ?? org.orgId;
-    const projects = org.projects ?? [];
-    if (!Array.isArray(projects) || projects.length === 0) {
-      throw new Error("No projects found in default organization");
-    }
-    const project = projects.find(
-      (p) => (p.projectName ?? p.name ?? "").includes(DEFAULT_PROJECT_MARKER)
-    ) ?? projects[0];
-    const projectId = project.projectId ?? project.id;
-    return { orgId, projectId };
-  }
-  async findOrCreateApiKey(host2, authorization, orgId, projectId) {
-    const listUrl = `${host2}/api/biz/v1/organization/${orgId}/projects/${projectId}/api_keys`;
-    let existing = [];
-    try {
-      existing = await requestBizApi(this.fetchImpl, listUrl, authorization, { method: "GET" }) ?? [];
-    } catch {
-    }
-    if (Array.isArray(existing)) {
-      const found = existing.find((k) => k.name === ZAI_API_KEY_NAME);
-      if (found?.apiKey) {
-        return { apiKey: found.apiKey };
+var ZAI_API_KEY_NAME, DEFAULT_ORG_MARKER, DEFAULT_PROJECT_MARKER, KeyResolver;
+var init_resolver = __esm({
+  "src/auth/resolver.ts"() {
+    "use strict";
+    ZAI_API_KEY_NAME = "zcode-api-key";
+    DEFAULT_ORG_MARKER = "\u9ED8\u8BA4\u673A\u6784";
+    DEFAULT_PROJECT_MARKER = "\u9ED8\u8BA4\u9879\u76EE";
+    KeyResolver = class {
+      constructor(fetchImpl = fetch) {
+        this.fetchImpl = fetchImpl;
       }
-    }
-    const created = await requestBizApi(this.fetchImpl, listUrl, authorization, {
-      method: "POST",
-      body: JSON.stringify({ name: ZAI_API_KEY_NAME })
-    });
-    return { apiKey: created.apiKey };
-  }
-  async getSecretKey(host2, authorization, orgId, projectId, apiKey) {
-    const url2 = `${host2}/api/biz/v1/organization/${orgId}/projects/${projectId}/api_keys/copy/${encodeURIComponent(apiKey)}`;
-    const data2 = await requestBizApi(this.fetchImpl, url2, authorization, { method: "GET" });
-    return data2.secretKey ?? data2.secret_key ?? "";
-  }
-  async resolveCodingPlanCredential(accessToken, provider, userId) {
-    if (provider === "zai") {
-      const bizToken = await this.resolveZaiBizToken(accessToken);
-      const host3 = "https://api.z.ai";
-      const authorization2 = `Bearer ${bizToken}`;
-      const { orgId: orgId2, projectId: projectId2 } = await this.resolveCustomerInfo(host3, authorization2);
-      const { apiKey: apiKey2 } = await this.findOrCreateApiKey(host3, authorization2, orgId2, projectId2);
-      let secret;
-      try {
-        secret = await this.getSecretKey(host3, authorization2, orgId2, projectId2, apiKey2);
-      } catch {
+      fetchImpl;
+      async resolveZaiBizToken(accessToken) {
+        const resp = await this.fetchImpl("https://api.z.ai/api/auth/z/login", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ token: accessToken })
+        });
+        if (!resp.ok) {
+          throw new Error(`z/login failed: ${resp.status}`);
+        }
+        const data2 = await resp.json();
+        return data2.access_token ?? data2.accessToken ?? data2.data?.access_token;
       }
-      return { apiKey: apiKey2, secret: secret || void 0, provider: "zai", userId };
-    }
-    const host2 = "https://bigmodel.cn";
-    const authorization = accessToken;
-    const { orgId, projectId } = await this.resolveCustomerInfo(host2, authorization);
-    const { apiKey } = await this.findOrCreateApiKey(host2, authorization, orgId, projectId);
-    let fullKey = apiKey;
-    try {
-      const secret = await this.getSecretKey(host2, authorization, orgId, projectId, apiKey);
-      if (secret) fullKey = `${apiKey}.${secret}`;
-    } catch {
-    }
-    return { apiKey: fullKey, provider: "bigmodel", userId };
+      async resolveCustomerInfo(host2, authorization) {
+        const data2 = await requestBizApi(
+          this.fetchImpl,
+          `${host2}/api/biz/customer/getCustomerInfo`,
+          authorization,
+          { method: "GET" }
+        );
+        const orgs = data2.organizations ?? data2.orgs ?? [];
+        if (!Array.isArray(orgs) || orgs.length === 0) {
+          throw new Error("No organizations found");
+        }
+        const org = orgs.find(
+          (o) => (o.organizationName ?? o.name ?? "").includes(DEFAULT_ORG_MARKER)
+        ) ?? orgs[0];
+        const orgId = org.organizationId ?? org.id ?? org.orgId;
+        const projects = org.projects ?? [];
+        if (!Array.isArray(projects) || projects.length === 0) {
+          throw new Error("No projects found in default organization");
+        }
+        const project = projects.find(
+          (p) => (p.projectName ?? p.name ?? "").includes(DEFAULT_PROJECT_MARKER)
+        ) ?? projects[0];
+        const projectId = project.projectId ?? project.id;
+        return { orgId, projectId };
+      }
+      async findOrCreateApiKey(host2, authorization, orgId, projectId) {
+        const listUrl = `${host2}/api/biz/v1/organization/${orgId}/projects/${projectId}/api_keys`;
+        let existing = [];
+        try {
+          existing = await requestBizApi(this.fetchImpl, listUrl, authorization, { method: "GET" }) ?? [];
+        } catch {
+        }
+        if (Array.isArray(existing)) {
+          const found = existing.find((k) => k.name === ZAI_API_KEY_NAME);
+          if (found?.apiKey) {
+            return { apiKey: found.apiKey };
+          }
+        }
+        const created = await requestBizApi(this.fetchImpl, listUrl, authorization, {
+          method: "POST",
+          body: JSON.stringify({ name: ZAI_API_KEY_NAME })
+        });
+        return { apiKey: created.apiKey };
+      }
+      async getSecretKey(host2, authorization, orgId, projectId, apiKey) {
+        const url2 = `${host2}/api/biz/v1/organization/${orgId}/projects/${projectId}/api_keys/copy/${encodeURIComponent(apiKey)}`;
+        const data2 = await requestBizApi(this.fetchImpl, url2, authorization, { method: "GET" });
+        return data2.secretKey ?? data2.secret_key ?? "";
+      }
+      async resolveCodingPlanCredential(accessToken, provider, userId) {
+        if (provider === "zai") {
+          const bizToken = await this.resolveZaiBizToken(accessToken);
+          const host3 = "https://api.z.ai";
+          const authorization2 = `Bearer ${bizToken}`;
+          const { orgId: orgId2, projectId: projectId2 } = await this.resolveCustomerInfo(host3, authorization2);
+          const { apiKey: apiKey2 } = await this.findOrCreateApiKey(host3, authorization2, orgId2, projectId2);
+          let secret;
+          try {
+            secret = await this.getSecretKey(host3, authorization2, orgId2, projectId2, apiKey2);
+          } catch {
+          }
+          return { apiKey: apiKey2, secret: secret || void 0, provider: "zai", userId };
+        }
+        const host2 = "https://bigmodel.cn";
+        const authorization = accessToken;
+        const { orgId, projectId } = await this.resolveCustomerInfo(host2, authorization);
+        const { apiKey } = await this.findOrCreateApiKey(host2, authorization, orgId, projectId);
+        let fullKey = apiKey;
+        try {
+          const secret = await this.getSecretKey(host2, authorization, orgId, projectId, apiKey);
+          if (secret) fullKey = `${apiKey}.${secret}`;
+        } catch {
+        }
+        return { apiKey: fullKey, provider: "bigmodel", userId };
+      }
+    };
   }
-};
+});
+
+// src/auth/store.ts
+function getEncryptionKey() {
+  const hash = new Uint8Array(new ArrayBuffer(32));
+  const encoder2 = new TextEncoder();
+  const seed2 = process.env[ENV_SECRET] ?? `${(0, import_node_os4.homedir)()}-${process.platform}-${process.arch}`;
+  const seedBytes = encoder2.encode(seed2);
+  for (let i = 0; i < seedBytes.length; i++) {
+    hash[i % 32] ^= seedBytes[i];
+  }
+  return hash;
+}
+async function encrypt(plaintext) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    getEncryptionKey(),
+    { name: "AES-GCM" },
+    false,
+    ["encrypt", "decrypt"]
+  );
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoder2 = new TextEncoder();
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    key,
+    encoder2.encode(plaintext)
+  );
+  const combined = new Uint8Array(iv.length + encrypted.byteLength);
+  combined.set(iv, 0);
+  combined.set(new Uint8Array(encrypted), iv.length);
+  return Buffer.from(combined).toString("base64");
+}
+async function decrypt(ciphertext) {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    getEncryptionKey(),
+    { name: "AES-GCM" },
+    false,
+    ["encrypt", "decrypt"]
+  );
+  const combined = Buffer.from(ciphertext, "base64");
+  const iv = combined.slice(0, 12);
+  const data2 = combined.slice(12);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv },
+    key,
+    data2
+  );
+  return new TextDecoder().decode(decrypted);
+}
+async function saveCredential(cred) {
+  (0, import_node_fs4.mkdirSync)((0, import_node_path2.dirname)(STORE_FILE), { recursive: true });
+  const json = JSON.stringify(cred);
+  const encrypted = await encrypt(json);
+  (0, import_node_fs4.writeFileSync)(STORE_FILE, JSON.stringify({ encrypted }), { mode: 384 });
+}
+async function loadCredential() {
+  if (!(0, import_node_fs4.existsSync)(STORE_FILE)) return null;
+  const raw = (0, import_node_fs4.readFileSync)(STORE_FILE, "utf-8");
+  const parsed = JSON.parse(raw);
+  if (!parsed.encrypted) return null;
+  try {
+    const json = await decrypt(parsed.encrypted);
+    return JSON.parse(json);
+  } catch (e) {
+    console.warn(`Ignoring corrupted or stale credentials at ${STORE_FILE}: ${e.message}`);
+    return null;
+  }
+}
+function clearCredential() {
+  if ((0, import_node_fs4.existsSync)(STORE_FILE)) {
+    (0, import_node_fs4.unlinkSync)(STORE_FILE);
+  }
+}
+function getStorePath() {
+  return STORE_FILE;
+}
+var import_node_fs4, import_node_path2, import_node_os4, STORE_DIR, STORE_FILE, ENV_SECRET;
+var init_store = __esm({
+  "src/auth/store.ts"() {
+    "use strict";
+    import_node_fs4 = require("node:fs");
+    import_node_path2 = require("node:path");
+    import_node_os4 = require("node:os");
+    STORE_DIR = (0, import_node_path2.join)((0, import_node_os4.homedir)(), ".zcode-proxy");
+    STORE_FILE = (0, import_node_path2.join)(STORE_DIR, "credentials.json");
+    ENV_SECRET = "ZCODE_PROXY_CREDENTIAL_SECRET";
+  }
+});
 
 // src/android/control.ts
-init_store();
-var LogBuffer = class {
-  lines = [];
-  capacity;
-  nextSeq = 0;
-  constructor(capacity = 500) {
-    this.capacity = capacity;
-  }
-  push(line) {
-    this.lines.push(line);
-    this.nextSeq++;
-    if (this.lines.length > this.capacity) {
-      this.lines.splice(0, this.lines.length - this.capacity);
-    }
-  }
-  /**
-   * Returns lines whose logical sequence number is `>= since`, plus the
-   * next-since cursor (use as the next `since` value for incremental polling).
-   */
-  since(since) {
-    const baseSeq = Math.max(0, this.nextSeq - this.lines.length);
-    const wantStart = Math.max(since, baseSeq);
-    const offset2 = wantStart - baseSeq;
-    if (offset2 >= this.lines.length) {
-      return { nextSince: this.nextSeq, lines: [] };
-    }
-    return { nextSince: this.nextSeq, lines: this.lines.slice(offset2) };
-  }
-  /** Returns all lines currently in the buffer. */
-  snapshot() {
-    return this.lines;
-  }
-  /** Monotonic cursor; safe to expose externally. */
-  get cursor() {
-    return this.nextSeq;
-  }
-};
 function startControlListener(opts) {
   const logBuffer = opts.logBuffer ?? new LogBuffer();
   const server = (0, import_node_http3.createServer)(async (req, res) => {
@@ -118721,70 +118553,170 @@ function readBody3(req) {
     req.on("error", reject);
   });
 }
+var import_node_http3, LogBuffer;
+var init_control = __esm({
+  "src/android/control.ts"() {
+    "use strict";
+    import_node_http3 = require("node:http");
+    init_oauth();
+    init_resolver();
+    init_store();
+    LogBuffer = class {
+      lines = [];
+      capacity;
+      nextSeq = 0;
+      constructor(capacity = 500) {
+        this.capacity = capacity;
+      }
+      push(line) {
+        this.lines.push(line);
+        this.nextSeq++;
+        if (this.lines.length > this.capacity) {
+          this.lines.splice(0, this.lines.length - this.capacity);
+        }
+      }
+      /**
+       * Returns lines whose logical sequence number is `>= since`, plus the
+       * next-since cursor (use as the next `since` value for incremental polling).
+       */
+      since(since) {
+        const baseSeq = Math.max(0, this.nextSeq - this.lines.length);
+        const wantStart = Math.max(since, baseSeq);
+        const offset2 = wantStart - baseSeq;
+        if (offset2 >= this.lines.length) {
+          return { nextSince: this.nextSeq, lines: [] };
+        }
+        return { nextSince: this.nextSeq, lines: this.lines.slice(offset2) };
+      }
+      /** Returns all lines currently in the buffer. */
+      snapshot() {
+        return this.lines;
+      }
+      /** Monotonic cursor; safe to expose externally. */
+      get cursor() {
+        return this.nextSeq;
+      }
+    };
+  }
+});
+
+// src/config/edit.ts
+function updateConfigYaml(path2, fields) {
+  const raw = (0, import_node_fs5.readFileSync)(path2, "utf-8");
+  const parsed = (0, import_yaml2.parse)(raw) ?? {};
+  parsed.provider = fields.provider;
+  parsed.plan = fields.plan;
+  (0, import_node_fs5.writeFileSync)(path2, (0, import_yaml2.stringify)(parsed), "utf-8");
+}
+var import_yaml2, import_node_fs5;
+var init_edit = __esm({
+  "src/config/edit.ts"() {
+    "use strict";
+    import_yaml2 = __toESM(require_dist(), 1);
+    import_node_fs5 = require("node:fs");
+  }
+});
+
+// src/runtime/open-browser.ts
+function openBrowser(url2) {
+  try {
+    if (process.platform === "win32") {
+      (0, import_node_child_process.spawn)("cmd.exe", ["/c", `start "" "${url2}"`], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+        windowsVerbatimArguments: true
+      }).unref();
+    } else if (process.platform === "darwin") {
+      (0, import_node_child_process.spawn)("open", [url2], { detached: true, stdio: "ignore" }).unref();
+    } else {
+      (0, import_node_child_process.spawn)("xdg-open", [url2], { detached: true, stdio: "ignore" }).unref();
+    }
+  } catch {
+  }
+}
+var import_node_child_process;
+var init_open_browser = __esm({
+  "src/runtime/open-browser.ts"() {
+    "use strict";
+    import_node_child_process = require("node:child_process");
+  }
+});
 
 // src/responses/store.ts
-var DEFAULT_MAX_ENTRIES = 1e3;
-var DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
-var ResponseStore = class {
-  maxEntries;
-  ttlMs;
-  map = /* @__PURE__ */ new Map();
-  constructor(opts = {}) {
-    this.maxEntries = opts.maxEntries ?? DEFAULT_MAX_ENTRIES;
-    this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
+var DEFAULT_MAX_ENTRIES, DEFAULT_TTL_MS, ResponseStore;
+var init_store2 = __esm({
+  "src/responses/store.ts"() {
+    "use strict";
+    DEFAULT_MAX_ENTRIES = 1e3;
+    DEFAULT_TTL_MS = 24 * 60 * 60 * 1e3;
+    ResponseStore = class {
+      maxEntries;
+      ttlMs;
+      map = /* @__PURE__ */ new Map();
+      constructor(opts = {}) {
+        this.maxEntries = opts.maxEntries ?? DEFAULT_MAX_ENTRIES;
+        this.ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS;
+      }
+      /** Store a response. Overwrites on duplicate id. Evicts LRU entries on overflow. */
+      set(entry) {
+        const now = Date.now();
+        entry.createdAt = now;
+        entry.lastAccessedAt = now;
+        if (this.map.has(entry.id)) this.map.delete(entry.id);
+        this.map.set(entry.id, entry);
+        while (this.map.size > this.maxEntries) {
+          const oldestKey = this.map.keys().next().value;
+          if (oldestKey === void 0) break;
+          this.map.delete(oldestKey);
+        }
+      }
+      /**
+       * Fetch a stored response. Returns `undefined` when missing or stale.
+       * Refreshes LRU position on hit.
+       */
+      get(id2) {
+        const entry = this.map.get(id2);
+        if (!entry) return void 0;
+        const now = Date.now();
+        if (now - entry.createdAt > this.ttlMs) {
+          this.map.delete(id2);
+          return void 0;
+        }
+        entry.lastAccessedAt = now;
+        this.map.delete(id2);
+        this.map.set(id2, entry);
+        return entry;
+      }
+      delete(id2) {
+        return this.map.delete(id2);
+      }
+      clear() {
+        this.map.clear();
+      }
+      size() {
+        return this.map.size;
+      }
+    };
   }
-  /** Store a response. Overwrites on duplicate id. Evicts LRU entries on overflow. */
-  set(entry) {
-    const now = Date.now();
-    entry.createdAt = now;
-    entry.lastAccessedAt = now;
-    if (this.map.has(entry.id)) this.map.delete(entry.id);
-    this.map.set(entry.id, entry);
-    while (this.map.size > this.maxEntries) {
-      const oldestKey = this.map.keys().next().value;
-      if (oldestKey === void 0) break;
-      this.map.delete(oldestKey);
-    }
-  }
-  /**
-   * Fetch a stored response. Returns `undefined` when missing or stale.
-   * Refreshes LRU position on hit.
-   */
-  get(id2) {
-    const entry = this.map.get(id2);
-    if (!entry) return void 0;
-    const now = Date.now();
-    if (now - entry.createdAt > this.ttlMs) {
-      this.map.delete(id2);
-      return void 0;
-    }
-    entry.lastAccessedAt = now;
-    this.map.delete(id2);
-    this.map.set(id2, entry);
-    return entry;
-  }
-  delete(id2) {
-    return this.map.delete(id2);
-  }
-  clear() {
-    this.map.clear();
-  }
-  size() {
-    return this.map.size;
-  }
-};
+});
 
-// src/index.ts
-init_store();
-var import_yaml2 = __toESM(require_dist(), 1);
-var import_node_child_process = require("node:child_process");
-var import_node_fs5 = require("node:fs");
-var import_node_path3 = require("node:path");
-var import_node_os5 = require("node:os");
-var import_node_crypto4 = require("node:crypto");
+// src/server/server-options.ts
+function buildServerOptions(config, auth, debug) {
+  const opts = { config, auth, debug };
+  if (config.responses.enabled) {
+    opts.responseStore = new ResponseStore({ maxEntries: config.responses.storeMaxEntries, ttlMs: config.responses.storeTtlMs });
+  }
+  return opts;
+}
+var init_server_options = __esm({
+  "src/server/server-options.ts"() {
+    "use strict";
+    init_store2();
+  }
+});
 
 // src/runtime/node-fetch-compat.ts
-var applied = false;
 async function ensureNodeFetchNoTimeouts() {
   if (typeof Bun !== "undefined") return;
   if (applied) return;
@@ -118796,10 +118728,1389 @@ async function ensureNodeFetchNoTimeouts() {
     console.error(`zcode-proxy: could not disable Node fetch default timeouts: ${err.message}`);
   }
 }
+var applied;
+var init_node_fetch_compat = __esm({
+  "src/runtime/node-fetch-compat.ts"() {
+    "use strict";
+    applied = false;
+  }
+});
+
+// src/tui/width.ts
+function inRanges(cp, ranges) {
+  let lo = 0;
+  let hi = ranges.length - 1;
+  while (lo <= hi) {
+    const mid = lo + hi >> 1;
+    const [a, b] = ranges[mid];
+    if (cp < a) hi = mid - 1;
+    else if (cp > b) lo = mid + 1;
+    else return true;
+  }
+  return false;
+}
+function codePointWidth(cp) {
+  if (cp === 0) return 0;
+  if (cp < 32 || cp >= 127 && cp < 160) return 0;
+  if (inRanges(cp, ZERO_RANGES)) return 0;
+  if (inRanges(cp, WIDE_RANGES)) return 2;
+  return 1;
+}
+function stripAnsi(s) {
+  return s.replace(ANSI_RE, "");
+}
+function displayWidth(s) {
+  let w2 = 0;
+  for (const ch of stripAnsi(s)) {
+    w2 += codePointWidth(ch.codePointAt(0));
+  }
+  return w2;
+}
+function truncateToWidth(s, max, ellipsis = "\u2026") {
+  if (max <= 0) return "";
+  const plain = stripAnsi(s);
+  if (displayWidth(plain) <= max) return plain;
+  const ellWidth = displayWidth(ellipsis);
+  let w2 = 0;
+  let out = "";
+  for (const ch of plain) {
+    const cw = codePointWidth(ch.codePointAt(0));
+    if (w2 + cw > max - ellWidth) break;
+    out += ch;
+    w2 += cw;
+  }
+  return out + ellipsis;
+}
+var ANSI_RE, WIDE_RANGES, ZERO_RANGES;
+var init_width = __esm({
+  "src/tui/width.ts"() {
+    "use strict";
+    ANSI_RE = /\x1b(?:\[[0-9;?<=>! ]*[A-Za-z~@`\\]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_=>])/g;
+    WIDE_RANGES = [
+      [4352, 4447],
+      [11904, 12350],
+      [12353, 13311],
+      [13312, 19903],
+      [19968, 40959],
+      [40960, 42182],
+      [43360, 43388],
+      [44032, 55203],
+      [63744, 64255],
+      [65040, 65049],
+      [65072, 65106],
+      [65108, 65126],
+      [65128, 65131],
+      [65281, 65376],
+      [65504, 65510],
+      [127744, 128591],
+      [128640, 128767],
+      [129280, 129535],
+      [131072, 196605],
+      [196608, 262141]
+    ];
+    ZERO_RANGES = [
+      [768, 879],
+      [8203, 8207],
+      [8400, 8447],
+      [65024, 65039]
+    ];
+  }
+});
+
+// src/tui/log-pane.ts
+var LogPane;
+var init_log_pane = __esm({
+  "src/tui/log-pane.ts"() {
+    "use strict";
+    init_width();
+    LogPane = class {
+      constructor(capacity = 2e3) {
+        this.capacity = capacity;
+      }
+      capacity;
+      lines = [];
+      nextSeq = 0;
+      /** Lines hidden below the viewport. 0 = follow the tail. */
+      offset = 0;
+      /**
+       * Append a log record. ANSI escape sequences are stripped (proxy logs carry
+       * color codes; the pane applies its own) and embedded newlines split into
+       * separate rows so multi-line records scroll naturally.
+       */
+      push(text, level = "info") {
+        const clean = stripAnsi(String(text)).replace(/\r/g, "");
+        const parts = clean.split("\n");
+        if (parts.length > 1 && parts[parts.length - 1] === "") parts.pop();
+        for (const part of parts) {
+          this.lines.push({ seq: this.nextSeq++, level, text: part });
+        }
+        if (this.lines.length > this.capacity) {
+          this.lines.splice(0, this.lines.length - this.capacity);
+        }
+      }
+      get count() {
+        return this.lines.length;
+      }
+      /** True when the viewport is pinned to the newest lines. */
+      get following() {
+        return this.offset === 0;
+      }
+      scrollUp(n) {
+        this.offset = Math.min(this.lines.length, this.offset + Math.max(0, n));
+      }
+      scrollDown(n) {
+        this.offset = Math.max(0, this.offset - Math.max(0, n));
+      }
+      /** Jump back to the tail (re-enable following). */
+      followBottom() {
+        this.offset = 0;
+      }
+      clear() {
+        this.lines = [];
+        this.offset = 0;
+      }
+      /** Slice of lines currently visible in a viewport `height` rows tall. */
+      view(height2) {
+        const rows2 = Math.max(1, height2);
+        const end2 = Math.max(Math.min(rows2, this.lines.length), this.lines.length - this.offset);
+        const start2 = Math.max(0, end2 - rows2);
+        return {
+          lines: this.lines.slice(start2, end2),
+          total: this.lines.length,
+          fromBottom: this.lines.length - end2
+        };
+      }
+    };
+  }
+});
+
+// src/tui/keys.ts
+function csiAction(final, params) {
+  if (params.startsWith("<")) return mouseAction(params.slice(1), final);
+  switch (final) {
+    case "A":
+      return { type: "up" };
+    case "B":
+      return { type: "down" };
+    case "H":
+      return { type: "home" };
+    case "F":
+      return { type: "end" };
+    case "~":
+      if (params === "5" || params === "5;5") return { type: "pageup" };
+      if (params === "6" || params === "6;5") return { type: "pagedown" };
+      if (params === "1" || params === "7") return { type: "home" };
+      if (params === "4" || params === "8") return { type: "end" };
+      return { type: "ignore" };
+    default:
+      return { type: "ignore" };
+  }
+}
+function mouseAction(params, final) {
+  if (final !== "M") return { type: "ignore" };
+  const parts = params.split(";");
+  const button = Number(parts[0]);
+  const x3 = Number(parts[1]);
+  const y3 = Number(parts[2]);
+  if (!Number.isFinite(button) || !Number.isFinite(x3) || !Number.isFinite(y3)) {
+    return { type: "ignore" };
+  }
+  if (button === 0) return { type: "click", x: x3 - 1, y: y3 - 1 };
+  if (button === 64) return { type: "wheel-up" };
+  if (button === 65) return { type: "wheel-down" };
+  return { type: "ignore" };
+}
+var KeyParser;
+var init_keys = __esm({
+  "src/tui/keys.ts"() {
+    "use strict";
+    KeyParser = class {
+      pending = "";
+      /** Consume a raw stdin chunk and return the actions it completes. */
+      feed(chunk) {
+        const buf = this.pending + chunk;
+        const actions = [];
+        let i = 0;
+        while (i < buf.length) {
+          const ch = buf[i];
+          if (ch === "\x1B") {
+            if (i + 1 >= buf.length) break;
+            if (buf[i + 1] === "[") {
+              let j = i + 2;
+              while (j < buf.length && !/[A-Za-z~]/.test(buf[j])) j++;
+              if (j >= buf.length) break;
+              actions.push(csiAction(buf[j], buf.slice(i + 2, j)));
+              i = j + 1;
+              continue;
+            }
+            if (buf[i + 1] === "O") {
+              if (i + 2 >= buf.length) break;
+              actions.push(csiAction(buf[i + 2], ""));
+              i += 3;
+              continue;
+            }
+            actions.push({ type: "ignore" });
+            i += 2;
+            continue;
+          }
+          if (ch === "") {
+            actions.push({ type: "ctrl-c" });
+            i++;
+            continue;
+          }
+          if (ch < " " || ch === "\x7F") {
+            actions.push({ type: "ignore" });
+            i++;
+            continue;
+          }
+          actions.push({ type: "char", key: ch });
+          i++;
+        }
+        this.pending = buf.slice(i);
+        return actions;
+      }
+    };
+  }
+});
+
+// src/tui/frame.ts
+function findRegion(regions, row, col) {
+  for (const r2 of regions) {
+    if (r2.row === row && col >= r2.col && col < r2.col + r2.width) return r2.action;
+  }
+  return null;
+}
+function paint(code, t) {
+  return `\x1B[${code}m${t}\x1B[0m`;
+}
+function segWidth(segs) {
+  let w2 = 0;
+  for (const s of segs) w2 += displayWidth(s.t);
+  return w2;
+}
+function paintSegs(segs) {
+  return segs.map((s) => s.c ? paint(s.c, s.t) : s.t).join("");
+}
+function segPlain(segs) {
+  return segs.map((s) => s.t).join("");
+}
+function renderTopBorder(w2, left, right = []) {
+  let l = left;
+  let r2 = right;
+  if (r2.length === 0) {
+    if (5 + segWidth(l) > w2 - 1) l = [{ t: truncateToWidth(segPlain(l), Math.max(0, w2 - 7)) }];
+    const fill2 = Math.max(1, w2 - 5 - segWidth(l));
+    return paint(DIM, "\u256D\u2500 ") + paintSegs(l) + paint(DIM, ` ${"\u2500".repeat(fill2)}\u256E`);
+  }
+  const lw = segWidth(l);
+  const rw = segWidth(r2);
+  let fill = w2 - 8 - lw - rw;
+  if (fill < 1) {
+    const budget = Math.max(0, w2 - 9 - lw);
+    r2 = [{ t: truncateToWidth(segPlain(r2), budget) }];
+    fill = Math.max(1, w2 - 8 - lw - segWidth(r2));
+    if (fill < 1) {
+      l = [{ t: truncateToWidth(segPlain(l), Math.max(0, w2 - 8 - segWidth(r2))) }];
+      fill = Math.max(1, w2 - 8 - segWidth(l) - segWidth(r2));
+    }
+  }
+  return paint(DIM, "\u256D\u2500 ") + paintSegs(l) + paint(DIM, ` ${"\u2500".repeat(fill)} `) + paintSegs(r2) + paint(DIM, " \u2500\u256E");
+}
+function renderBottomBorder(w2) {
+  return paint(DIM, `\u2570${"\u2500".repeat(Math.max(0, w2 - 2))}\u256F`);
+}
+function composeRow(w2, row, label2, parts, opts = {}) {
+  const chrome = opts.chrome !== false;
+  const contentW = Math.max(0, w2 - (chrome ? 4 : 2));
+  const prefixPlain = label2 !== null ? " ".repeat(2) + label2.padEnd(LABEL_W - 2) : " ".repeat(2);
+  const prefixW = displayWidth(prefixPlain);
+  const prefixPainted = label2 !== null ? paint(DIM, prefixPlain) : prefixPlain;
+  const regions = [];
+  const painted = [];
+  let col = prefixW;
+  for (const p of parts) {
+    const pw = displayWidth(p.t);
+    if (col + pw > contentW) break;
+    if (p.action) regions.push({ row, col: (chrome ? 2 : 0) + col, width: pw, action: p.action });
+    painted.push(p.c ? paint(p.c, p.t) : p.t);
+    col += pw;
+  }
+  if (!chrome) {
+    return { line: prefixPainted + painted.join(""), regions };
+  }
+  const pad = " ".repeat(Math.max(0, contentW - col));
+  return {
+    line: `${paint(DIM, "\u2502")} ${prefixPainted}${painted.join("")}${pad} ${paint(DIM, "\u2502")}`,
+    regions
+  };
+}
+function optionParts(slots, selected, makeAction, disabled2) {
+  const parts = [];
+  slots.forEach((v, i) => {
+    if (i > 0) parts.push({ t: "  " });
+    parts.push({
+      t: ` ${v} `,
+      c: disabled2 ? DIM : v === selected ? BTN_SELECTED : BTN_GRAY,
+      action: disabled2 ? void 0 : makeAction(v)
+    });
+  });
+  if (disabled2) parts.push({ t: "  " }, { t: "(stop to switch)", c: AMBER });
+  return parts;
+}
+function logLineCode(level) {
+  if (level === "error") return RED;
+  if (level === "warn") return AMBER;
+  return void 0;
+}
+function buildFrame(s) {
+  const w2 = s.width;
+  const h = s.height;
+  const regions = [];
+  const lines = [];
+  const emit = (line) => {
+    lines.push(line + "\x1B[0m\x1B[K");
+    return lines.length - 1;
+  };
+  if (w2 < 40 || h < 14) {
+    emit("zcode-proxy: terminal too small for the TUI.");
+    emit(`   need >= 40x14, got ${w2}x${h}`);
+    return { text: lines.join("\n") + "\x1B[0m\x1B[J", regions };
+  }
+  const pill = s.loginInFlight ? [{ t: "\u25CF logging in\u2026", c: AMBER }] : s.loggedIn ? [{ t: "\u25CF ready", c: GREEN }] : [{ t: "\u25CF logged out", c: AMBER }];
+  const busy = s.serverStatus === "running" || s.serverStatus === "starting";
+  emit(renderTopBorder(w2, [{ t: "Settings & Login", c: BOLD }], pill));
+  const providerRow = composeRow(
+    w2,
+    lines.length,
+    "Provider",
+    optionParts(
+      ["zai", "bigmodel"],
+      s.provider,
+      (v) => ({ kind: "provider", value: v }),
+      busy
+    )
+  );
+  emit(providerRow.line);
+  regions.push(...providerRow.regions);
+  const planRow = composeRow(
+    w2,
+    lines.length,
+    "Plan",
+    optionParts(
+      ["coding-plan", "start-plan"],
+      s.plan,
+      (v) => ({ kind: "plan", value: v }),
+      busy
+    )
+  );
+  emit(planRow.line);
+  regions.push(...planRow.regions);
+  const authSegs = s.loggedIn ? [{ t: "\u25CF ", c: GREEN }, { t: `logged in \xB7 ${s.apiKeyPreview}` }] : [{ t: "\u25CB not logged in", c: AMBER }];
+  emit(composeRow(w2, lines.length, "Auth", authSegs.map((g) => ({ t: g.t, c: g.c }))).line);
+  const loginRow = composeRow(w2, lines.length, "", s.loginInFlight ? [{ t: " Logging in\u2026 ", c: DIM }] : s.loggedIn ? [
+    { t: " Logged In ", c: DIM },
+    { t: "  " },
+    { t: " Logout ", c: BTN_GRAY, action: { kind: "key", key: "o" } }
+  ] : [
+    { t: " OAuth Login ", c: BTN_GREEN, action: { kind: "key", key: "l" } },
+    { t: "  " },
+    { t: " Logout ", c: DIM }
+  ]);
+  emit(loginRow.line);
+  regions.push(...loginRow.regions);
+  if (s.loginInFlight && s.loginHint) {
+    emit(composeRow(w2, lines.length, "Login", [{ t: `\xBB ${s.loginHint}`, c: AMBER }]).line);
+  }
+  emit(renderBottomBorder(w2));
+  emit("");
+  emit(renderTopBorder(w2, [{ t: "Proxy Server", c: BOLD }]));
+  const statusSegs = s.serverStatus === "running" ? [{ t: "\u25CF running", c: GREEN }, { t: "  " + s.serverUrl, c: CYAN }] : s.serverStatus === "starting" ? [{ t: "\u25CF starting\u2026", c: AMBER }] : s.serverStatus === "error" ? [{ t: "\u2717 failed", c: RED }] : [{ t: "\u25CB stopped", c: DIM }];
+  emit(composeRow(w2, lines.length, "Status", statusSegs.map((g) => ({ t: g.t, c: g.c }))).line);
+  const configText = [
+    `${s.provider} \xB7 ${s.plan} \xB7 ${s.modelCount} models`,
+    s.responsesEnabled ? "/v1/responses" : "",
+    s.claimAuto ? "claim:auto" : "",
+    `v${s.version}`
+  ].filter(Boolean).join(" \xB7 ");
+  emit(composeRow(w2, lines.length, "Config", [{ t: configText, c: DIM }]).line);
+  const startEnabled = s.serverStatus === "stopped" || s.serverStatus === "error";
+  const stopEnabled = s.serverStatus === "running";
+  const serverButtonsRow = composeRow(w2, lines.length, "", [
+    { t: " Start ", c: startEnabled ? BTN_GREEN : DIM, action: startEnabled ? { kind: "key", key: "s" } : void 0 },
+    { t: "    " },
+    { t: " Stop ", c: stopEnabled ? BTN_RED : DIM, action: stopEnabled ? { kind: "key", key: "s" } : void 0 }
+  ]);
+  emit(serverButtonsRow.line);
+  regions.push(...serverButtonsRow.regions);
+  if (s.serverStatus === "error" && s.serverError) {
+    emit(composeRow(w2, lines.length, "Error", [{ t: s.serverError, c: RED }]).line);
+  }
+  emit(renderBottomBorder(w2));
+  emit("");
+  const logRight = s.logFollowing ? [{ t: "following", c: GREEN }] : [{ t: `\u25BC ${s.logFromBottom} more \xB7 g follow`, c: AMBER }];
+  const fixed = lines.length + 2 + 1 + (s.toast ? 1 : 0);
+  const logRows = Math.max(1, h - fixed);
+  const logBorderRow = emit(renderTopBorder(w2, [{ t: "Logs", c: BOLD }, { t: ` (${s.logTotal})`, c: DIM }], logRight));
+  if (!s.logFollowing) {
+    regions.push({ row: logBorderRow, col: 0, width: w2, action: { kind: "follow" } });
+  }
+  if (s.logView.length === 0) {
+    emit(composeRow(w2, lines.length, null, [{ t: "(no logs yet \u2014 start the server and send requests)", c: DIM }]).line);
+  } else {
+    for (const line of s.logView.slice(-logRows)) {
+      emit(composeRow(w2, lines.length, null, [{ t: truncateToWidth(line.text, w2 - 6), c: logLineCode(line.level) }]).line);
+    }
+  }
+  emit(renderBottomBorder(w2));
+  if (s.toast) {
+    const color = s.toast.kind === "ok" ? GREEN : s.toast.kind === "err" ? RED : CYAN;
+    emit(" " + paint(color, truncateToWidth(`\u25B8 ${s.toast.text}`, w2 - 2)));
+  }
+  const footerRow = lines.length;
+  const footerParts = [];
+  const footerItems = [
+    ["s", "start/stop"],
+    ["l", "login"],
+    ["o", "logout"],
+    ["g", "follow"],
+    ["q", "quit"],
+    ["p", "provider"],
+    ["t", "plan"],
+    ["c", "clear"]
+  ];
+  footerParts.push({ t: "\u2191\u2193 scroll", c: DIM });
+  for (const [key, label2] of footerItems) {
+    footerParts.push({ t: " \xB7 ", c: DIM });
+    footerParts.push({ t: `[${key}] ${label2}`, c: DIM, action: { kind: "key", key } });
+  }
+  const footer = composeRow(w2, footerRow, null, footerParts, { chrome: false });
+  emit(footer.line);
+  regions.push(...footer.regions);
+  return { text: lines.join("\n") + "\x1B[0m\x1B[J", regions };
+}
+var DIM, RED, GREEN, AMBER, CYAN, BOLD, LABEL_W, BTN_GREEN, BTN_RED, BTN_BLUE, BTN_GRAY, BTN_SELECTED;
+var init_frame = __esm({
+  "src/tui/frame.ts"() {
+    "use strict";
+    init_width();
+    DIM = "90";
+    RED = "31";
+    GREEN = "32";
+    AMBER = "33";
+    CYAN = "36";
+    BOLD = "1";
+    LABEL_W = 12;
+    BTN_GREEN = "38;2;255;255;255;48;2;35;134;54";
+    BTN_RED = "38;2;255;255;255;48;2;218;54;51";
+    BTN_BLUE = "38;2;255;255;255;48;2;31;111;235";
+    BTN_GRAY = "38;2;201;209;217;48;2;48;54;61";
+    BTN_SELECTED = BTN_BLUE;
+  }
+});
+
+// src/claim/types.ts
+function classifyClaimCode(code) {
+  switch (typeof code === "string" ? Number.parseInt(code, 10) : code) {
+    case 1001:
+      return "not_found";
+    case 1002:
+      return "unavailable";
+    case 1003:
+      return "already_claimed";
+    case 1004:
+      return "ineligible";
+    case 1005:
+      return "quota_exhausted";
+    case 3001:
+      return "invalid_request";
+    case 3007:
+      return "captcha";
+    case 401:
+      return "login_required";
+    default:
+      return "unknown";
+  }
+}
+var init_types3 = __esm({
+  "src/claim/types.ts"() {
+    "use strict";
+  }
+});
+
+// src/claim/client.ts
+function createClaimClient(opts) {
+  const origin = opts.origin.replace(/\/+$/, "");
+  const jwt = opts.jwt?.trim() || void 0;
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+  const identityHeaders = opts.identity ? Object.fromEntries(
+    Object.entries(buildIdentityHeaders(opts.identity)).filter(([name2]) => name2 !== "X-ZCode-Agent")
+  ) : { "X-ZCode-App-Version": opts.appVersion, "X-Platform": opts.platform };
+  function parseEntitlement(c) {
+    const entitlementId = c.entitlement_id?.trim() ?? "";
+    if (!entitlementId) return null;
+    const e = {
+      entitlementId,
+      showName: c.show_name?.trim() ?? "",
+      meter: c.meter?.trim() ?? "",
+      unitType: c.unit_type?.trim() ?? "",
+      capabilities: Array.isArray(c.capabilities) ? c.capabilities : [],
+      grantUnits: Number.isFinite(c.grant_units) ? c.grant_units : 0,
+      period: c.period?.trim() ?? "",
+      priority: Number.isFinite(c.priority) ? c.priority : 0
+    };
+    if (Number.isFinite(c.effective_at)) e.effectiveAt = c.effective_at;
+    return e;
+  }
+  function parsePlan(p) {
+    const planId = p.plan_id?.trim() ?? "";
+    if (!planId) return null;
+    const plan = {
+      planId,
+      name: p.name?.trim() || planId,
+      description: p.description?.trim() ?? "",
+      priority: Number.isFinite(p.priority) ? p.priority : 0,
+      entitlements: (p.entitlements ?? []).flatMap((c) => {
+        const e = parseEntitlement(c);
+        return e ? [e] : [];
+      })
+    };
+    if (Number.isFinite(p.starts_at)) plan.startsAt = p.starts_at;
+    if (Number.isFinite(p.ends_at)) plan.endsAt = p.ends_at;
+    return plan;
+  }
+  async function request(method2, path2, init) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    if (init.signal) {
+      if (init.signal.aborted) controller.abort();
+      else init.signal.addEventListener("abort", onExternalAbort, { once: true });
+    }
+    let resp;
+    try {
+      resp = await fetchImpl(`${origin}${path2}`, {
+        method: method2,
+        headers: init.headers,
+        body: init.body === void 0 ? void 0 : JSON.stringify(init.body),
+        signal: controller.signal
+      });
+      const text = await resp.text();
+      let json;
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object") json = parsed;
+      } catch {
+      }
+      return { status: resp.status, json, text };
+    } finally {
+      clearTimeout(timer);
+      init.signal?.removeEventListener("abort", onExternalAbort);
+    }
+  }
+  function unwrapError(json, status, text) {
+    const code = json?.code !== void 0 ? json.code : status >= 400 ? status : -1;
+    const rawMsg = json?.msg ?? json?.message;
+    const message = typeof rawMsg === "string" && rawMsg.trim() ? rawMsg.trim() : text.length > 0 && text.length < 200 ? text : `HTTP ${status}`;
+    return { code, message };
+  }
+  return {
+    async getPreviews(signal2) {
+      const url2 = `/api/v1/zcode-plan/billing/preview?app_version=${encodeURIComponent(opts.appVersion)}&platform=${encodeURIComponent(opts.platform)}`;
+      const headers2 = { ...identityHeaders };
+      if (jwt) headers2.authorization = `Bearer ${jwt}`;
+      const { status, json, text } = await request("GET", url2, { headers: headers2, signal: signal2 });
+      if (status < 200 || status >= 300 || json?.code !== void 0 && json.code !== 0 || json?.data === void 0) {
+        const { code, message } = unwrapError(json, status, text);
+        throw new ClaimPreviewError(`claim preview failed (${code}): ${message}`, status, code);
+      }
+      const data2 = json.data;
+      return (data2.plans ?? []).flatMap((p) => {
+        const plan = parsePlan(p);
+        return plan ? [plan] : [];
+      });
+    },
+    async claim(planId, captcha, signal2) {
+      if (!jwt) return { ok: false, planId, failureKind: "login_required", code: 401, message: "manual_claim_login_required" };
+      const headers2 = {
+        ...identityHeaders,
+        authorization: `Bearer ${jwt}`,
+        "content-type": "application/json",
+        "X-Aliyun-Captcha-Verify-Param": captcha.verifyParam
+      };
+      if (captcha.region) headers2["X-Aliyun-Captcha-Verify-Region"] = captcha.region;
+      const { status, json, text } = await request("POST", "/api/v1/zcode-plan/billing/claim", { body: { plan_id: planId }, headers: headers2, signal: signal2 });
+      const data2 = json?.data;
+      const bizCode = json?.code !== void 0 ? json.code : void 0;
+      const plan = data2?.plan;
+      if (status >= 200 && status < 300 && bizCode === 0 && plan) {
+        const out = { ok: true, planId };
+        if (Number.isFinite(plan.starts_at)) out.startsAt = plan.starts_at;
+        if (Number.isFinite(plan.ends_at)) out.endsAt = plan.ends_at;
+        return out;
+      }
+      const { code, message } = unwrapError(json, status, text);
+      const failureEndsAt = Number.isFinite(plan?.ends_at) ? plan?.ends_at : void 0;
+      const httpDerived = status >= 400 && bizCode === void 0;
+      return {
+        ok: false,
+        planId,
+        failureKind: httpDerived ? status === 401 ? "login_required" : "http_error" : classifyClaimCode(code),
+        code,
+        message,
+        ...failureEndsAt !== void 0 ? { failureEndsAt } : {}
+      };
+    }
+  };
+}
+var DEFAULT_TIMEOUT_MS, ClaimPreviewError;
+var init_client2 = __esm({
+  "src/claim/client.ts"() {
+    "use strict";
+    init_types3();
+    init_identity();
+    DEFAULT_TIMEOUT_MS = 15e3;
+    ClaimPreviewError = class extends Error {
+      status;
+      code;
+      constructor(message, status, code) {
+        super(message);
+        this.name = "ClaimPreviewError";
+        this.status = status;
+        this.code = code;
+      }
+    };
+  }
+});
+
+// src/claim/scheduler.ts
+var ClaimScheduler;
+var init_scheduler = __esm({
+  "src/claim/scheduler.ts"() {
+    "use strict";
+    init_client2();
+    ClaimScheduler = class {
+      constructor(deps) {
+        this.deps = deps;
+        this.now = deps.now ?? Date.now;
+        this.log = deps.log ?? (() => {
+        });
+      }
+      deps;
+      stopped = false;
+      holdUntil = 0;
+      timer = null;
+      now;
+      log;
+      isStopped() {
+        return this.stopped;
+      }
+      start() {
+        if (this.stopped) return;
+        this.scheduleNext(0);
+      }
+      stop() {
+        this.stopped = true;
+        if (this.timer !== null) {
+          clearTimeout(this.timer);
+          this.timer = null;
+        }
+      }
+      /** One poll→claim cycle. Exposed for tests; `start()` drives it on a timer. */
+      async tick() {
+        if (this.stopped) return { action: "stopped" };
+        const nowMs = this.now();
+        if (nowMs < this.holdUntil) return { action: "skipped_hold" };
+        let jwt;
+        try {
+          jwt = await this.deps.getJwt();
+        } catch (err) {
+          return this.errorBackoff(`credential resolution failed: ${err.message}`);
+        }
+        if (!jwt) {
+          return this.errorBackoff("no JWT available (oauth login pending)");
+        }
+        const client = this.deps.createClient(jwt);
+        let plans;
+        try {
+          plans = await client.getPreviews();
+        } catch (err) {
+          if (err instanceof ClaimPreviewError && err.status === 404) {
+            this.holdUntil = nowMs + this.deps.config.pollIntervalMs;
+            return { action: "idle" };
+          }
+          return this.errorBackoff(`preview failed: ${err.message}`);
+        }
+        if (plans.length === 0) {
+          this.holdUntil = nowMs + this.deps.config.pollIntervalMs;
+          return { action: "idle" };
+        }
+        const target2 = this.pickPlan(plans);
+        if (!target2) {
+          this.holdUntil = nowMs + this.deps.config.pollIntervalMs;
+          return { action: "idle" };
+        }
+        let captcha;
+        try {
+          captcha = await this.deps.getCaptcha();
+        } catch (err) {
+          return this.errorBackoff(`captcha token failed: ${err.message}`);
+        }
+        let outcome;
+        try {
+          outcome = await client.claim(target2.planId, captcha);
+        } catch (err) {
+          return this.errorBackoff(`claim request failed: ${err.message}`);
+        }
+        if (outcome.ok) {
+          const endsAtMs = outcome.endsAt !== void 0 ? outcome.endsAt * 1e3 : void 0;
+          this.holdUntil = endsAtMs ?? nowMs + this.deps.config.pollIntervalMs;
+          this.log(`claim: claimed plan ${target2.planId}${outcome.startsAt !== void 0 ? ` (activates ${new Date(outcome.startsAt * 1e3).toISOString()})` : ""}`);
+          return { action: "claimed", planId: target2.planId, startsAt: outcome.startsAt, endsAt: outcome.endsAt };
+        }
+        const holdMs = this.holdForFailure(outcome.failureKind, outcome.failureEndsAt, nowMs);
+        this.holdUntil = nowMs + holdMs;
+        this.log(`claim: ${outcome.failureKind} (${outcome.code}) \u2014 ${outcome.message}; retry in ${Math.round(holdMs / 1e3)}s`);
+        if (outcome.failureKind === "login_required") {
+          this.stop();
+        }
+        return { action: "failed", outcome, holdMs };
+      }
+      pickPlan(plans) {
+        const wanted = this.deps.config.planId?.trim();
+        if (wanted) return plans.find((p) => p.planId === wanted) ?? null;
+        const sorted = [...plans].sort((a, b) => b.priority - a.priority);
+        return sorted[0] ?? null;
+      }
+      holdForFailure(kind2, failureEndsAtSec, nowMs) {
+        if ((kind2 === "already_claimed" || kind2 === "quota_exhausted") && Number.isFinite(failureEndsAtSec)) {
+          const untilMs = failureEndsAtSec * 1e3;
+          if (untilMs > nowMs) return Math.min(untilMs - nowMs, 24 * 60 * 60 * 1e3);
+        }
+        return this.deps.config.cooldownMs;
+      }
+      errorBackoff(message) {
+        const holdMs = this.deps.config.cooldownMs;
+        this.holdUntil = this.now() + holdMs;
+        this.log(`claim: ${message}; retry in ${Math.round(holdMs / 1e3)}s`);
+        return { action: "error", message, holdMs };
+      }
+      scheduleNext(delayMs) {
+        if (this.stopped) return;
+        this.timer = setTimeout(() => {
+          this.timer = null;
+          void this.tick().finally(() => this.scheduleNext(this.nextDelay()));
+        }, delayMs);
+      }
+      nextDelay() {
+        const remaining = this.holdUntil - this.now();
+        return remaining > 0 ? remaining : this.deps.config.pollIntervalMs;
+      }
+    };
+  }
+});
+
+// src/claim/runtime.ts
+var runtime_exports = {};
+__export(runtime_exports, {
+  claimPlatform: () => claimPlatform,
+  runClaimCli: () => runClaimCli,
+  startAutoClaim: () => startAutoClaim
+});
+function claimPlatform() {
+  return `${process.platform}-${process.arch}`;
+}
+function startAutoClaim(config, auth) {
+  const scheduler = new ClaimScheduler({
+    // AuthManager first (fresh), then the encrypted store — on Android the
+    // login can land in the store after boot while auth hasn't been reloaded.
+    getJwt: async () => {
+      try {
+        const cred = await auth.getCredential();
+        if (cred.jwt) return cred.jwt;
+      } catch {
+      }
+      const stored = await loadCredential().catch(() => null);
+      return stored?.jwt;
+    },
+    createClient: (jwt) => createClaimClient({
+      origin: config.claim.origin,
+      jwt,
+      appVersion: config.identity.appVersion,
+      platform: claimPlatform(),
+      identity: config.identity
+    }),
+    getCaptcha: async () => {
+      const { verifyParam, region } = await getCaptchaToken(config.identity.appVersion);
+      return { verifyParam, region: region || void 0 };
+    },
+    config: {
+      planId: config.claim.planId || void 0,
+      pollIntervalMs: config.claim.pollIntervalMs,
+      cooldownMs: config.claim.cooldownMs
+    },
+    log: (message) => console.log(`[claim] ${message}`)
+  });
+  scheduler.start();
+  return scheduler;
+}
+async function runClaimCli(config, mode2) {
+  const cred = await loadCredential();
+  const jwt = cred?.jwt;
+  if (!jwt) {
+    console.error("Claim requires a logged-in oauth credential (no JWT stored). Run: zcode-proxy auth login <zai|bigmodel>");
+    process.exit(1);
+  }
+  const client = createClaimClient({
+    origin: config.claim.origin,
+    jwt,
+    appVersion: config.identity.appVersion,
+    platform: claimPlatform(),
+    identity: config.identity
+  });
+  let plans;
+  try {
+    plans = await client.getPreviews();
+  } catch (err) {
+    if (err instanceof ClaimPreviewError && err.status === 404) {
+      console.log("No claimable plans: the campaign endpoint is not deployed yet (404).");
+      console.log("Weekend campaigns typically go live shortly before the window \u2014 keep the proxy");
+      console.log("serving with claim.enabled, or re-run this command later.");
+      return;
+    }
+    throw err;
+  }
+  if (plans.length === 0) {
+    console.log("No claimable plans right now.");
+    return;
+  }
+  printPlans(plans);
+  if (mode2 === "list") return;
+  const wanted = config.claim.planId.trim();
+  const target2 = wanted ? plans.find((p) => p.planId === wanted) : [...plans].sort((a, b) => b.priority - a.priority)[0];
+  if (!target2) {
+    console.error(`Configured claim.planId "${wanted}" not in the preview list.`);
+    process.exit(1);
+  }
+  if (target2.planId !== plans[0].planId) console.log(`Claiming configured plan: ${target2.planId}`);
+  const captcha = await getCaptchaToken(config.identity.appVersion);
+  const outcome = await client.claim(target2.planId, { verifyParam: captcha.verifyParam, region: captcha.region || void 0 });
+  printOutcome(outcome);
+  if (!outcome.ok) process.exit(1);
+}
+function printPlans(plans) {
+  console.log(`Claimable plans (${plans.length}):`);
+  for (const p of plans) {
+    const window2 = [fmtTime(p.startsAt), fmtTime(p.endsAt)].filter(Boolean).join(" \u2192 ");
+    console.log(`  - ${p.planId}  "${p.name}"  priority=${p.priority}${window2 ? `  ${window2}` : ""}`);
+    for (const e of p.entitlements) {
+      const quota = e.grantUnits > 0 ? ` ${e.grantUnits} ${e.unitType}` : "";
+      const activate = e.effectiveAt !== void 0 ? ` (activates ${new Date(e.effectiveAt * 1e3).toISOString()})` : "";
+      console.log(`      \xB7 ${e.showName || e.entitlementId}${quota}${activate}`);
+    }
+  }
+}
+function printOutcome(outcome) {
+  if (outcome.ok) {
+    console.log(`
+Claimed: ${outcome.planId}`);
+    if (outcome.startsAt !== void 0) console.log(`  activates: ${new Date(outcome.startsAt * 1e3).toISOString()}`);
+    if (outcome.endsAt !== void 0) console.log(`  expires:   ${new Date(outcome.endsAt * 1e3).toISOString()}`);
+    if (outcome.startsAt === void 0 && outcome.endsAt === void 0) console.log("  active immediately");
+    return;
+  }
+  const label2 = FAILURE_LABELS[outcome.failureKind] ?? FAILURE_LABELS.unknown;
+  console.error(`
+Claim failed: ${label2} (code ${String(outcome.code)}) \u2014 ${outcome.message}`);
+  if (outcome.failureEndsAt !== void 0) {
+    console.error(`  retry window opens: ${new Date(outcome.failureEndsAt * 1e3).toISOString()}`);
+  }
+}
+function fmtTime(sec) {
+  return sec === void 0 ? "" : new Date(sec * 1e3).toISOString();
+}
+var FAILURE_LABELS;
+var init_runtime = __esm({
+  "src/claim/runtime.ts"() {
+    "use strict";
+    init_client2();
+    init_scheduler();
+    init_captcha();
+    init_store();
+    FAILURE_LABELS = {
+      not_found: "plan does not exist",
+      unavailable: "campaign ended or not claimable yet",
+      already_claimed: "already claimed on this account",
+      ineligible: "account or client version not eligible (needs appVersion >= campaign minimum)",
+      quota_exhausted: "daily claim quota exhausted",
+      invalid_request: "invalid request",
+      captcha: "captcha verification failed",
+      login_required: "not logged in",
+      http_error: "HTTP error",
+      unknown: "unknown failure"
+    };
+  }
+});
+
+// src/tui/app.ts
+var app_exports = {};
+__export(app_exports, {
+  runTui: () => runTui
+});
+async function runTui(args) {
+  if (!process.stdout.isTTY || !process.stdin.isTTY) {
+    process.stderr.write("zcode-proxy: tui requires an interactive terminal (TTY).\n");
+    process.exit(1);
+  }
+  const path2 = args.configPath ?? process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
+  let config;
+  try {
+    if (!(0, import_node_fs6.existsSync)(path2)) {
+      (0, import_node_fs6.writeFileSync)(path2, EXAMPLE_CONFIG_YAML, "utf-8");
+      ensureDeviceMidInConfig(path2);
+      process.stderr.write(`Created ${path2} from bundled template.
+`);
+    }
+    config = loadConfig(path2);
+  } catch (err) {
+    process.stderr.write(`zcode-proxy: config error: ${err.message}
+`);
+    process.exit(1);
+  }
+  const auth = new AuthManager();
+  const pane = new LogPane(2e3);
+  const serverRef = { current: null };
+  const state2 = {
+    provider: config.provider,
+    plan: config.plan,
+    loggedIn: false,
+    apiKeyPreview: "",
+    serverStatus: "stopped",
+    serverUrl: "",
+    serverError: "",
+    loginInFlight: false,
+    loginHint: "",
+    toast: null
+  };
+  const stdout = process.stdout;
+  const stdin = process.stdin;
+  stdout.write("\x1B[?1049h\x1B[?25l\x1B[?1000h\x1B[?1006h\x1B[2J");
+  const restore = () => {
+    try {
+      stdout.write("\x1B[0m\x1B[?1006l\x1B[?1000l\x1B[?25h\x1B[?1049l");
+    } catch {
+    }
+  };
+  const origConsole = {};
+  const origError = console.error;
+  const logFile = process.env.ZCODE_TUI_LOGFILE;
+  const emit = (text, level) => {
+    pane.push(text, level);
+    if (logFile) {
+      try {
+        (0, import_node_fs6.appendFileSync)(logFile, text + "\n", "utf-8");
+      } catch {
+      }
+    }
+    scheduleRender();
+  };
+  const consoleOwner = console;
+  for (const key of Object.keys(console)) {
+    const fn = consoleOwner[key];
+    if (typeof fn !== "function") continue;
+    origConsole[key] = fn;
+    consoleOwner[key] = (...a) => {
+      const level = key === "error" ? "error" : key === "warn" ? "warn" : "info";
+      const prefix2 = key === "error" ? "[error] " : key === "warn" ? "[warn] " : "";
+      emit(prefix2 + a.map(String).join(" "), level);
+    };
+  }
+  const restoreConsole = () => {
+    for (const [key, fn] of Object.entries(origConsole)) consoleOwner[key] = fn;
+  };
+  let renderTimer = null;
+  let activeRegions = [];
+  function renderNow() {
+    renderTimer = null;
+    const width2 = stdout.columns || 80;
+    const height2 = stdout.rows || 24;
+    const view = pane.view(Math.max(4, height2 - 14));
+    const frame = buildFrame({
+      version: VERSION,
+      configPath: path2,
+      provider: state2.provider,
+      plan: state2.plan,
+      loggedIn: state2.loggedIn,
+      apiKeyPreview: state2.apiKeyPreview,
+      loginInFlight: state2.loginInFlight,
+      loginHint: state2.loginHint,
+      serverStatus: state2.serverStatus,
+      serverUrl: state2.serverUrl,
+      serverError: state2.serverError,
+      modelCount: config.models.length,
+      responsesEnabled: config.responses.enabled,
+      claimAuto: config.claim.enabled && config.claim.auto,
+      logTotal: view.total,
+      logView: view.lines,
+      logFollowing: pane.following,
+      logFromBottom: view.fromBottom,
+      toast: state2.toast,
+      width: width2,
+      height: height2
+    });
+    activeRegions = frame.regions;
+    try {
+      stdout.write("\x1B[H" + frame.text);
+    } catch {
+    }
+  }
+  function scheduleRender() {
+    if (renderTimer) return;
+    renderTimer = setTimeout(renderNow, RENDER_MS);
+    if (typeof renderTimer.unref === "function") renderTimer.unref();
+  }
+  let toastTimer = null;
+  function setToast(text, kind2) {
+    state2.toast = { text, kind: kind2 };
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      state2.toast = null;
+      toastTimer = null;
+      scheduleRender();
+    }, TOAST_MS);
+    if (typeof toastTimer.unref === "function") toastTimer.unref();
+    scheduleRender();
+  }
+  async function refreshAuth() {
+    const cred = await loadCredential().catch(() => null);
+    state2.loggedIn = cred != null;
+    state2.apiKeyPreview = cred ? `${cred.apiKey.slice(0, 8)}\u2026` : "";
+    scheduleRender();
+  }
+  async function startProxy() {
+    if (state2.serverStatus === "running" || state2.serverStatus === "starting") return;
+    state2.serverStatus = "starting";
+    state2.serverError = "";
+    scheduleRender();
+    const cred = await loadCredential().catch(() => null);
+    if (!cred) {
+      state2.serverStatus = "stopped";
+      setToast("not logged in \u2014 press l to login", "err");
+      return;
+    }
+    auth.setOAuthCredential(cred);
+    try {
+      const s = await startServer(buildServerOptions(config, auth, args.debug));
+      serverRef.current = s;
+      state2.serverStatus = "running";
+      state2.serverUrl = `http://${s.hostname}:${s.port}`;
+      setToast(`proxy started on ${state2.serverUrl}`, "ok");
+      startBackgroundJobsOnce();
+    } catch (err) {
+      state2.serverStatus = "error";
+      state2.serverError = err.message;
+      setToast(`start failed: ${err.message}`, "err");
+    }
+  }
+  function stopProxy() {
+    const s = serverRef.current;
+    if (!s) return;
+    try {
+      s.stop(false);
+    } catch (err) {
+      setToast(`stop failed: ${err.message}`, "err");
+      return;
+    }
+    serverRef.current = null;
+    state2.serverStatus = "stopped";
+    state2.serverUrl = "";
+    setToast("proxy stopped", "info");
+  }
+  function toggleProxy() {
+    if (state2.serverStatus === "running" || state2.serverStatus === "starting") stopProxy();
+    else void startProxy();
+  }
+  let backgroundJobsStarted = false;
+  function startBackgroundJobsOnce() {
+    if (backgroundJobsStarted) return;
+    backgroundJobsStarted = true;
+    if (config.plan === "start-plan") {
+      Promise.resolve().then(() => (init_captcha(), captcha_exports)).then((m) => m.startCaptchaPool(config.identity.appVersion)).catch((err) => console.error(`[captcha] pool warmup failed: ${err.message}`));
+    }
+    if (config.claim.enabled && config.claim.auto) {
+      Promise.resolve().then(() => (init_runtime(), runtime_exports)).then((m) => {
+        m.startAutoClaim(config, auth);
+        console.log(`[claim] auto ON (poll ${Math.round(config.claim.pollIntervalMs / 1e3)}s)`);
+      }).catch((err) => console.error(`[claim] scheduler failed to start: ${err.message}`));
+    }
+  }
+  function switchProvider() {
+    const next = state2.provider === "zai" ? "bigmodel" : "zai";
+    applyConfigChange(next, state2.plan, `provider \u2192 ${next}`);
+  }
+  function switchPlan() {
+    const next = state2.plan === "coding-plan" ? "start-plan" : "coding-plan";
+    applyConfigChange(state2.provider, next, `plan \u2192 ${next}`);
+  }
+  function applyConfigChange(provider, plan, message) {
+    if (state2.serverStatus === "running" || state2.serverStatus === "starting") {
+      setToast("stop the proxy before switching (press s)", "err");
+      return;
+    }
+    config.provider = provider;
+    config.plan = plan;
+    try {
+      updateConfigYaml(path2, { provider, plan });
+      state2.provider = provider;
+      state2.plan = plan;
+      setToast(message, "ok");
+      console.log(`config updated: provider=${provider} plan=${plan}`);
+    } catch (err) {
+      setToast(`config update failed: ${err.message}`, "err");
+    }
+    scheduleRender();
+  }
+  let activeOauth = null;
+  async function startLogin() {
+    if (state2.loginInFlight) {
+      setToast("login already in progress", "info");
+      return;
+    }
+    const provider = state2.provider;
+    const client = provider === "bigmodel" ? new BigmodelOAuthClient() : new ZaiOAuthClient();
+    let started;
+    try {
+      started = await client.start();
+    } catch (err) {
+      void client.close().catch(() => {
+      });
+      setToast(`login failed: ${err.message}`, "err");
+      return;
+    }
+    activeOauth = { client, provider };
+    state2.loginInFlight = true;
+    state2.loginHint = "waiting for browser authorization\u2026";
+    console.log(`OAuth: opening ${started.authorizeUrl}`);
+    console.log("If the browser did not open, copy the URL above into a browser.");
+    openBrowser(started.authorizeUrl);
+    scheduleRender();
+    client.complete(started).then(async (tokens) => {
+      const resolver = new KeyResolver();
+      const cred = await resolver.resolveCodingPlanCredential(tokens.accessToken, provider, tokens.userId);
+      if (tokens.jwt) cred.jwt = tokens.jwt;
+      await saveCredential(cred);
+      if (serverRef.current) auth.setOAuthCredential(cred);
+      console.log(`OAuth completed for ${provider}`);
+      setToast("logged in", "ok");
+    }).catch((err) => {
+      const msg = err?.message ?? String(err);
+      console.error(`OAuth flow ended without success: ${msg}`);
+      setToast(`login failed: ${msg}`, "err");
+    }).finally(() => {
+      void client.close().catch(() => {
+      });
+      if (activeOauth?.client === client) activeOauth = null;
+      state2.loginInFlight = false;
+      state2.loginHint = "";
+      void refreshAuth();
+    });
+  }
+  async function logout() {
+    if (activeOauth) {
+      void activeOauth.client.close().catch(() => {
+      });
+      activeOauth = null;
+      state2.loginInFlight = false;
+      state2.loginHint = "";
+    }
+    try {
+      clearCredential();
+    } catch {
+    }
+    await refreshAuth();
+    if (serverRef.current) setToast("logged out \u2014 restart the proxy to apply", "info");
+    else setToast("logged out", "ok");
+  }
+  const parser = new KeyParser();
+  stdin.setEncoding("utf8");
+  if (typeof stdin.setRawMode !== "function") {
+    restore();
+    origError("zcode-proxy: tui requires a terminal with raw-mode input.\n");
+    process.exit(1);
+  }
+  stdin.setRawMode(true);
+  stdin.resume();
+  stdin.on("data", (chunk) => {
+    for (const action of parser.feed(chunk)) handleKey(action);
+  });
+  function scrollUp(n) {
+    pane.scrollUp(n);
+    scheduleRender();
+  }
+  function scrollDown(n) {
+    pane.scrollDown(n);
+    scheduleRender();
+  }
+  function handleKey(action) {
+    switch (action.type) {
+      case "ctrl-c":
+        quit();
+        return;
+      case "click": {
+        const hit = findRegion(activeRegions, action.y, action.x);
+        if (hit) dispatchClick(hit);
+        return;
+      }
+      case "wheel-up":
+        scrollUp(3);
+        return;
+      case "wheel-down":
+        scrollDown(3);
+        return;
+      case "char": {
+        switch (action.key.toLowerCase()) {
+          case "q":
+            quit();
+            return;
+          case "s":
+            toggleProxy();
+            return;
+          case "l":
+            void startLogin();
+            return;
+          case "o":
+            void logout();
+            return;
+          case "p":
+            switchProvider();
+            return;
+          case "t":
+            switchPlan();
+            return;
+          case "c":
+            pane.clear();
+            scheduleRender();
+            return;
+          case "g":
+            pane.followBottom();
+            scheduleRender();
+            return;
+          case "k":
+            scrollUp(1);
+            return;
+          case "j":
+            scrollDown(1);
+            return;
+          default:
+            return;
+        }
+      }
+      case "up":
+        scrollUp(1);
+        return;
+      case "down":
+        scrollDown(1);
+        return;
+      case "pageup":
+        scrollUp(PAGE_LINES);
+        return;
+      case "pagedown":
+        scrollDown(PAGE_LINES);
+        return;
+      case "home":
+        scrollUp(pane.count);
+        return;
+      case "end":
+        pane.followBottom();
+        scheduleRender();
+        return;
+      default:
+        return;
+    }
+  }
+  function dispatchClick(action) {
+    switch (action.kind) {
+      case "key":
+        handleKey({ type: "char", key: action.key });
+        return;
+      case "provider":
+        applyConfigChange(action.value, state2.plan, `provider \u2192 ${action.value}`);
+        return;
+      case "plan":
+        applyConfigChange(state2.provider, action.value, `plan \u2192 ${action.value}`);
+        return;
+      case "follow":
+        pane.followBottom();
+        scheduleRender();
+        return;
+    }
+  }
+  function quit() {
+    cleanup();
+    process.exit(0);
+  }
+  function cleanup() {
+    restore();
+    restoreConsole();
+    try {
+      serverRef.current?.stop(false);
+    } catch {
+    }
+  }
+  process.on("SIGINT", quit);
+  process.on("SIGTERM", quit);
+  process.on("exit", restore);
+  stdout.on("resize", scheduleRender);
+  process.on("uncaughtException", (err) => {
+    cleanup();
+    origError(`zcode-proxy: tui crashed: ${err.stack ?? String(err)}`);
+    process.exit(1);
+  });
+  console.log(`zcode-proxy TUI \u2014 config: ${path2}`);
+  console.log(`provider: ${state2.provider} \xB7 plan: ${state2.plan}`);
+  await refreshAuth();
+  renderNow();
+  if (!state2.loggedIn) {
+    setToast("not logged in \u2014 press l to login", "err");
+  } else {
+    await startProxy();
+  }
+}
+var import_node_fs6, RENDER_MS, PAGE_LINES, TOAST_MS;
+var init_app = __esm({
+  "src/tui/app.ts"() {
+    "use strict";
+    init_loader();
+    init_template();
+    init_edit();
+    init_manager();
+    init_server();
+    init_server_options();
+    init_store();
+    init_oauth();
+    init_resolver();
+    init_open_browser();
+    init_index();
+    import_node_fs6 = require("node:fs");
+    init_log_pane();
+    init_keys();
+    init_frame();
+    RENDER_MS = 33;
+    PAGE_LINES = 10;
+    TOAST_MS = 2600;
+  }
+});
 
 // src/index.ts
-var VERSION = "2.6.0";
-if (require.main === module) main();
+var index_exports = {};
+__export(index_exports, {
+  VERSION: () => VERSION,
+  applyAndroidIdentityDefaults: () => applyAndroidIdentityDefaults,
+  ensureDeviceMidInConfig: () => ensureDeviceMidInConfig,
+  main: () => main,
+  parseServeArgs: () => parseServeArgs
+});
+module.exports = __toCommonJS(index_exports);
 function parseServeArgs(args) {
   const debug = args.includes("debug");
   const configPath = args.find((a) => a !== "debug");
@@ -118828,6 +120139,13 @@ function runCli() {
 `);
       process.exit(1);
     });
+  } else if (cmd === "tui") {
+    const tuiArgs = parseServeArgs(args.slice(1));
+    Promise.resolve().then(() => (init_app(), app_exports)).then((m) => m.runTui(tuiArgs)).catch((err) => {
+      process.stderr.write(`zcode-proxy: tui failed: ${err.stack ?? String(err)}
+`);
+      process.exit(1);
+    });
   } else if (cmd === "serve" || cmd.endsWith(".yaml") || cmd.endsWith(".yml")) {
     const serveArgs = cmd === "serve" ? parseServeArgs(args.slice(1)) : parseServeArgs(args);
     serve(serveArgs.configPath, serveArgs.debug);
@@ -118849,6 +120167,7 @@ Usage:
   zcode-proxy serve [config.yaml]   Start the proxy server (default)
   zcode-proxy serve debug [config.yaml]
                                     Start with verbose per-request diagnostics
+  zcode-proxy tui [config.yaml]     Interactive terminal UI (login / start-stop / live logs)
   zcode-proxy android               Android entry: proxy + localhost control listener
   zcode-proxy auth login <provider> Login via OAuth (provider: zai | bigmodel)
   zcode-proxy auth login <provider> --import
@@ -118862,6 +120181,7 @@ Usage:
 Examples:
   zcode-proxy                       Start server with default config.yaml
   zcode-proxy serve debug           Start with extra debug logging
+  zcode-proxy tui                   Terminal UI: login, start/stop, live logs
   zcode-proxy auth login bigmodel   OAuth login for Bigmodel
   zcode-proxy auth login bigmodel --import
                                     Import existing key from ZCode config
@@ -118870,8 +120190,8 @@ Examples:
 }
 async function serve(configPath, debug) {
   const path2 = configPath ?? process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
-  if (!(0, import_node_fs5.existsSync)(path2)) {
-    (0, import_node_fs5.writeFileSync)(path2, EXAMPLE_CONFIG_YAML, "utf-8");
+  if (!(0, import_node_fs7.existsSync)(path2)) {
+    (0, import_node_fs7.writeFileSync)(path2, EXAMPLE_CONFIG_YAML, "utf-8");
     ensureDeviceMidInConfig(path2);
     console.log(`Created ${path2} from bundled template.`);
     console.log(`Run: zcode-proxy auth login <zai|bigmodel>
@@ -118911,13 +120231,6 @@ async function serve(configPath, debug) {
     server.stop(true);
   });
 }
-function buildServerOptions(config, auth, debug) {
-  const opts = { config, auth, debug };
-  if (config.responses.enabled) {
-    opts.responseStore = new ResponseStore({ maxEntries: config.responses.storeMaxEntries, ttlMs: config.responses.storeTtlMs });
-  }
-  return opts;
-}
 function applyAndroidIdentityDefaults() {
   process.env.ZCODE_IDENTITY_PLATFORM = process.env.ZCODE_IDENTITY_PLATFORM ?? "linux";
   process.env.ZCODE_IDENTITY_ARCH = process.env.ZCODE_IDENTITY_ARCH ?? "x64";
@@ -118926,8 +120239,8 @@ function applyAndroidIdentityDefaults() {
 async function runAndroid() {
   applyAndroidIdentityDefaults();
   const path2 = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
-  if (!(0, import_node_fs5.existsSync)(path2)) {
-    (0, import_node_fs5.writeFileSync)(path2, EXAMPLE_CONFIG_YAML, "utf-8");
+  if (!(0, import_node_fs7.existsSync)(path2)) {
+    (0, import_node_fs7.writeFileSync)(path2, EXAMPLE_CONFIG_YAML, "utf-8");
   }
   const config = loadConfig(path2);
   const logBuffer = new LogBuffer();
@@ -119016,13 +120329,6 @@ async function runAndroid() {
     void controlListener.close().then(() => serverRef.current?.stop(true));
   });
 }
-function updateConfigYaml(path2, fields) {
-  const raw = (0, import_node_fs5.readFileSync)(path2, "utf-8");
-  const parsed = (0, import_yaml2.parse)(raw) ?? {};
-  parsed.provider = fields.provider;
-  parsed.plan = fields.plan;
-  (0, import_node_fs5.writeFileSync)(path2, (0, import_yaml2.stringify)(parsed), "utf-8");
-}
 function printDebugBanner(config, path2, cred) {
   const credShape = cred ? `${cred.apiKey.slice(0, 6)}...${cred.apiKey.slice(-4)} (${cred.apiKey.length} chars)` : "(none)";
   const active = config.providers[config.provider];
@@ -119061,7 +120367,7 @@ async function claimCommand(args) {
     process.exit(1);
   }
   const path2 = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
-  if (!(0, import_node_fs5.existsSync)(path2)) {
+  if (!(0, import_node_fs7.existsSync)(path2)) {
     console.error(`Config file not found: ${path2} (run serve once or create it).`);
     process.exit(1);
   }
@@ -119104,8 +120410,8 @@ Logged in as ${provider}.`);
 }
 function ensureConfigWithDeviceMid() {
   const path2 = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
-  if (!(0, import_node_fs5.existsSync)(path2)) {
-    (0, import_node_fs5.writeFileSync)(path2, EXAMPLE_CONFIG_YAML, "utf-8");
+  if (!(0, import_node_fs7.existsSync)(path2)) {
+    (0, import_node_fs7.writeFileSync)(path2, EXAMPLE_CONFIG_YAML, "utf-8");
     console.log(`Created ${path2} from bundled template.`);
   }
   return ensureDeviceMidInConfig(path2);
@@ -119113,7 +120419,7 @@ function ensureConfigWithDeviceMid() {
 function ensureDeviceMidInConfig(path2) {
   const deviceMidLine = /^(\s*)deviceMid:\s*(.*)$/m;
   const identityBlockLine = /^identity:\s*$/m;
-  const raw = (0, import_node_fs5.readFileSync)(path2, "utf-8");
+  const raw = (0, import_node_fs7.readFileSync)(path2, "utf-8");
   const existing = deviceMidLine.exec(raw);
   if (existing) {
     const value2 = existing[2].trim().replace(/^"|"$/g, "");
@@ -119132,12 +120438,12 @@ function ensureDeviceMidInConfig(path2) {
 `;
     updated = raw.endsWith("\n") || raw.length === 0 ? raw + block : raw + "\n" + block;
   }
-  (0, import_node_fs5.writeFileSync)(path2, updated, "utf-8");
+  (0, import_node_fs7.writeFileSync)(path2, updated, "utf-8");
   console.log(`Device identity generated: ${mid.slice(0, 8)}\u2026 (stored in ${path2})`);
   return mid;
 }
 function authLogout() {
-  if (!(0, import_node_fs5.existsSync)(getStorePath())) {
+  if (!(0, import_node_fs7.existsSync)(getStorePath())) {
     console.log("Not logged in.");
     return;
   }
@@ -119181,7 +120487,7 @@ function importFromZCodeConfig(provider) {
   const configPath = (0, import_node_path3.join)((0, import_node_os5.homedir)(), ".zcode", "v2", "config.json");
   let raw;
   try {
-    raw = (0, import_node_fs5.readFileSync)(configPath, "utf-8");
+    raw = (0, import_node_fs7.readFileSync)(configPath, "utf-8");
   } catch {
     console.error(`Cannot read ${configPath}.`);
     console.error("Make sure ZCode is installed and you've logged in at least once.");
@@ -119201,25 +120507,33 @@ function importFromZCodeConfig(provider) {
   if (jwt) console.log(`  Start-plan JWT: ${jwt.slice(0, 12)}...`);
   return { apiKey, provider, jwt };
 }
-function openBrowser(url2) {
-  try {
-    if (process.platform === "win32") {
-      (0, import_node_child_process.spawn)("cmd.exe", ["/c", `start "" "${url2}"`], {
-        detached: true,
-        stdio: "ignore",
-        windowsHide: true,
-        windowsVerbatimArguments: true
-      }).unref();
-    } else if (process.platform === "darwin") {
-      (0, import_node_child_process.spawn)("open", [url2], { detached: true, stdio: "ignore" }).unref();
-    } else {
-      (0, import_node_child_process.spawn)("xdg-open", [url2], { detached: true, stdio: "ignore" }).unref();
-    }
-  } catch {
+var import_node_fs7, import_node_path3, import_node_os5, import_node_crypto4, VERSION;
+var init_index = __esm({
+  "src/index.ts"() {
+    init_loader();
+    init_template();
+    init_manager();
+    init_server();
+    init_control();
+    init_store();
+    init_oauth();
+    init_resolver();
+    init_edit();
+    init_open_browser();
+    init_server_options();
+    import_node_fs7 = require("node:fs");
+    import_node_path3 = require("node:path");
+    import_node_os5 = require("node:os");
+    import_node_crypto4 = require("node:crypto");
+    init_node_fetch_compat();
+    VERSION = "2.6.0";
+    if (require.main === module) main();
   }
-}
+});
+init_index();
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  VERSION,
   applyAndroidIdentityDefaults,
   ensureDeviceMidInConfig,
   main,

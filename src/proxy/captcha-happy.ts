@@ -1789,8 +1789,60 @@ const EXTRA_WINDOW_PROPS = [
 // destroyDom() pulls `window` out from under a sibling mid-solve.
 let _aliasRefCount = 0;
 
+// Under Bun, guest scripts run in the HOST realm — a bare `console` inside
+// SDK code resolves to the HOST console (that is the FeiLin spam channel:
+// invisible devtools-format lines probed across every console method, ~1/sec
+// while solving). While the aliases are installed, `console` on globalThis is
+// replaced with a DUAL console: calls whose stack originates from guest SDK
+// script URLs are dropped, everything else forwards to the console that was
+// live at install time (the TUI's interception or the serve terminal — so
+// host logging keeps working untouched). Restored on the last destroyDom.
+// Skipped under CAPTCHA_DEBUG so guest logs stay inspectable.
+let _savedConsoleDescriptor: PropertyDescriptor | undefined;
+let _dualConsole: Record<string, unknown> | null = null;
+
+function isGuestConsoleCall(): boolean {
+  const stack = new Error().stack ?? "";
+  return /alicdn\.com|aliyuncs\.com/i.test(stack);
+}
+
+/** Build a console facade that drops calls while `isGuest()` holds (test seam). */
+export function makeDualConsole(isGuest: () => boolean = isGuestConsoleCall): Record<string, unknown> {
+  // Capture the console OBJECT at build time — methods must keep their
+  // original receiver (looking up `console` again inside the closure would
+  // resolve to the dual getter itself and recurse).
+  const host = console as unknown as Record<string, unknown>;
+  const dual: Record<string, unknown> = {};
+  for (const key of Object.keys(host)) {
+    const fn = host[key];
+    if (typeof fn !== "function") {
+      dual[key] = fn;
+      continue;
+    }
+    dual[key] = (...args: unknown[]) => {
+      if (isGuest()) return;
+      return (fn as (...a: unknown[]) => void).apply(host, args);
+    };
+  }
+  return dual;
+}
+
 function installGlobalWindowAlias(g, w) {
   _aliasRefCount += 1;
+  if (_aliasRefCount === 1 && !process.env.CAPTCHA_DEBUG) {
+    _dualConsole = makeDualConsole();    _savedConsoleDescriptor = Object.getOwnPropertyDescriptor(g, "console");
+    try {
+      Object.defineProperty(g, "console", {
+        get() {
+          return _dualConsole;
+        },
+        set(v) {
+          try { w.console = v; } catch (_) {}
+        },
+        configurable: true,
+      });
+    } catch (_) {}
+  }
   const props = new Set(Object.getOwnPropertyNames(w));
   for (const name of EXTRA_WINDOW_PROPS) props.add(name);
   // also walk the prototype chain one level (BrowserWindow getters like
@@ -1851,6 +1903,16 @@ function removeGlobalWindowAlias(g, w) {
   }
   for (const prop of ["window", "self", "top", "parent"]) {
     try { delete g[prop]; } catch (_) {}
+  }
+  // Restore the pre-alias console descriptor — `delete g.console` above (the
+  // getter installed for the dual console) would otherwise leave globalThis
+  // without a console at all.
+  if (_savedConsoleDescriptor) {
+    try {
+      Object.defineProperty(g, "console", _savedConsoleDescriptor);
+    } catch (_) {}
+    _savedConsoleDescriptor = undefined;
+    _dualConsole = null;
   }
 }
 
