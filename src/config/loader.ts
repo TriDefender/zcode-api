@@ -11,7 +11,6 @@ const ENV = {
   PORT: "ZCODE_PROXY_PORT",
   PROXY_API_KEY: "ZCODE_PROXY_API_KEY",
   PROVIDER: "ZCODE_PROVIDER",
-  API_KEY: "ZCODE_API_KEY",
   APP_VERSION: "ZCODE_APP_VERSION",
   SOURCE_TITLE: "ZCODE_SOURCE_TITLE",
   REFERER_ORIGIN: "ZCODE_REFERER_ORIGIN",
@@ -32,7 +31,6 @@ const DEFAULTS = {
   HOST: "0.0.0.0",
   PROVIDER: "zai" as const,
   PLAN: "coding-plan" as const,
-  AUTH_MODE: "oauth" as const,
   DEFAULT_MODEL: "glm-4.6",
   LOG_LEVEL: "info" as const,
   ZAI_ANTHROPIC_BASE: "https://api.z.ai/api/anthropic",
@@ -94,10 +92,6 @@ export function loadConfig(path: string): ProxyConfig {
 
   // --- auth ---
   const proxyApiKey = process.env[ENV.PROXY_API_KEY] ?? parsed?.auth?.proxyApiKey;
-  // OAuth is the default (mirrors the ZCode client's connection modes);
-  // apikey is the explicit opt-out for pre-obtained keys.
-  const mode = parsed?.auth?.mode === "apikey" ? "apikey" : DEFAULTS.AUTH_MODE;
-  const apiKey = process.env[ENV.API_KEY] ?? parsed?.auth?.apiKey;
   const oauthCredentialsPath = parsed?.auth?.oauthCredentialsPath;
 
   // --- provider ---
@@ -108,12 +102,10 @@ export function loadConfig(path: string): ProxyConfig {
   const zai: ProviderEndpoints = {
     anthropicBase: parsed?.providers?.zai?.anthropicBase ?? DEFAULTS.ZAI_ANTHROPIC_BASE,
     openaiBase: parsed?.providers?.zai?.openaiBase ?? DEFAULTS.ZAI_OPENAI_BASE,
-    credential: parsed?.providers?.zai?.credential,
   };
   const bigmodel: ProviderEndpoints = {
     anthropicBase: parsed?.providers?.bigmodel?.anthropicBase ?? DEFAULTS.BIGMODEL_ANTHROPIC_BASE,
     openaiBase: parsed?.providers?.bigmodel?.openaiBase ?? DEFAULTS.BIGMODEL_OPENAI_BASE,
-    credential: parsed?.providers?.bigmodel?.credential,
   };
 
   // --- models ---
@@ -144,7 +136,7 @@ export function loadConfig(path: string): ProxyConfig {
 
   const config: ProxyConfig = {
     server: { port, host },
-    auth: { proxyApiKey, mode, apiKey, oauthCredentialsPath },
+    auth: { proxyApiKey, oauthCredentialsPath },
     provider,
     plan,
     providers: { zai, bigmodel },
@@ -384,16 +376,6 @@ function resolveClaimConfig(raw: unknown): ClaimConfig {
 function validate(config: ProxyConfig): void {
   if (config.server.port < 1 || config.server.port > 65535) {
     throw new Error(`server.port ${config.server.port} is out of range (1-65535)`);
-  }
-
-  if (config.auth.mode === "apikey") {
-    const hasGlobal = typeof config.auth.apiKey === "string" && config.auth.apiKey.length > 0;
-    const hasProvider = typeof config.providers[config.provider].credential === "string";
-    if (!hasGlobal && !hasProvider) {
-      throw new Error(
-        `auth.apiKey is required when auth.mode is "apikey" (or set providers.${config.provider}.credential)`,
-      );
-    }
   }
 
   if (!config.models.includes(config.defaultModel)) {

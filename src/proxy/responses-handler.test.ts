@@ -5,7 +5,7 @@ import type { ProxyConfig } from "../config/types.js";
 
 const CONFIG: ProxyConfig = {
   server: { port: 0, host: "127.0.0.1" },
-  auth: { mode: "apikey", apiKey: "testkey.testsecret" },
+  auth: {},
   provider: "zai",
   plan: "coding-plan",
   providers: {

@@ -31,8 +31,6 @@ function writeTestConfig(): string {
     '  port: 19090',
     '  host: "127.0.0.1"',
     "auth:",
-    "  mode: apikey",
-    '  apiKey: "fakekey.fakesecret"',
     '  proxyApiKey: "test-proxy-key"',
     "provider: zai",
     "defaultModel: glm-4.6",
@@ -216,13 +214,9 @@ beforeAll(async () => {
   config.auth.proxyApiKey = "integration-test-key";
   config.providers.zai.anthropicBase = `http://127.0.0.1:${mockPort}/anthropic`;
   config.providers.zai.openaiBase = `http://127.0.0.1:${mockPort}/coding`;
-  config.auth.apiKey = "integrationTestKey.integrationTestSecret";
 
-  const auth = new AuthManager({
-    mode: "apikey",
-    provider: "zai",
-    apiKey: "integrationTestKey.integrationTestSecret",
-  });
+  const auth = new AuthManager();
+  auth.setOAuthCredential({ apiKey: "integrationTestKey", secret: "integrationTestSecret", provider: "zai" });
 
   proxyServer = await startServer({ config, auth });
 });

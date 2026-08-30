@@ -8,7 +8,7 @@ import { resolveSessionContext, sessionIdForHeader, shouldForwardSessionId } fro
 
 const BASE_CONFIG: ProxyConfig = {
   server: { port: 8080, host: "0.0.0.0" },
-  auth: { mode: "apikey", apiKey: "dummy" },
+  auth: {},
   provider: "zai",
   plan: "start-plan",
   providers: {

@@ -59,7 +59,7 @@ const FAILURE_LABELS: Record<string, string> = {
   quota_exhausted: "daily claim quota exhausted",
   invalid_request: "invalid request",
   captcha: "captcha verification failed",
-  login_required: "not logged in (oauth mode required)",
+  login_required: "not logged in",
   http_error: "HTTP error",
   unknown: "unknown failure",
 };
@@ -69,7 +69,7 @@ export async function runClaimCli(config: ProxyConfig, mode: "list" | "now"): Pr
   const cred = await loadCredential();
   const jwt = cred?.jwt;
   if (!jwt) {
-    console.error("Claim requires oauth mode (no JWT stored). Run: zcode-proxy auth login <zai|bigmodel>");
+    console.error("Claim requires a logged-in oauth credential (no JWT stored). Run: zcode-proxy auth login <zai|bigmodel>");
     process.exit(1);
   }
   const client = createClaimClient({

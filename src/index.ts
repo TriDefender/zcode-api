@@ -135,26 +135,19 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
     writeFileSync(path, EXAMPLE_CONFIG_YAML, "utf-8");
     ensureDeviceMidInConfig(path);
     console.log(`Created ${path} from bundled template.`);
-    console.log(`Run: zcode-proxy auth login <zai|bigmodel> (or set auth.mode: "apikey" + auth.apiKey in the config)\n`);
+    console.log(`Run: zcode-proxy auth login <zai|bigmodel>\n`);
   }
   const config = loadConfig(path);
 
-  const auth = new AuthManager({
-    mode: config.auth.mode,
-    provider: config.provider,
-    apiKey: config.auth.apiKey ?? config.providers[config.provider].credential,
-  });
-
-  if (config.auth.mode === "oauth") {
-    const cred = await loadCredential();
-    if (!cred) {
-      console.error("Not logged in. Run: zcode-proxy auth login " + config.provider);
-      process.exit(1);
-    }
-    auth.setOAuthCredential(cred);
+  const auth = new AuthManager();
+  const cred = await loadCredential();
+  if (!cred) {
+    console.error("Not logged in. Run: zcode-proxy auth login " + config.provider);
+    process.exit(1);
   }
+  auth.setOAuthCredential(cred);
 
-  if (debug) printDebugBanner(config, path);
+  if (debug) printDebugBanner(config, path, cred);
 
   const server = await startServer(buildServerOptions(config, auth, debug));
   const url = `http://${server.hostname}:${server.port}`;
@@ -166,7 +159,7 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
       .then((m) => m.startCaptchaPool(config.identity.appVersion))
       .catch((err) => console.error(`[captcha] pool warmup failed: ${(err as Error).message}`));
   }
-  if (config.claim.enabled && config.claim.auto && config.auth.mode === "oauth") {
+  if (config.claim.enabled && config.claim.auto) {
     import("./claim/runtime.js")
       .then((m) => {
         m.startAutoClaim(config, auth);
@@ -176,7 +169,6 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   }
   console.log(`  provider: ${config.provider}`);
   console.log(`  plan: ${config.plan}`);
-  console.log(`  auth mode: ${config.auth.mode}`);
   console.log(`  models: ${config.models.length} available`);
   if (config.responses.enabled) console.log(`  /v1/responses: ON`);
   if (debug) console.log(`  debug: ON`);
@@ -229,21 +221,15 @@ async function runAndroid(): Promise<void> {
   console.error = (...args: unknown[]) => { logBuffer.push("[error] " + args.join(" ")); origErr(...args); };
   console.warn = (...args: unknown[]) => { logBuffer.push("[warn] " + args.join(" ")); origWarn(...args); };
 
-  let auth = new AuthManager({
-    mode: config.auth.mode,
-    provider: config.provider,
-    apiKey: config.auth.apiKey ?? config.providers[config.provider].credential,
-  });
+  const auth = new AuthManager();
 
   const serverRef: { current: ProxyServer | null } = { current: null };
 
   async function startProxy(): Promise<{ ok: true; port: number } | { ok: false; error: string }> {
     if (serverRef.current) return { ok: false, error: "already_running" };
-    if (config.auth.mode === "oauth") {
-      const cred = await loadCredential().catch(() => null);
-      if (!cred) return { ok: false, error: "not_logged_in" };
-      auth.setOAuthCredential(cred);
-    }
+    const cred = await loadCredential().catch(() => null);
+    if (!cred) return { ok: false, error: "not_logged_in" };
+    auth.setOAuthCredential(cred);
     try {
       const s = await startServer(buildServerOptions(config, auth, false));
       serverRef.current = s;
@@ -274,11 +260,6 @@ async function runAndroid(): Promise<void> {
     if (serverRef.current) return { ok: false, error: "stop_proxy_first" };
     if (changes.provider) config.provider = changes.provider;
     if (changes.plan) config.plan = changes.plan;
-    auth = new AuthManager({
-      mode: config.auth.mode,
-      provider: config.provider,
-      apiKey: config.auth.apiKey ?? config.providers[config.provider].credential,
-    });
     updateConfigYaml(path, { provider: config.provider, plan: config.plan });
     console.log(`config updated: provider=${config.provider} plan=${config.plan}`);
     return { ok: true, provider: config.provider, plan: config.plan };
@@ -286,7 +267,7 @@ async function runAndroid(): Promise<void> {
 
   console.log("control listener ready; proxy stopped — use startProxy command to start");
 
-  if (config.claim.enabled && config.claim.auto && config.auth.mode === "oauth") {
+  if (config.claim.enabled && config.claim.auto) {
     import("./claim/runtime.js")
       .then((m) => {
         m.startAutoClaim(config, auth);
@@ -325,9 +306,10 @@ async function runAndroid(): Promise<void> {
   });
 }
 
-function printDebugBanner(config: ProxyConfig, path: string): void {
-  const cred = config.providers[config.provider].credential ?? config.auth.apiKey;
-  const credShape = cred ? `${cred.slice(0, 6)}...${cred.slice(-4)} (${cred.length} chars)` : "(none — oauth)";
+function printDebugBanner(config: ProxyConfig, path: string, cred: Credential | null): void {
+  const credShape = cred
+    ? `${cred.apiKey.slice(0, 6)}...${cred.apiKey.slice(-4)} (${cred.apiKey.length} chars)`
+    : "(none)";
   const active = config.providers[config.provider];
   console.log("=== zcode-proxy DEBUG MODE ===");
   console.log(`  config file: ${path}`);

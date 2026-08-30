@@ -84,7 +84,7 @@ export class OffPeakServerError extends Error {
 
 /** Thrown when credentials lack the JWT required for off-peak auth. */
 export class OffPeakCredentialsUnavailableError extends Error {
-  constructor(message: string = "off-peak requires oauth mode (jwt missing)") {
+  constructor(message: string = "off-peak requires a logged-in oauth credential (jwt missing)") {
     super(message);
     this.name = "OffPeakCredentialsUnavailableError";
   }

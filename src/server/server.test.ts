@@ -9,10 +9,18 @@ import { handleMessages } from "./routes-anthropic.js";
 import type { ProxyConfig } from "../config/types.js";
 import { AuthManager } from "../auth/manager.js";
 
+/** AuthManager with a preset oauth credential (replaces the removed apikey mode). */
+function oauthAuth(key = "testkey.testsecret"): AuthManager {
+  const [apiKey, secret] = key.split(".");
+  const auth = new AuthManager();
+  auth.setOAuthCredential(secret ? { apiKey, secret, provider: "zai" } : { apiKey, provider: "zai" });
+  return auth;
+}
+
 function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
   return {
     server: { port: 0, host: "127.0.0.1" },
-    auth: { mode: "apikey", apiKey: "testkey.testsecret", ...overrides.auth },
+    auth: { ...overrides.auth },
     provider: "zai",
     plan: "coding-plan",
     providers: {
@@ -73,8 +81,8 @@ function mockUpstream(): typeof fetch {
 
 describe("server routing", () => {
   it("GET /v1/models returns model list", async () => {
-    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test" } });
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const config = makeConfig({ auth: {} });
+    const auth = oauthAuth("test");
     const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
 
     const resp = await handler(new Request("http://localhost/v1/models", { method: "GET" }));
@@ -87,7 +95,7 @@ describe("server routing", () => {
 
   it("POST /v1/chat/completions forwards to upstream", async () => {
     const config = makeConfig();
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
 
     const resp = await handler(
@@ -104,7 +112,7 @@ describe("server routing", () => {
 
   it("POST /v1/messages returns Anthropic-compatible response", async () => {
     const config = makeConfig();
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
 
     const resp = await handler(
@@ -119,7 +127,7 @@ describe("server routing", () => {
 
   it("does not expose POST /v1/responses when Responses API is disabled", async () => {
     const config = makeConfig({ responses: { enabled: false, storeMaxEntries: 1000, storeTtlMs: 86400000 } });
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     let upstreamCalls = 0;
     const fetchImpl = Object.assign(async (_request: RequestInfo | URL, _init?: RequestInit): Promise<Response> => {
       upstreamCalls++;
@@ -138,7 +146,7 @@ describe("server routing", () => {
 
   it("GET /health returns ok status", async () => {
     const config = makeConfig();
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const auth = oauthAuth("test");
     const handler = createFetchHandler({ config, auth });
 
     const resp = await handler(new Request("http://localhost/health"));
@@ -149,7 +157,7 @@ describe("server routing", () => {
 
   it("unknown route returns 404", async () => {
     const config = makeConfig();
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const auth = oauthAuth("test");
     const handler = createFetchHandler({ config, auth });
 
     const resp = await handler(new Request("http://localhost/unknown", { method: "GET" }));
@@ -159,8 +167,8 @@ describe("server routing", () => {
 
 describe("proxy API key auth", () => {
   it("rejects request without proxy API key when configured", async () => {
-    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test", proxyApiKey: "proxy-secret" } });
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const config = makeConfig({ auth: { proxyApiKey: "proxy-secret" } });
+    const auth = oauthAuth("test");
     const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
 
     const resp = await handler(new Request("http://localhost/v1/models"));
@@ -168,8 +176,8 @@ describe("proxy API key auth", () => {
   });
 
   it("accepts request with correct Bearer proxy key", async () => {
-    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test", proxyApiKey: "proxy-secret" } });
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const config = makeConfig({ auth: { proxyApiKey: "proxy-secret" } });
+    const auth = oauthAuth("test");
     const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
 
     const resp = await handler(
@@ -181,8 +189,8 @@ describe("proxy API key auth", () => {
   });
 
   it("accepts request with correct x-api-key proxy key", async () => {
-    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test", proxyApiKey: "proxy-secret" } });
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const config = makeConfig({ auth: { proxyApiKey: "proxy-secret" } });
+    const auth = oauthAuth("test");
     const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
 
     const resp = await handler(
@@ -194,8 +202,8 @@ describe("proxy API key auth", () => {
   });
 
   it("rejects request with wrong proxy key", async () => {
-    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test", proxyApiKey: "proxy-secret" } });
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const config = makeConfig({ auth: { proxyApiKey: "proxy-secret" } });
+    const auth = oauthAuth("test");
     const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
 
     const resp = await handler(
@@ -207,8 +215,8 @@ describe("proxy API key auth", () => {
   });
 
   it("does not require proxy key when proxyApiKey is unset", async () => {
-    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test" } });
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const config = makeConfig({ auth: {} });
+    const auth = oauthAuth("test");
     const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
 
     const resp = await handler(new Request("http://localhost/v1/models"));
@@ -219,7 +227,7 @@ describe("proxy API key auth", () => {
 describe("CORS", () => {
   it("OPTIONS returns 204 with CORS headers", async () => {
     const config = makeConfig();
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const auth = oauthAuth("test");
     const handler = createFetchHandler({ config, auth });
 
     const resp = await handler(new Request("http://localhost/v1/models", { method: "OPTIONS" }));
@@ -232,8 +240,8 @@ describe("web UI", () => {
   it("GET /webui serves HTML without the proxy API key", async () => {
     // proxyApiKey is configured, yet /webui must load freely — it sits before
     // the auth gate by design so the page can present the key input.
-    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test", proxyApiKey: "proxy-secret" } });
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const config = makeConfig({ auth: { proxyApiKey: "proxy-secret" } });
+    const auth = oauthAuth("test");
     const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
 
     const resp = await handler(new Request("http://localhost/webui", { method: "GET" }));
@@ -244,8 +252,8 @@ describe("web UI", () => {
   });
 
   it("non-GET /webui is not served as the SPA", async () => {
-    const config = makeConfig({ auth: { mode: "apikey", apiKey: "test", proxyApiKey: "proxy-secret" } });
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "test" });
+    const config = makeConfig({ auth: { proxyApiKey: "proxy-secret" } });
+    const auth = oauthAuth("test");
     const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
 
     const resp = await handler(new Request("http://localhost/webui", { method: "POST" }));

@@ -3,20 +3,13 @@ server:
   host: "0.0.0.0"
 
 auth:
-  # "oauth"   = use OAuth login flow (run `bun run src/index.ts auth login` first) — default
-  # "apikey"  = use a pre-obtained API key directly
-  mode: oauth
-
-  # Only used in apikey mode (ignored in oauth mode):
-  #   Z.AI:     "yourApiKey.yourSecretKey"
-  #   Bigmodel: "yourApiKey"
-  # apiKey: "YOUR_API_KEY_HERE"
-
   # Key that clients must provide to use the proxy.
   # Set to null/omit to disable client auth.
   proxyApiKey: "your-proxy-secret"
 
-  # For oauth mode (path to stored credentials from login flow):
+  # Upstream credentials come from the OAuth login flow — run this first:
+  #   bun run src/index.ts auth login <zai|bigmodel>
+  # Path to the stored credentials (default shown):
   # oauthCredentialsPath: "~/.zcode-proxy/credentials.json"
 
 # Which upstream provider to use: "zai" or "bigmodel"
@@ -96,7 +89,7 @@ responses:
 # future function-injection design. Endpoints are derived from `provider`:
 #   zai      → https://api.z.ai/api/mcp/{tool}/mcp
 #   bigmodel → https://open.bigmodel.cn/api/mcp/{tool}/mcp
-# Auth reuses the upstream credential (auth.apiKey / OAuth) — no extra key needed.
+# Auth reuses the logged-in upstream credential — no extra key needed.
 mcp:
   enabled: true
   # (planned) Intercept `web_search`/`web_search_preview` hosted tools via
@@ -114,9 +107,8 @@ mcp:
 # SSE keepalives during queue wait, forwards the LLM stream once a ticket is
 # ready, and auto-retries on ticket-expired (up to maxRetries).
 #
-# IMPORTANT: requires `auth.mode: oauth` (off-peak needs the JWT from login).
-# apikey-only mode lacks the JWT and the route returns 400
-# `async_credentials_unavailable`.
+# IMPORTANT: off-peak needs the JWT captured by `auth login`. A credential
+# without a JWT makes the route return 400 `async_credentials_unavailable`.
 #
 # Env overrides: ZCODE_ASYNC_ENABLED, ZCODE_ASYNC_ORIGIN.
 async:

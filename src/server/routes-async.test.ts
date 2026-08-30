@@ -10,12 +10,20 @@ import { describe, it, expect } from "bun:test";
 import { createFetchHandler } from "./server.js";
 import type { ProxyConfig } from "../config/types.js";
 import { AuthManager } from "../auth/manager.js";
+
+/** AuthManager with a preset oauth credential (replaces the removed apikey mode). */
+function oauthAuth(key = "testkey.testsecret"): AuthManager {
+  const [apiKey, secret] = key.split(".");
+  const auth = new AuthManager();
+  auth.setOAuthCredential(secret ? { apiKey, secret, provider: "zai" } : { apiKey, provider: "zai" });
+  return auth;
+}
 import type { Credential } from "../auth/types.js";
 
 function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
   return {
     server: { port: 0, host: "127.0.0.1" },
-    auth: { mode: "apikey", apiKey: "testkey.testsecret", ...overrides.auth },
+    auth: { ...overrides.auth },
     provider: "zai",
     plan: "coding-plan",
     providers: {
@@ -48,7 +56,7 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
 }
 
 function makeOauthAuth(jwt: string = "the-jwt"): AuthManager {
-  const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+  const auth = new AuthManager();
   const cred: Credential = { apiKey: "key-x.secret-y", provider: "zai", jwt };
   auth.setOAuthCredential(cred);
   return auth;
@@ -207,9 +215,9 @@ describe("/async/* routing", () => {
     expect(resp.status).toBe(404);
   });
 
-  it("returns 400 async_credentials_unavailable when credential lacks jwt (apikey mode)", async () => {
+  it("returns 400 async_credentials_unavailable when credential lacks a JWT", async () => {
     const config = makeConfig();
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "key.secret" });
+    const auth = oauthAuth("key.secret");
     const counters = { takeCount: { value: 0 }, settleCount: { value: 0 } };
     const handler = createFetchHandler({ config, auth, fetchImpl: makeMockFetch(counters) });
     const resp = await handler(new Request("http://localhost/async/v1/messages", {
@@ -443,7 +451,7 @@ describe("/async/v1/health", () => {
 
   it("returns 400 when credential lacks jwt", async () => {
     const config = makeConfig();
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "key.secret" });
+    const auth = oauthAuth("key.secret");
     const counters = { takeCount: { value: 0 }, settleCount: { value: 0 } };
     const handler = createFetchHandler({ config, auth, fetchImpl: makeMockFetch(counters) });
 

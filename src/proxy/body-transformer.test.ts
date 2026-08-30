@@ -326,7 +326,7 @@ describe("transformRequestBody — metadata.user_id (Anthropic)", () => {
     expect(parsed.metadata.user_id).toBe("oauth_resolved");
   });
 
-  it("does NOT inject metadata when ctx.userId is absent (apikey mode)", () => {
+  it("does NOT inject metadata when ctx.userId is absent", () => {
     const body = JSON.stringify({
       messages: [{ role: "user", content: "hi" }],
     });

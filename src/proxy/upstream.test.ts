@@ -14,6 +14,14 @@ import type { Credential } from "../auth/types.js";
 import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
 import { AuthManager } from "../auth/manager.js";
 
+/** AuthManager with a preset oauth credential (replaces the removed apikey mode). */
+function oauthAuth(key = "testkey.testsecret"): AuthManager {
+  const [apiKey, secret] = key.split(".");
+  const auth = new AuthManager();
+  auth.setOAuthCredential(secret ? { apiKey, secret, provider: "zai" } : { apiKey, provider: "zai" });
+  return auth;
+}
+
 const ZAI_CRED: Credential = { apiKey: "testkey", secret: "testsecret", provider: "zai" };
 const BIGMODEL_CRED: Credential = { apiKey: "bmkey", provider: "bigmodel" };
 
@@ -398,7 +406,7 @@ describe("buildUpstreamRequest", () => {
 describe("proxyRequest", () => {
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
-    auth: { mode: "apikey", apiKey: "testkey.testsecret" },
+    auth: {},
     provider: "zai",
     plan: "coding-plan",
     providers: {
@@ -467,7 +475,7 @@ describe("proxyRequest", () => {
       });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}');
 
     const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -501,7 +509,7 @@ describe("proxyRequest", () => {
       });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[],"stream":true}');
 
     const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -536,7 +544,7 @@ describe("proxyRequest", () => {
       });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -553,7 +561,7 @@ describe("proxyRequest", () => {
       throw new Error("ECONNREFUSED");
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -567,7 +575,7 @@ describe("proxyRequest", () => {
   it("returns 503 when credential unavailable", async () => {
     const fetchMock = mock(async (): Promise<Response> => new Response("ok"));
 
-    const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+    const auth = new AuthManager();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -586,7 +594,7 @@ describe("proxyRequest", () => {
       });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeClientReq('{"model":"bad-model","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -600,7 +608,7 @@ describe("proxyRequest", () => {
 describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic upstream)", () => {
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
-    auth: { mode: "apikey", apiKey: "testkey.testsecret" },
+    auth: {},
     provider: "zai",
     plan: "coding-plan",
     providers: {
@@ -645,7 +653,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}');
 
     await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -660,7 +668,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}');
 
     await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -679,7 +687,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}],"stream":true}');
 
     await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -690,7 +698,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}');
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -708,7 +716,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -737,7 +745,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       return new Response(sseBody, { status: 200, headers: { "content-type": "text/event-stream" } });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[],"stream":true}');
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -764,7 +772,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -781,7 +789,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}', { "accept-encoding": "gzip" });
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -799,7 +807,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
       });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -810,7 +818,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
 
   it("returns 400 for a malformed OpenAI body without calling upstream", async () => {
     const fetchMock = mock(async (): Promise<Response> => new Response("ok"));
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeOpenAIReq("not json");
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -824,7 +832,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
     const fetchMock = mock(async (): Promise<Response> => {
       return new Response("not json", { status: 200, headers: { "content-type": "text/plain" } });
     });
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -837,7 +845,7 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
     const fetchMock = mock(async (): Promise<Response> => {
       return new Response('{"type":"error","error":{"type":"invalid_request_error","message":"bad request"}}', { status: 400, headers: { "content-type": "application/json" } });
     });
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeOpenAIReq('{"model":"glm-4.6","messages":[]}');
 
     const resp = await proxyRequest(clientReq, "openai", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -861,7 +869,7 @@ describe("client gzip handling", () => {
 
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
-    auth: { mode: "apikey", apiKey: "testkey.testsecret" },
+    auth: {},
     provider: "zai",
     plan: "coding-plan",
     providers: {
@@ -881,7 +889,7 @@ describe("client gzip handling", () => {
     logging: { level: "info" },
   };
 
-  const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+  const auth = oauthAuth();
 
   it("stripAutoDecodedEncoding drops gzip/br labels and stale content-length", () => {
     const upstream = new Response('{"ok":true}', {
@@ -994,7 +1002,7 @@ describe("client gzip handling", () => {
 describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
-    auth: { mode: "apikey", apiKey: "testkey.testsecret" },
+    auth: {},
     provider: "zai",
     plan: "coding-plan",
     providers: {
@@ -1034,7 +1042,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
       }), { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}');
 
     const resp = await proxyRequest(clientReq, "anthropic", { config: testConfig, auth, fetchImpl: fetchMock as any });
@@ -1081,7 +1089,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         }), { status: 200, headers: { "content-type": "application/json" } });
       });
 
-      const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+      const auth = new AuthManager();
       auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
       const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
         method: "POST",
@@ -1136,7 +1144,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         }), { status: 200, headers: { "content-type": "application/json" } });
       });
 
-      const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+      const auth = new AuthManager();
       auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
       const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
         method: "POST",
@@ -1195,7 +1203,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         }), { status: 200, headers: { "content-type": "application/json" } });
       });
 
-      const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+      const auth = new AuthManager();
       auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
       const body = '{"model":"glm-4.6","messages":[{"role":"user","content":"hi"}]}';
 
@@ -1256,7 +1264,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         }), { status: 200, headers: { "content-type": "application/json" } });
       }, { preconnect: originalFetch.preconnect });
 
-      const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+      const auth = new AuthManager();
       auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
       const clientReq = new Request("http://localhost:8080/v1/messages", {
         method: "POST",
@@ -1298,7 +1306,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
         });
       });
 
-      const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+      const auth = new AuthManager();
       auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
       const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
         method: "POST",
@@ -1323,7 +1331,7 @@ describe("proxyRequest — Anthropic compatibility mode (coding-plan)", () => {
 describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upstream)", () => {
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
-    auth: { mode: "apikey", apiKey: "testkey.testsecret" },
+    auth: {},
     provider: "zai",
     plan: "coding-plan",
     providers: {
@@ -1390,7 +1398,7 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upst
       }), { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
 
     const req1Body = JSON.stringify({
       model: "glm-4.6",
@@ -1452,7 +1460,7 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upst
       }), { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
 
     const body = JSON.stringify({
       model: "glm-4.6",
@@ -1488,7 +1496,7 @@ describe("proxyRequest — tool-call roundtrip (OpenAI client → Anthropic upst
 describe("proxyRequest — thinking endpoint matrix", () => {
   const testConfig: ProxyConfig = {
     server: { port: 8080, host: "0.0.0.0" },
-    auth: { mode: "apikey", apiKey: "testkey.testsecret" },
+    auth: {},
     provider: "zai",
     plan: "coding-plan",
     providers: {
@@ -1534,11 +1542,11 @@ describe("proxyRequest — thinking endpoint matrix", () => {
   }
 
   function codingPlanAuth(): AuthManager {
-    return new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    return oauthAuth();
   }
 
   function startPlanAuth(): AuthManager {
-    const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+    const auth = new AuthManager();
     auth.setOAuthCredential({ apiKey: "dummy", provider: "zai", jwt: "jwt-mock" });
     return auth;
   }

@@ -9,8 +9,6 @@ export interface ProviderEndpoints {
   anthropicBase: string;
   /** Base URL for OpenAI-format API, e.g. "https://api.z.ai/api/coding/paas/v4". */
   openaiBase: string;
-  /** Provider-specific credential override. If absent, uses the global `auth.apiKey`. */
-  credential?: string;
 }
 
 /** Auth section of the proxy configuration. */
@@ -20,11 +18,7 @@ interface AuthConfig {
    * If unset, the proxy does not require client auth.
    */
   proxyApiKey?: string;
-  /** How the proxy obtains the upstream credential. */
-  mode: "apikey" | "oauth";
-  /** Direct credential for `apikey` mode. Format: `{apiKey}` or `{apiKey}.{secret}` (Z.AI). */
-  apiKey?: string;
-  /** Path to stored OAuth credentials (for `oauth` mode). */
+  /** Path to stored OAuth credentials created by `auth login`. */
   oauthCredentialsPath?: string;
 }
 
@@ -96,9 +90,10 @@ export interface McpConfig {
  * with SSE comments during ticket-queue wait, forwards the LLM stream once
  * the ticket is `ready`, and auto-retries on ticket-expired (up to `maxRetries`).
  *
- * Requires `auth.mode: oauth` (off-peak needs both `Authorization: Bearer ${jwt}`
- * and `X-Coding-Plan-Api-Key` headers). apikey-only mode lacks the JWT and the
- * route entry returns 400 `async_credentials_unavailable`.
+ * Requires a logged-in oauth credential (off-peak needs both
+ * `Authorization: Bearer ${jwt}` and `X-Coding-Plan-Api-Key` headers). A
+ * credential lacking the JWT makes the route entry return 400
+ * `async_credentials_unavailable`.
  *
  * @see _reverse/NOTEPAD.md "Off-Peak / Idle Plan" section for full upstream protocol.
  */
