@@ -680,19 +680,37 @@ const GUEST_EVAL_PATCH = `
   try {
     Object.defineProperty(window.Document.prototype, Symbol.toStringTag, { value: "HTMLDocument", configurable: true });
   } catch (e) {}
+  // Guest errors are RECORDED, not printed: the Aliyun/FeiLin SDKs throw
+  // benign uncaught TypeErrors inside happy-dom on every solve (imperfect DOM
+  // emulation) while the solve still succeeds — printing them flooded the
+  // console with [WINDOW-ERROR] spam. They land in window.__capErrs (capped,
+  // deduped) which solveTraceless surfaces only when a solve FAILS.
+  // CAPTCHA_DEBUG=1 streams them live again.
+  var __capDebug = ${_DEBUG ? "true" : "false"};
+  function __capRecord(kind, msg, stack) {
+    try {
+      var m = String(msg || "?");
+      var s = String(stack || "").split("\\n").slice(0, 2).join(" | ");
+      if (!window.__capErrs) window.__capErrs = [];
+      var last = window.__capErrs[window.__capErrs.length - 1];
+      if (last && last.k === kind && last.m === m) {
+        last.n = (last.n || 1) + 1;
+      } else {
+        window.__capErrs.push({ k: kind, m: m, s: s, n: 1 });
+        if (window.__capErrs.length > 8) window.__capErrs.shift();
+      }
+      if (__capDebug) console.error("[" + kind + "]", m, s);
+    } catch (e2) {}
+  }
   try {
     window.addEventListener("unhandledrejection", function(e) {
       var r = e && e.reason;
-      try {
-        console.error("[UH-REASON]", typeof r, r && r.stack ? r.stack.split("\\n").slice(0,6).join(" | ") : (r && r.message), JSON.stringify(r));
-      } catch (e2) {}
+      __capRecord("UH-REASON", (r && r.message) || typeof r, r && r.stack);
     });
   } catch (e) {}
   try {
     window.addEventListener("error", function(e) {
-      try {
-        console.error("[WINDOW-ERROR]", e && e.message, e && e.error && e.error.stack ? e.error.stack.split("\\n").slice(0,6).join(" | ") : "");
-      } catch (e2) {}
+      __capRecord("WINDOW-ERROR", e && e.message, e && e.error && e.error.stack);
     });
   } catch (e) {}
   // ---- eval/Function parse-fail instrumentation (installed before pe chain) ----
@@ -2017,6 +2035,29 @@ function noteWindowSolved() {
   _reusePool.lastUsedAt = Date.now();
 }
 
+// ── Guest error capture (read side) ────────────────────────────────────────
+// GUEST_EVAL_PATCH records every guest window error into window.__capErrs
+// (capped, deduped) instead of console-printing them: the Aliyun/FeiLin SDKs
+// throw benign uncaught TypeErrors inside happy-dom on every solve and the
+// solve still succeeds, so printing them is pure console spam. The buffer is
+// surfaced only when a solve FAILS — that's when guest errors are
+// actionable. CAPTCHA_DEBUG=1 streams them live again as
+// [WINDOW-ERROR]/[UH-REASON].
+function guestErrorSummary(w, max = 4) {
+  try {
+    const errs = w && w.__capErrs;
+    if (!errs || !errs.length) return "";
+    const total = errs.reduce((a, e) => a + ((e && e.n) || 1), 0);
+    const parts = errs.slice(0, max).map((e) => {
+      const n = e && e.n && e.n > 1 ? `x${e.n}` : "";
+      return `${(e && e.k) || "?"}${n}: ${String((e && e.m) || "?").slice(0, 120)}`;
+    });
+    return ` guestErrors(${total}): ${parts.join(" || ")}`;
+  } catch (_) {
+    return "";
+  }
+}
+
 async function solveTraceless(opts) {
   const scene = opts.scene || "11xygtvd";
   const region = opts.region || "sgp";
@@ -2113,10 +2154,13 @@ async function solveTraceless(opts) {
     });
 
     // Success clears this pe's stall history so future isolated stalls can
-    // still trigger eviction after two genuine consecutive failures.
+    // still trigger eviction after two genuine consecutive failures. Also
+    // clears the guest error buffer: a pooled window's next failure must
+    // only report errors from solves after this success.
     try {
       const okPe = w.__lastPeUrl;
       if (okPe) _stallCounts.delete(okPe);
+      w.__capErrs = [];
     } catch (_) {}
 
     // Dump the pe-VM btoa tracer if requested (rotation forensics).
@@ -2138,6 +2182,16 @@ async function solveTraceless(opts) {
       keepWindow = true;
     }
     return out;
+  } catch (err) {
+    // Attach captured guest window errors to the failure — the only situation
+    // where they are actionable (a successful solve makes them irrelevant).
+    const summary = guestErrorSummary(w);
+    if (summary) {
+      try {
+        err.message = `${err && err.message ? err.message : String(err)} |${summary}`;
+      } catch (_) {}
+    }
+    throw err;
   } finally {
     // Reuse mode: on success the window stays pooled (keepWindow) for the next
     // solve — a ~48% CPU cut. On failure it is destroyed: a stalled window must

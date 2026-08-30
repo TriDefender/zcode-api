@@ -99,6 +99,19 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
     }
 
     if (config.async.enabled) {
+      // Off-peak is a coding-plan feature: on start-plan the async routes are
+      // disabled even when async.enabled=true (explicit error, not a silent 404).
+      const isAsyncRoute =
+        (path === "/async/v1/messages" && method === "POST") ||
+        (path === "/async/v1/chat/completions" && method === "POST") ||
+        (path === "/async/v1/health" && method === "GET");
+      if (isAsyncRoute && config.plan !== "coding-plan") {
+        return errorResponse(
+          400,
+          "async_plan_unsupported",
+          `async (off-peak) endpoints are only available with plan "coding-plan" (current plan: ${config.plan})`,
+        );
+      }
       if (path === "/async/v1/messages" && method === "POST") {
         return handleAsyncMessagesRoute(req, asyncOpts);
       }

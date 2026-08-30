@@ -34,6 +34,11 @@ export class KeyParser {
 
   /** Consume a raw stdin chunk and return the actions it completes. */
   feed(chunk: string): KeyAction[] {
+    // Wedge guard: no real sequence is anywhere near 64 bytes (SGR mouse is
+    // ~16), so a pending tail this long means the parser is stuck on garbage.
+    // Drop it — otherwise the stuck prefix would swallow every future chunk
+    // and the TUI would stop responding to keys and clicks for good.
+    if (this.pending.length > 64) this.pending = "";
     const buf = this.pending + chunk;
     const actions: KeyAction[] = [];
     let i = 0;

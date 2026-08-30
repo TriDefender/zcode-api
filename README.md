@@ -75,7 +75,9 @@ bun run src/index.ts auth login bigmodel --import
 
 ### Async (Off-Peak / Idle Plan)
 
-`/async/*` routes are gated by `async.enabled: true` in config (default `false`).
+`/async/*` routes are gated by `async.enabled: true` in config (default `false`)
+and are a **coding-plan feature**: when `plan: start-plan`, the routes return
+400 `async_plan_unsupported` even when enabled.
 They require a logged-in credential that carries a JWT (the off-peak backend
 needs both the JWT from login and the coding-plan API key — a JWT-less
 credential, e.g. from `auth login --import`, returns 400
@@ -205,10 +207,16 @@ multi-session autosave (localStorage). Open Settings (⚙) to configure.
 
 ### Terminal UI (TUI)
 
+The TUI is the **default** mode — launching without arguments opens it:
+
 ```bash
-bun run src/index.ts tui            # same as serve, plus an interactive panel
-bun run src/index.ts tui debug      # with per-request debug diagnostics
+bun run src/index.ts                # interactive panel (default)
+bun run src/index.ts debug          # with per-request debug diagnostics
+bun run src/index.ts serve          # classic CLI mode: headless server
 ```
+
+`zcode-proxy --cli` opts out of the TUI entirely and restores the classic CLI
+dispatch (bare `--cli` = `serve`).
 
 A PC terminal control panel mirroring the Android app's layout — three cards
 (Settings & Login / Proxy Server / Logs) rendered in the alternate screen with

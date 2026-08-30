@@ -60,6 +60,31 @@ export function main(): void {
 
 function runCli(): void {
   const args = process.argv.slice(2);
+
+  // `--cli` opts out of the default TUI and restores the classic CLI dispatch
+  // (bare `--cli` = the old no-arg default: serve).
+  if (args[0] === "--cli") {
+    dispatchCli(args.slice(1));
+    return;
+  }
+  // Default surface is the TUI. Bare invocation, the retired `tui` token
+  // (kept as a silent alias), and tui-style args (`debug`, `*.yaml`) all land
+  // here — the former `tui <args>` subcommand simply dropped its prefix.
+  if (
+    args.length === 0 ||
+    args[0] === "tui" ||
+    args[0] === "debug" ||
+    args[0].endsWith(".yaml") ||
+    args[0].endsWith(".yml")
+  ) {
+    launchTui(parseServeArgs(args[0] === "tui" ? args.slice(1) : args));
+    return;
+  }
+  dispatchCli(args);
+}
+
+/** Classic CLI dispatch — subcommand routing where bare = serve. */
+function dispatchCli(args: string[]): void {
   const cmd = args[0] ?? "serve";
 
   if (cmd === "auth") {
@@ -75,15 +100,9 @@ function runCli(): void {
       process.exit(1);
     });
   } else if (cmd === "tui") {
-    // Dynamic import: the TUI module imports helpers back from this file, so a
-    // static edge would create a load-time cycle (same pattern as claimCommand).
-    const tuiArgs = parseServeArgs(args.slice(1));
-    import("./tui/app.js")
-      .then((m) => m.runTui(tuiArgs))
-      .catch((err: unknown) => {
-        process.stderr.write(`zcode-proxy: tui failed: ${(err as Error).stack ?? String(err)}\n`);
-        process.exit(1);
-      });
+    // Kept for muscle memory under `--cli`: the default dispatch already
+    // routes `tui` to the TUI, but `--cli tui` should not regress to an error.
+    launchTui(parseServeArgs(args.slice(1)));
   } else if (cmd === "serve" || cmd.endsWith(".yaml") || cmd.endsWith(".yml")) {
     const serveArgs = cmd === "serve"
       ? parseServeArgs(args.slice(1))
@@ -100,14 +119,28 @@ function runCli(): void {
   }
 }
 
+function launchTui(args: ServeArgs): void {
+  // Dynamic import: the TUI module imports helpers back from this file, so a
+  // static edge would create a load-time cycle (same pattern as claimCommand).
+  import("./tui/app.js")
+    .then((m) => m.runTui(args))
+    .catch((err: unknown) => {
+      process.stderr.write(`zcode-proxy: tui failed: ${(err as Error).stack ?? String(err)}\n`);
+      process.exit(1);
+    });
+}
+
 function printHelp(): void {
   console.log(`zcode-proxy ${VERSION}
 
 Usage:
-  zcode-proxy serve [config.yaml]   Start the proxy server (default)
+  zcode-proxy                       Interactive terminal UI (default):
+                                    login, start/stop, live logs
+  zcode-proxy [debug] [config.yaml] Same, with debug diagnostics / custom config
+  zcode-proxy serve [config.yaml]   Start the proxy server (classic CLI mode)
   zcode-proxy serve debug [config.yaml]
                                     Start with verbose per-request diagnostics
-  zcode-proxy tui [config.yaml]     Interactive terminal UI (login / start-stop / live logs)
+  zcode-proxy --cli                 Classic CLI mode (bare --cli = serve)
   zcode-proxy android               Android entry: proxy + localhost control listener
   zcode-proxy auth login <provider> Login via OAuth (provider: zai | bigmodel)
   zcode-proxy auth login <provider> --import
@@ -119,9 +152,9 @@ Usage:
   zcode-proxy help                  Show this help
 
 Examples:
-  zcode-proxy                       Start server with default config.yaml
-  zcode-proxy serve debug           Start with extra debug logging
-  zcode-proxy tui                   Terminal UI: login, start/stop, live logs
+  zcode-proxy                       Terminal UI: login, start/stop, live logs
+  zcode-proxy debug                 Terminal UI with per-request diagnostics
+  zcode-proxy serve debug           CLI: start with extra debug logging
   zcode-proxy auth login bigmodel   OAuth login for Bigmodel
   zcode-proxy auth login bigmodel --import
                                     Import existing key from ZCode config
@@ -171,6 +204,9 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   console.log(`  plan: ${config.plan}`);
   console.log(`  models: ${config.models.length} available`);
   if (config.responses.enabled) console.log(`  /v1/responses: ON`);
+  if (config.async.enabled) {
+    console.log(config.plan === "coding-plan" ? `  /async/v1/*: ON` : `  /async/v1/*: OFF (requires plan "coding-plan")`);
+  }
   if (debug) console.log(`  debug: ON`);
 
   process.on("SIGINT", () => {

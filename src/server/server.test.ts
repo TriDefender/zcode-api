@@ -144,6 +144,43 @@ describe("server routing", () => {
     expect(upstreamCalls).toBe(0);
   });
 
+  it("returns async_plan_unsupported on /async/* when plan is start-plan", async () => {
+    const config = makeConfig({
+      plan: "start-plan",
+      async: { enabled: true, origin: "https://zcode.z.ai", pollIntervalMs: 10, keepAliveIntervalMs: 5, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 100, controlTimeoutMs: 1000, defaultModel: "" },
+    });
+    const auth = oauthAuth();
+    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
+
+    const resp = await handler(new Request("http://localhost/async/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "Hi" }] }),
+    }));
+    expect(resp.status).toBe(400);
+    const body = await resp.json();
+    expect(body.error.type).toBe("async_plan_unsupported");
+  });
+
+  it("dispatches /async/v1/messages when plan is coding-plan (reaches credential check)", async () => {
+    const config = makeConfig({
+      async: { enabled: true, origin: "https://zcode.z.ai", pollIntervalMs: 10, keepAliveIntervalMs: 5, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 100, controlTimeoutMs: 1000, defaultModel: "" },
+    });
+    // JWT-less credential: the route must get PAST the plan gate and fail later
+    // with async_credentials_unavailable (proving dispatch, not blocking).
+    const auth = oauthAuth();
+    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
+
+    const resp = await handler(new Request("http://localhost/async/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "glm-4.6", messages: [{ role: "user", content: "Hi" }] }),
+    }));
+    expect(resp.status).toBe(400);
+    const body = await resp.json();
+    expect(body.error.type).toBe("async_credentials_unavailable");
+  });
+
   it("GET /health returns ok status", async () => {
     const config = makeConfig();
     const auth = oauthAuth("test");

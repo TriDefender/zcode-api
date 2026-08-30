@@ -109,6 +109,8 @@ mcp:
 #
 # IMPORTANT: off-peak needs the JWT captured by `auth login`. A credential
 # without a JWT makes the route return 400 `async_credentials_unavailable`.
+# Off-peak is a coding-plan feature: when `plan: start-plan`, the /async/*
+# routes return 400 `async_plan_unsupported` even when enabled: true.
 #
 # Env overrides: ZCODE_ASYNC_ENABLED, ZCODE_ASYNC_ORIGIN.
 async:

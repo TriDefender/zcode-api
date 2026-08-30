@@ -105,4 +105,10 @@ describe("KeyParser", () => {
     const p = new KeyParser();
     expect(types(p, "\x1b[<;5M")).toEqual(["ignore"]);
   });
+
+  test("pathological pending buffer is flushed so input recovers", () => {
+    const p = new KeyParser();
+    expect(p.feed("\x1b[" + ",".repeat(70))).toEqual([]); // no final byte — buffered
+    expect(p.feed("x")).toEqual([{ type: "char", key: "x" }]); // >64-byte tail dropped, not wedged
+  });
 });

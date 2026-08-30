@@ -1,6 +1,7 @@
 /**
- * PC terminal UI (`zcode-proxy tui`) — an in-process control panel mirroring
- * the Android app's three-card layout: Settings & Login / Proxy Server / Logs.
+ * PC terminal UI (zcode-proxy's default mode) — an in-process control panel
+ * mirroring the Android app's three-card layout: Settings & Login / Proxy
+ * Server / Logs.
  *
  * The TUI owns the terminal (alternate screen + raw mode) and, like the
  * Android entry, intercepts console.log/warn/error into a ring buffer so the
@@ -25,9 +26,9 @@ import { ensureDeviceMidInConfig, VERSION, type ServeArgs } from "../index.js";
 import { writeFileSync, existsSync, appendFileSync } from "node:fs";
 import type { ProxyConfig } from "../config/types.js";
 import type { ProviderId } from "../provider/types.js";
-import { LogPane } from "./log-pane.js";
+import { LogPane, type LogLevel } from "./log-pane.js";
 import { KeyParser, type KeyAction } from "./keys.js";
-import { buildFrame, findRegion, type ClickAction, type ClickRegion } from "./frame.js";
+import { buildFrame, findRegion, type ClickAction, type ClickRegion, type Frame } from "./frame.js";
 
 type PlanTier = "coding-plan" | "start-plan";
 type ServerStatus = "stopped" | "starting" | "running" | "error";
@@ -38,7 +39,10 @@ const TOAST_MS = 2600;
 
 export async function runTui(args: ServeArgs): Promise<void> {
   if (!process.stdout.isTTY || !process.stdin.isTTY) {
-    process.stderr.write("zcode-proxy: tui requires an interactive terminal (TTY).\n");
+    process.stderr.write(
+      "zcode-proxy: TUI mode needs an interactive terminal (TTY). " +
+        "For headless/CLI use run: zcode-proxy --cli serve\n",
+    );
     process.exit(1);
   }
 
@@ -76,11 +80,23 @@ export async function runTui(args: ServeArgs): Promise<void> {
   // --- terminal setup ------------------------------------------------------
   const stdout = process.stdout;
   const stdin = process.stdin;
+  // Captured before any interception: the TUI's own frame/setup writes and
+  // the post-cleanup error path must always reach the real terminal, even
+  // after process.stdout/stderr.write are rerouted into the log pane below.
+  const realStdoutWrite = stdout.write.bind(stdout) as (...a: unknown[]) => boolean;
+  const realStderrWrite = process.stderr.write.bind(process.stderr) as (...a: unknown[]) => boolean;
+  // Raw-mode availability check BEFORE any terminal state is touched: the
+  // failure message must reach the real terminal, not the (not yet visible)
+  // log pane, and nothing needs restoring if we never entered the alt screen.
+  if (typeof (stdin as { setRawMode?: (m: boolean) => void }).setRawMode !== "function") {
+    realStderrWrite("zcode-proxy: tui requires a terminal with raw-mode input.\n");
+    process.exit(1);
+  }
   // Alt screen + hide cursor + SGR mouse tracking (buttons clickable, wheel scrolls).
-  stdout.write("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[2J");
+  realStdoutWrite("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[2J");
 
   const restore = (): void => {
-    try { stdout.write("\x1b[0m\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l"); } catch { /* terminal gone */ }
+    try { realStdoutWrite("\x1b[0m\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l"); } catch { /* terminal gone */ }
   };
 
   // --- console interception → log pane (Android-entry pattern) ------------
@@ -112,40 +128,83 @@ export async function runTui(args: ServeArgs): Promise<void> {
   const restoreConsole = (): void => {
     for (const [key, fn] of Object.entries(origConsole)) consoleOwner[key] = fn;
   };
+  const restoreStdio = (): void => {
+    process.stdout.write = realStdoutWrite as typeof process.stdout.write;
+    process.stderr.write = realStderrWrite as typeof process.stderr.write;
+  };
+
+  // Reroute raw process.stdout/stderr writers into the log pane. The codebase
+  // has ~30 direct `process.stderr.write` call sites (captcha diagnostics,
+  // runtime notices) that bypass the console interception above — on the alt
+  // screen their text + newlines land mid-frame, garbling the rendered UI and
+  // the click regions with it. The TUI's own writes go through the captured
+  // originals, never through these overrides.
+  const routeToPane =
+    (level: LogLevel) =>
+    (chunk: unknown, encOrCb?: unknown, maybeCb?: unknown): boolean => {
+      const text =
+        typeof chunk === "string"
+          ? chunk
+          : Buffer.isBuffer(chunk)
+            ? chunk.toString("utf8")
+            : chunk instanceof Uint8Array
+              ? new TextDecoder().decode(chunk)
+              : String(chunk);
+      try { emit(text, level); } catch { /* pane failure must not break the writer */ }
+      const cb = typeof encOrCb === "function" ? encOrCb : typeof maybeCb === "function" ? maybeCb : undefined;
+      if (cb) (cb as () => void)();
+      return true;
+    };
+  process.stdout.write = routeToPane("info") as typeof process.stdout.write;
+  process.stderr.write = routeToPane("warn") as typeof process.stderr.write;
 
   // --- rendering -----------------------------------------------------------
   let renderTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastRenderAt = 0;
   let activeRegions: ClickRegion[] = [];
   function renderNow(): void {
+    if (renderTimer) clearTimeout(renderTimer); // watchdog may fire mid-cycle
     renderTimer = null;
-    const width = stdout.columns || 80;
-    const height = stdout.rows || 24;
-    const view = pane.view(Math.max(4, height - 14));
-    const frame = buildFrame({
-      version: VERSION,
-      configPath: path,
-      provider: state.provider,
-      plan: state.plan,
-      loggedIn: state.loggedIn,
-      apiKeyPreview: state.apiKeyPreview,
-      loginInFlight: state.loginInFlight,
-      loginHint: state.loginHint,
-      serverStatus: state.serverStatus,
-      serverUrl: state.serverUrl,
-      serverError: state.serverError,
-      modelCount: config.models.length,
-      responsesEnabled: config.responses.enabled,
-      claimAuto: config.claim.enabled && config.claim.auto,
-      logTotal: view.total,
-      logView: view.lines,
-      logFollowing: pane.following,
-      logFromBottom: view.fromBottom,
-      toast: state.toast,
-      width,
-      height,
-    });
+    lastRenderAt = Date.now();
+    let frame: Frame;
+    try {
+      const width = stdout.columns || 80;
+      const height = stdout.rows || 24;
+      const view = pane.view(Math.max(4, height - 14));
+      frame = buildFrame({
+        version: VERSION,
+        configPath: path,
+        provider: state.provider,
+        plan: state.plan,
+        loggedIn: state.loggedIn,
+        apiKeyPreview: state.apiKeyPreview,
+        loginInFlight: state.loginInFlight,
+        loginHint: state.loginHint,
+        serverStatus: state.serverStatus,
+        serverUrl: state.serverUrl,
+        serverError: state.serverError,
+        modelCount: config.models.length,
+        responsesEnabled: config.responses.enabled,
+        claimAuto: config.claim.enabled && config.claim.auto,
+        logTotal: view.total,
+        logView: view.lines,
+        logFollowing: pane.following,
+        logFromBottom: view.fromBottom,
+        toast: state.toast,
+        width,
+        height,
+      });
+    } catch (err) {
+      // A broken frame must never escape: through the uncaughtException
+      // handler it would tear down the whole TUI. Record it WITHOUT
+      // rescheduling (pane.push, not emit) — emit's scheduleRender would turn
+      // a deterministic buildFrame failure into a ~30 Hz render-error loop.
+      // The watchdog retries at its own 2-4s cadence instead.
+      try { pane.push(`frame render failed: ${(err as Error).message}`, "error"); } catch { /* ignore */ }
+      return;
+    }
     activeRegions = frame.regions;
-    try { stdout.write("\x1b[H" + frame.text); } catch { /* terminal gone */ }
+    try { realStdoutWrite("\x1b[H" + frame.text); } catch { /* terminal gone */ }
   }
   function scheduleRender(): void {
     if (renderTimer) return;
@@ -338,11 +397,6 @@ export async function runTui(args: ServeArgs): Promise<void> {
   // --- input loop ------------------------------------------------------------
   const parser = new KeyParser();
   stdin.setEncoding("utf8");
-  if (typeof (stdin as { setRawMode?: (m: boolean) => void }).setRawMode !== "function") {
-    restore();
-    origError("zcode-proxy: tui requires a terminal with raw-mode input.\n");
-    process.exit(1);
-  }
   (stdin as { setRawMode(m: boolean): void }).setRawMode(true);
   stdin.resume();
   stdin.on("data", (chunk: string) => {
@@ -426,8 +480,20 @@ export async function runTui(args: ServeArgs): Promise<void> {
   function cleanup(): void {
     restore();
     restoreConsole();
+    restoreStdio();
     try { serverRef.current?.stop(false); } catch { /* already closed */ }
   }
+  // Render watchdog: if the 33ms render chain ever dies (stuck timer id,
+  // swallowed exception in a runtime with different uncaught semantics), the
+  // screen would freeze while the proxy keeps serving. The watchdog re-renders
+  // whenever nothing has painted for 3s and un-pauses a stalled stdin, so the
+  // worst-case freeze is bounded. Fires fine unref'd (timers only keep the
+  // process alive when everything else is gone; the server handle already does).
+  const watchdog = setInterval(() => {
+    try { if (stdin.isPaused()) stdin.resume(); } catch { /* stdin gone */ }
+    if (Date.now() - lastRenderAt > 3000) renderNow();
+  }, 2000);
+  if (typeof watchdog.unref === "function") watchdog.unref();
   process.on("SIGINT", quit);
   process.on("SIGTERM", quit);
   process.on("exit", restore);

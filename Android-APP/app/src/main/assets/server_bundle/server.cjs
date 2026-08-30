@@ -113292,6 +113292,20 @@ function noteWindowSolved() {
   _reusePool.solves += 1;
   _reusePool.lastUsedAt = Date.now();
 }
+function guestErrorSummary(w2, max = 4) {
+  try {
+    const errs = w2 && w2.__capErrs;
+    if (!errs || !errs.length) return "";
+    const total = errs.reduce((a, e) => a + (e && e.n || 1), 0);
+    const parts = errs.slice(0, max).map((e) => {
+      const n = e && e.n && e.n > 1 ? `x${e.n}` : "";
+      return `${e && e.k || "?"}${n}: ${String(e && e.m || "?").slice(0, 120)}`;
+    });
+    return ` guestErrors(${total}): ${parts.join(" || ")}`;
+  } catch (_) {
+    return "";
+  }
+}
 async function solveTraceless(opts) {
   const scene = opts.scene || "11xygtvd";
   const region = opts.region || "sgp";
@@ -113385,6 +113399,7 @@ async function solveTraceless(opts) {
     try {
       const okPe = w2.__lastPeUrl;
       if (okPe) _stallCounts.delete(okPe);
+      w2.__capErrs = [];
     } catch (_) {
     }
     if (process.env.CAPTCHA_DUMP_DBT === "1") {
@@ -113405,6 +113420,15 @@ async function solveTraceless(opts) {
       keepWindow = true;
     }
     return out;
+  } catch (err) {
+    const summary = guestErrorSummary(w2);
+    if (summary) {
+      try {
+        err.message = `${err && err.message ? err.message : String(err)} |${summary}`;
+      } catch (_) {
+      }
+    }
+    throw err;
   } finally {
     if (!keepWindow) {
       if (_reusePool.window === w2) _reusePool.window = null;
@@ -113504,19 +113528,37 @@ var init_captcha_happy = __esm({
   try {
     Object.defineProperty(window.Document.prototype, Symbol.toStringTag, { value: "HTMLDocument", configurable: true });
   } catch (e) {}
+  // Guest errors are RECORDED, not printed: the Aliyun/FeiLin SDKs throw
+  // benign uncaught TypeErrors inside happy-dom on every solve (imperfect DOM
+  // emulation) while the solve still succeeds \u2014 printing them flooded the
+  // console with [WINDOW-ERROR] spam. They land in window.__capErrs (capped,
+  // deduped) which solveTraceless surfaces only when a solve FAILS.
+  // CAPTCHA_DEBUG=1 streams them live again.
+  var __capDebug = ${_DEBUG ? "true" : "false"};
+  function __capRecord(kind, msg, stack) {
+    try {
+      var m = String(msg || "?");
+      var s = String(stack || "").split("\\n").slice(0, 2).join(" | ");
+      if (!window.__capErrs) window.__capErrs = [];
+      var last = window.__capErrs[window.__capErrs.length - 1];
+      if (last && last.k === kind && last.m === m) {
+        last.n = (last.n || 1) + 1;
+      } else {
+        window.__capErrs.push({ k: kind, m: m, s: s, n: 1 });
+        if (window.__capErrs.length > 8) window.__capErrs.shift();
+      }
+      if (__capDebug) console.error("[" + kind + "]", m, s);
+    } catch (e2) {}
+  }
   try {
     window.addEventListener("unhandledrejection", function(e) {
       var r = e && e.reason;
-      try {
-        console.error("[UH-REASON]", typeof r, r && r.stack ? r.stack.split("\\n").slice(0,6).join(" | ") : (r && r.message), JSON.stringify(r));
-      } catch (e2) {}
+      __capRecord("UH-REASON", (r && r.message) || typeof r, r && r.stack);
     });
   } catch (e) {}
   try {
     window.addEventListener("error", function(e) {
-      try {
-        console.error("[WINDOW-ERROR]", e && e.message, e && e.error && e.error.stack ? e.error.stack.split("\\n").slice(0,6).join(" | ") : "");
-      } catch (e2) {}
+      __capRecord("WINDOW-ERROR", e && e.message, e && e.error && e.error.stack);
     });
   } catch (e) {}
   // ---- eval/Function parse-fail instrumentation (installed before pe chain) ----
@@ -117695,6 +117737,14 @@ function createFetchHandler(opts) {
       return handleMessages(req, proxyOpts);
     }
     if (config.async.enabled) {
+      const isAsyncRoute = path2 === "/async/v1/messages" && method2 === "POST" || path2 === "/async/v1/chat/completions" && method2 === "POST" || path2 === "/async/v1/health" && method2 === "GET";
+      if (isAsyncRoute && config.plan !== "coding-plan") {
+        return errorResponse(
+          400,
+          "async_plan_unsupported",
+          `async (off-peak) endpoints are only available with plan "coding-plan" (current plan: ${config.plan})`
+        );
+      }
       if (path2 === "/async/v1/messages" && method2 === "POST") {
         return handleAsyncMessagesRoute(req, asyncOpts);
       }
@@ -118928,6 +118978,7 @@ var init_keys = __esm({
       pending = "";
       /** Consume a raw stdin chunk and return the actions it completes. */
       feed(chunk) {
+        if (this.pending.length > 64) this.pending = "";
         const buf = this.pending + chunk;
         const actions = [];
         let i = 0;
@@ -119659,7 +119710,9 @@ __export(app_exports, {
 });
 async function runTui(args) {
   if (!process.stdout.isTTY || !process.stdin.isTTY) {
-    process.stderr.write("zcode-proxy: tui requires an interactive terminal (TTY).\n");
+    process.stderr.write(
+      "zcode-proxy: TUI mode needs an interactive terminal (TTY). For headless/CLI use run: zcode-proxy --cli serve\n"
+    );
     process.exit(1);
   }
   const path2 = args.configPath ?? process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
@@ -119694,10 +119747,16 @@ async function runTui(args) {
   };
   const stdout = process.stdout;
   const stdin = process.stdin;
-  stdout.write("\x1B[?1049h\x1B[?25l\x1B[?1000h\x1B[?1006h\x1B[2J");
+  const realStdoutWrite = stdout.write.bind(stdout);
+  const realStderrWrite = process.stderr.write.bind(process.stderr);
+  if (typeof stdin.setRawMode !== "function") {
+    realStderrWrite("zcode-proxy: tui requires a terminal with raw-mode input.\n");
+    process.exit(1);
+  }
+  realStdoutWrite("\x1B[?1049h\x1B[?25l\x1B[?1000h\x1B[?1006h\x1B[2J");
   const restore = () => {
     try {
-      stdout.write("\x1B[0m\x1B[?1006l\x1B[?1000l\x1B[?25h\x1B[?1049l");
+      realStdoutWrite("\x1B[0m\x1B[?1006l\x1B[?1000l\x1B[?25h\x1B[?1049l");
     } catch {
     }
   };
@@ -119728,39 +119787,67 @@ async function runTui(args) {
   const restoreConsole = () => {
     for (const [key, fn] of Object.entries(origConsole)) consoleOwner[key] = fn;
   };
+  const restoreStdio = () => {
+    process.stdout.write = realStdoutWrite;
+    process.stderr.write = realStderrWrite;
+  };
+  const routeToPane = (level) => (chunk, encOrCb, maybeCb) => {
+    const text = typeof chunk === "string" ? chunk : Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk instanceof Uint8Array ? new TextDecoder().decode(chunk) : String(chunk);
+    try {
+      emit(text, level);
+    } catch {
+    }
+    const cb = typeof encOrCb === "function" ? encOrCb : typeof maybeCb === "function" ? maybeCb : void 0;
+    if (cb) cb();
+    return true;
+  };
+  process.stdout.write = routeToPane("info");
+  process.stderr.write = routeToPane("warn");
   let renderTimer = null;
+  let lastRenderAt = 0;
   let activeRegions = [];
   function renderNow() {
+    if (renderTimer) clearTimeout(renderTimer);
     renderTimer = null;
-    const width2 = stdout.columns || 80;
-    const height2 = stdout.rows || 24;
-    const view = pane.view(Math.max(4, height2 - 14));
-    const frame = buildFrame({
-      version: VERSION,
-      configPath: path2,
-      provider: state2.provider,
-      plan: state2.plan,
-      loggedIn: state2.loggedIn,
-      apiKeyPreview: state2.apiKeyPreview,
-      loginInFlight: state2.loginInFlight,
-      loginHint: state2.loginHint,
-      serverStatus: state2.serverStatus,
-      serverUrl: state2.serverUrl,
-      serverError: state2.serverError,
-      modelCount: config.models.length,
-      responsesEnabled: config.responses.enabled,
-      claimAuto: config.claim.enabled && config.claim.auto,
-      logTotal: view.total,
-      logView: view.lines,
-      logFollowing: pane.following,
-      logFromBottom: view.fromBottom,
-      toast: state2.toast,
-      width: width2,
-      height: height2
-    });
+    lastRenderAt = Date.now();
+    let frame;
+    try {
+      const width2 = stdout.columns || 80;
+      const height2 = stdout.rows || 24;
+      const view = pane.view(Math.max(4, height2 - 14));
+      frame = buildFrame({
+        version: VERSION,
+        configPath: path2,
+        provider: state2.provider,
+        plan: state2.plan,
+        loggedIn: state2.loggedIn,
+        apiKeyPreview: state2.apiKeyPreview,
+        loginInFlight: state2.loginInFlight,
+        loginHint: state2.loginHint,
+        serverStatus: state2.serverStatus,
+        serverUrl: state2.serverUrl,
+        serverError: state2.serverError,
+        modelCount: config.models.length,
+        responsesEnabled: config.responses.enabled,
+        claimAuto: config.claim.enabled && config.claim.auto,
+        logTotal: view.total,
+        logView: view.lines,
+        logFollowing: pane.following,
+        logFromBottom: view.fromBottom,
+        toast: state2.toast,
+        width: width2,
+        height: height2
+      });
+    } catch (err) {
+      try {
+        pane.push(`frame render failed: ${err.message}`, "error");
+      } catch {
+      }
+      return;
+    }
     activeRegions = frame.regions;
     try {
-      stdout.write("\x1B[H" + frame.text);
+      realStdoutWrite("\x1B[H" + frame.text);
     } catch {
     }
   }
@@ -119933,11 +120020,6 @@ async function runTui(args) {
   }
   const parser = new KeyParser();
   stdin.setEncoding("utf8");
-  if (typeof stdin.setRawMode !== "function") {
-    restore();
-    origError("zcode-proxy: tui requires a terminal with raw-mode input.\n");
-    process.exit(1);
-  }
   stdin.setRawMode(true);
   stdin.resume();
   stdin.on("data", (chunk) => {
@@ -120052,11 +120134,20 @@ async function runTui(args) {
   function cleanup() {
     restore();
     restoreConsole();
+    restoreStdio();
     try {
       serverRef.current?.stop(false);
     } catch {
     }
   }
+  const watchdog = setInterval(() => {
+    try {
+      if (stdin.isPaused()) stdin.resume();
+    } catch {
+    }
+    if (Date.now() - lastRenderAt > 3e3) renderNow();
+  }, 2e3);
+  if (typeof watchdog.unref === "function") watchdog.unref();
   process.on("SIGINT", quit);
   process.on("SIGTERM", quit);
   process.on("exit", restore);
@@ -120128,6 +120219,17 @@ function main() {
 }
 function runCli() {
   const args = process.argv.slice(2);
+  if (args[0] === "--cli") {
+    dispatchCli(args.slice(1));
+    return;
+  }
+  if (args.length === 0 || args[0] === "tui" || args[0] === "debug" || args[0].endsWith(".yaml") || args[0].endsWith(".yml")) {
+    launchTui(parseServeArgs(args[0] === "tui" ? args.slice(1) : args));
+    return;
+  }
+  dispatchCli(args);
+}
+function dispatchCli(args) {
   const cmd = args[0] ?? "serve";
   if (cmd === "auth") {
     authCommand(args.slice(1));
@@ -120140,12 +120242,7 @@ function runCli() {
       process.exit(1);
     });
   } else if (cmd === "tui") {
-    const tuiArgs = parseServeArgs(args.slice(1));
-    Promise.resolve().then(() => (init_app(), app_exports)).then((m) => m.runTui(tuiArgs)).catch((err) => {
-      process.stderr.write(`zcode-proxy: tui failed: ${err.stack ?? String(err)}
-`);
-      process.exit(1);
-    });
+    launchTui(parseServeArgs(args.slice(1)));
   } else if (cmd === "serve" || cmd.endsWith(".yaml") || cmd.endsWith(".yml")) {
     const serveArgs = cmd === "serve" ? parseServeArgs(args.slice(1)) : parseServeArgs(args);
     serve(serveArgs.configPath, serveArgs.debug);
@@ -120160,14 +120257,24 @@ function runCli() {
     process.exit(1);
   }
 }
+function launchTui(args) {
+  Promise.resolve().then(() => (init_app(), app_exports)).then((m) => m.runTui(args)).catch((err) => {
+    process.stderr.write(`zcode-proxy: tui failed: ${err.stack ?? String(err)}
+`);
+    process.exit(1);
+  });
+}
 function printHelp() {
   console.log(`zcode-proxy ${VERSION}
 
 Usage:
-  zcode-proxy serve [config.yaml]   Start the proxy server (default)
+  zcode-proxy                       Interactive terminal UI (default):
+                                    login, start/stop, live logs
+  zcode-proxy [debug] [config.yaml] Same, with debug diagnostics / custom config
+  zcode-proxy serve [config.yaml]   Start the proxy server (classic CLI mode)
   zcode-proxy serve debug [config.yaml]
                                     Start with verbose per-request diagnostics
-  zcode-proxy tui [config.yaml]     Interactive terminal UI (login / start-stop / live logs)
+  zcode-proxy --cli                 Classic CLI mode (bare --cli = serve)
   zcode-proxy android               Android entry: proxy + localhost control listener
   zcode-proxy auth login <provider> Login via OAuth (provider: zai | bigmodel)
   zcode-proxy auth login <provider> --import
@@ -120179,9 +120286,9 @@ Usage:
   zcode-proxy help                  Show this help
 
 Examples:
-  zcode-proxy                       Start server with default config.yaml
-  zcode-proxy serve debug           Start with extra debug logging
-  zcode-proxy tui                   Terminal UI: login, start/stop, live logs
+  zcode-proxy                       Terminal UI: login, start/stop, live logs
+  zcode-proxy debug                 Terminal UI with per-request diagnostics
+  zcode-proxy serve debug           CLI: start with extra debug logging
   zcode-proxy auth login bigmodel   OAuth login for Bigmodel
   zcode-proxy auth login bigmodel --import
                                     Import existing key from ZCode config
@@ -120222,6 +120329,9 @@ async function serve(configPath, debug) {
   console.log(`  plan: ${config.plan}`);
   console.log(`  models: ${config.models.length} available`);
   if (config.responses.enabled) console.log(`  /v1/responses: ON`);
+  if (config.async.enabled) {
+    console.log(config.plan === "coding-plan" ? `  /async/v1/*: ON` : `  /async/v1/*: OFF (requires plan "coding-plan")`);
+  }
   if (debug) console.log(`  debug: ON`);
   process.on("SIGINT", () => {
     console.log("\nShutting down...");
