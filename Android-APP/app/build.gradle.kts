@@ -77,3 +77,23 @@ dependencies {
     implementation("androidx.browser:browser:1.8.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 }
+
+// server.cjs is build output (gitignored), generated from ../../src by
+// "bun run build:android-bundle" + copy — release CI regenerates it before
+// packaging; local builds must too. Fail at build time rather than shipping
+// an APK whose NodeRunner dies on first launch over a missing bundle.
+val serverBundleFile = file("src/main/assets/server_bundle/server.cjs")
+val checkServerBundle = tasks.register("checkServerBundle") {
+    doLast {
+        val size = if (serverBundleFile.exists()) serverBundleFile.length() else 0L
+        if (size < 1_000_000L) {
+            throw GradleException(
+                "server_bundle/server.cjs is missing or implausible ($size bytes). " +
+                    "Generate it first:\n" +
+                    "  bun run build:android-bundle\n" +
+                    "  cp dist/android/server.cjs Android-APP/app/src/main/assets/server_bundle/server.cjs"
+            )
+        }
+    }
+}
+tasks.named("preBuild") { dependsOn(checkServerBundle) }
