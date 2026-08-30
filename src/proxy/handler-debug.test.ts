@@ -8,6 +8,14 @@ import { proxyRequest } from "./handler.js";
 import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
 import { AuthManager } from "../auth/manager.js";
 
+/** AuthManager with a preset oauth credential (replaces the removed apikey mode). */
+function oauthAuth(key = "testkey.testsecret"): AuthManager {
+  const [apiKey, secret] = key.split(".");
+  const auth = new AuthManager();
+  auth.setOAuthCredential(secret ? { apiKey, secret, provider: "zai" } : { apiKey, provider: "zai" });
+  return auth;
+}
+
 const IDENTITY: ProxyIdentity = {
   appVersion: "test-1.0.0",
   sourceTitle: "cli",
@@ -16,7 +24,7 @@ const IDENTITY: ProxyIdentity = {
 
 const TEST_CONFIG: ProxyConfig = {
   server: { port: 8080, host: "0.0.0.0" },
-  auth: { mode: "apikey", apiKey: "testkey.testsecret" },
+  auth: {},
   provider: "zai",
   plan: "coding-plan",
   providers: {
@@ -97,7 +105,7 @@ function anthropicOk(): Response {
 
 describe("proxyRequest debug mode", () => {
   it("emits debug lines when debug=true (upstream URL, headers, response status)", async () => {
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}');
 
     const lines = await captureConsoleLog(async () => {
@@ -117,7 +125,7 @@ describe("proxyRequest debug mode", () => {
   });
 
   it("redacts sensitive request headers (x-api-key) in debug output", async () => {
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
 
     const lines = await captureConsoleLog(async () => {
@@ -135,7 +143,7 @@ describe("proxyRequest debug mode", () => {
   });
 
   it("does not emit debug lines when debug is omitted (default off)", async () => {
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
 
     const lines = await captureConsoleLog(async () => {
@@ -151,7 +159,7 @@ describe("proxyRequest debug mode", () => {
   });
 
   it("emits ERROR debug line on upstream failure", async () => {
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = makeClientReq('{"model":"glm-4.6","messages":[]}');
 
     const lines = await captureConsoleLog(async () => {
@@ -168,7 +176,7 @@ describe("proxyRequest debug mode", () => {
   });
 
   it("emits an OpenAI→Anthropic translation note for OpenAI clients on coding-plan", async () => {
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -192,7 +200,7 @@ describe("proxyRequest debug mode", () => {
   });
 
   it("emits observe-only client identity inference without stabilizing x-session-id", async () => {
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const body = '{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}';
     const seenSessions: string[] = [];
 
@@ -218,7 +226,7 @@ describe("proxyRequest debug mode", () => {
   });
 
   it("stabilizes x-session-id in enforce mode for the same inferred session", async () => {
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const body = '{"model":"glm-4.6","messages":[{"role":"user","content":"Hi"}]}';
     const seenSessions: string[] = [];
     const config: ProxyConfig = { ...TEST_CONFIG, clientIdentity: { mode: "enforce", ttlSeconds: 900, maxSessions: 1024 } };
@@ -240,7 +248,7 @@ describe("proxyRequest debug mode", () => {
   });
 
   it("emits client identity debug line even when no session can be inferred", async () => {
-    const auth = new AuthManager({ mode: "apikey", provider: "zai", apiKey: "testkey.testsecret" });
+    const auth = oauthAuth();
     const lines = await captureConsoleLog(async () => {
       await proxyRequest(makeClientReq('{"model":"glm-4.6","messages":[]}'), "anthropic", {
         config: TEST_CONFIG,

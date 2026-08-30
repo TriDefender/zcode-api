@@ -110479,7 +110479,7 @@ async function runClaimCli(config, mode2) {
   const cred = await loadCredential();
   const jwt = cred?.jwt;
   if (!jwt) {
-    console.error("Claim requires oauth mode (no JWT stored). Run: zcode-proxy auth login <zai|bigmodel>");
+    console.error("Claim requires a logged-in oauth credential (no JWT stored). Run: zcode-proxy auth login <zai|bigmodel>");
     process.exit(1);
   }
   const client = createClaimClient({
@@ -110566,7 +110566,7 @@ var init_runtime = __esm({
       quota_exhausted: "daily claim quota exhausted",
       invalid_request: "invalid request",
       captcha: "captcha verification failed",
-      login_required: "not logged in (oauth mode required)",
+      login_required: "not logged in",
       http_error: "HTTP error",
       unknown: "unknown failure"
     };
@@ -110590,7 +110590,6 @@ var ENV = {
   PORT: "ZCODE_PROXY_PORT",
   PROXY_API_KEY: "ZCODE_PROXY_API_KEY",
   PROVIDER: "ZCODE_PROVIDER",
-  API_KEY: "ZCODE_API_KEY",
   APP_VERSION: "ZCODE_APP_VERSION",
   SOURCE_TITLE: "ZCODE_SOURCE_TITLE",
   REFERER_ORIGIN: "ZCODE_REFERER_ORIGIN",
@@ -110659,20 +110658,16 @@ function loadConfig(path2) {
   const port = resolvePort(process.env[ENV.PORT] ?? parsed?.server?.port);
   const host2 = typeof parsed?.server?.host === "string" ? parsed.server.host : DEFAULTS.HOST;
   const proxyApiKey = process.env[ENV.PROXY_API_KEY] ?? parsed?.auth?.proxyApiKey;
-  const mode2 = parsed?.auth?.mode === "oauth" ? "oauth" : "apikey";
-  const apiKey = process.env[ENV.API_KEY] ?? parsed?.auth?.apiKey;
   const oauthCredentialsPath = parsed?.auth?.oauthCredentialsPath;
   const provider = resolveProvider(process.env[ENV.PROVIDER] ?? parsed?.provider);
   const plan = resolvePlan(parsed?.plan);
   const zai = {
     anthropicBase: parsed?.providers?.zai?.anthropicBase ?? DEFAULTS.ZAI_ANTHROPIC_BASE,
-    openaiBase: parsed?.providers?.zai?.openaiBase ?? DEFAULTS.ZAI_OPENAI_BASE,
-    credential: parsed?.providers?.zai?.credential
+    openaiBase: parsed?.providers?.zai?.openaiBase ?? DEFAULTS.ZAI_OPENAI_BASE
   };
   const bigmodel = {
     anthropicBase: parsed?.providers?.bigmodel?.anthropicBase ?? DEFAULTS.BIGMODEL_ANTHROPIC_BASE,
-    openaiBase: parsed?.providers?.bigmodel?.openaiBase ?? DEFAULTS.BIGMODEL_OPENAI_BASE,
-    credential: parsed?.providers?.bigmodel?.credential
+    openaiBase: parsed?.providers?.bigmodel?.openaiBase ?? DEFAULTS.BIGMODEL_OPENAI_BASE
   };
   const defaultModel = typeof parsed?.defaultModel === "string" ? parsed.defaultModel : DEFAULTS.DEFAULT_MODEL;
   const models = Array.isArray(parsed?.models) ? parsed.models : [defaultModel];
@@ -110695,7 +110690,7 @@ function loadConfig(path2) {
   const clientSigning = resolveClientSigningConfig(parsed?.clientSigning);
   const config = {
     server: { port, host: host2 },
-    auth: { proxyApiKey, mode: mode2, apiKey, oauthCredentialsPath },
+    auth: { proxyApiKey, oauthCredentialsPath },
     provider,
     plan,
     providers: { zai, bigmodel },
@@ -110888,15 +110883,6 @@ function validate(config) {
   if (config.server.port < 1 || config.server.port > 65535) {
     throw new Error(`server.port ${config.server.port} is out of range (1-65535)`);
   }
-  if (config.auth.mode === "apikey") {
-    const hasGlobal = typeof config.auth.apiKey === "string" && config.auth.apiKey.length > 0;
-    const hasProvider = typeof config.providers[config.provider].credential === "string";
-    if (!hasGlobal && !hasProvider) {
-      throw new Error(
-        `auth.apiKey is required when auth.mode is "apikey" (or set providers.${config.provider}.credential)`
-      );
-    }
-  }
   if (!config.models.includes(config.defaultModel)) {
     config.models.push(config.defaultModel);
   }
@@ -110908,20 +110894,13 @@ var EXAMPLE_CONFIG_YAML = `server:
   host: "0.0.0.0"
 
 auth:
-  # "apikey"  = use a pre-obtained API key directly
-  # "oauth"   = use OAuth login flow (run \`bun run src/index.ts auth login\` first)
-  mode: apikey
-
-  # For apikey mode:
-  #   Z.AI:     "yourApiKey.yourSecretKey"
-  #   Bigmodel: "yourApiKey"
-  apiKey: "YOUR_API_KEY_HERE"
-
   # Key that clients must provide to use the proxy.
   # Set to null/omit to disable client auth.
   proxyApiKey: "your-proxy-secret"
 
-  # For oauth mode (path to stored credentials from login flow):
+  # Upstream credentials come from the OAuth login flow \u2014 run this first:
+  #   bun run src/index.ts auth login <zai|bigmodel>
+  # Path to the stored credentials (default shown):
   # oauthCredentialsPath: "~/.zcode-proxy/credentials.json"
 
 # Which upstream provider to use: "zai" or "bigmodel"
@@ -111009,56 +110988,23 @@ logging:
   level: info
 `;
 
-// src/auth/apikey.ts
-function createApiKeyCredential(provider, key) {
-  if (!key || key.trim().length === 0) {
-    throw new Error("API key must not be empty");
-  }
-  const trimmed = key.trim();
-  const dotIdx = trimmed.indexOf(".");
-  if (dotIdx > 0 && dotIdx < trimmed.length - 1) {
-    const apiKey = trimmed.slice(0, dotIdx);
-    const secret = trimmed.slice(dotIdx + 1);
-    return { apiKey, secret, provider };
-  }
-  return { apiKey: trimmed, provider };
-}
-
 // src/auth/manager.ts
 var AuthManager = class {
-  mode;
-  provider;
-  cachedApiKeyCred = null;
   oauthCred = null;
-  constructor(opts) {
-    this.mode = opts.mode;
-    this.provider = opts.provider;
-    if (opts.mode === "apikey" && opts.apiKey) {
-      this.cachedApiKeyCred = createApiKeyCredential(this.provider, opts.apiKey);
-    }
-  }
   /** Returns the current credential, refreshing if necessary. */
   async getCredential() {
-    if (this.mode === "apikey") {
-      if (this.cachedApiKeyCred) return this.cachedApiKeyCred;
-      throw new Error("apikey mode configured but no credential was set");
-    }
     if (this.oauthCred) {
       if (this.oauthCred.expiresAt && Date.now() >= this.oauthCred.expiresAt) {
         this.oauthCred = null;
-        throw new Error("OAuth credential expired; re-authentication required (T9/T10 not yet implemented)");
+        throw new Error("OAuth credential expired; re-authentication required \u2014 run: zcode-proxy auth login");
       }
       return this.oauthCred;
     }
-    throw new Error("OAuth credential not available \u2014 run login flow first (T9/T10 not yet implemented)");
+    throw new Error("OAuth credential not available \u2014 run: zcode-proxy auth login");
   }
-  /** Set the OAuth credential (used by T9/T10 OAuth flow). */
+  /** Set the OAuth credential (used by the `auth login` flow). */
   setOAuthCredential(cred) {
     this.oauthCred = cred;
-  }
-  /** Current auth mode. */
-  getMode() {
-    return this.mode;
   }
 };
 
@@ -117656,7 +117602,7 @@ async function resolveCredential(opts) {
       response: errorResponse(
         400,
         "async_credentials_unavailable",
-        "async endpoints require oauth mode (credential lacks JWT). Re-login via `auth login` or use sync /v1/* endpoints."
+        "async endpoints require a logged-in oauth credential (JWT missing). Re-run `auth login` or use sync /v1/* endpoints."
       )
     };
   }
@@ -118928,31 +118874,25 @@ async function serve(configPath, debug) {
     (0, import_node_fs5.writeFileSync)(path2, EXAMPLE_CONFIG_YAML, "utf-8");
     ensureDeviceMidInConfig(path2);
     console.log(`Created ${path2} from bundled template.`);
-    console.log(`Edit auth.apiKey, or run: zcode-proxy auth login <zai|bigmodel>
+    console.log(`Run: zcode-proxy auth login <zai|bigmodel>
 `);
   }
   const config = loadConfig(path2);
-  const auth = new AuthManager({
-    mode: config.auth.mode,
-    provider: config.provider,
-    apiKey: config.auth.apiKey ?? config.providers[config.provider].credential
-  });
-  if (config.auth.mode === "oauth") {
-    const cred = await loadCredential();
-    if (!cred) {
-      console.error("Not logged in. Run: zcode-proxy auth login " + config.provider);
-      process.exit(1);
-    }
-    auth.setOAuthCredential(cred);
+  const auth = new AuthManager();
+  const cred = await loadCredential();
+  if (!cred) {
+    console.error("Not logged in. Run: zcode-proxy auth login " + config.provider);
+    process.exit(1);
   }
-  if (debug) printDebugBanner(config, path2);
+  auth.setOAuthCredential(cred);
+  if (debug) printDebugBanner(config, path2, cred);
   const server = await startServer(buildServerOptions(config, auth, debug));
   const url2 = `http://${server.hostname}:${server.port}`;
   console.log(`zcode-proxy listening on ${url2}`);
   if (config.plan === "start-plan") {
     Promise.resolve().then(() => (init_captcha(), captcha_exports)).then((m) => m.startCaptchaPool(config.identity.appVersion)).catch((err) => console.error(`[captcha] pool warmup failed: ${err.message}`));
   }
-  if (config.claim.enabled && config.claim.auto && config.auth.mode === "oauth") {
+  if (config.claim.enabled && config.claim.auto) {
     Promise.resolve().then(() => (init_runtime(), runtime_exports)).then((m) => {
       m.startAutoClaim(config, auth);
       console.log(`  claim: auto ON (poll ${Math.round(config.claim.pollIntervalMs / 1e3)}s)`);
@@ -118960,7 +118900,6 @@ async function serve(configPath, debug) {
   }
   console.log(`  provider: ${config.provider}`);
   console.log(`  plan: ${config.plan}`);
-  console.log(`  auth mode: ${config.auth.mode}`);
   console.log(`  models: ${config.models.length} available`);
   if (config.responses.enabled) console.log(`  /v1/responses: ON`);
   if (debug) console.log(`  debug: ON`);
@@ -119007,19 +118946,13 @@ async function runAndroid() {
     logBuffer.push("[warn] " + args.join(" "));
     origWarn(...args);
   };
-  let auth = new AuthManager({
-    mode: config.auth.mode,
-    provider: config.provider,
-    apiKey: config.auth.apiKey ?? config.providers[config.provider].credential
-  });
+  const auth = new AuthManager();
   const serverRef = { current: null };
   async function startProxy() {
     if (serverRef.current) return { ok: false, error: "already_running" };
-    if (config.auth.mode === "oauth") {
-      const cred = await loadCredential().catch(() => null);
-      if (!cred) return { ok: false, error: "not_logged_in" };
-      auth.setOAuthCredential(cred);
-    }
+    const cred = await loadCredential().catch(() => null);
+    if (!cred) return { ok: false, error: "not_logged_in" };
+    auth.setOAuthCredential(cred);
     try {
       const s = await startServer(buildServerOptions(config, auth, false));
       serverRef.current = s;
@@ -119045,17 +118978,12 @@ async function runAndroid() {
     if (serverRef.current) return { ok: false, error: "stop_proxy_first" };
     if (changes.provider) config.provider = changes.provider;
     if (changes.plan) config.plan = changes.plan;
-    auth = new AuthManager({
-      mode: config.auth.mode,
-      provider: config.provider,
-      apiKey: config.auth.apiKey ?? config.providers[config.provider].credential
-    });
     updateConfigYaml(path2, { provider: config.provider, plan: config.plan });
     console.log(`config updated: provider=${config.provider} plan=${config.plan}`);
     return { ok: true, provider: config.provider, plan: config.plan };
   }
   console.log("control listener ready; proxy stopped \u2014 use startProxy command to start");
-  if (config.claim.enabled && config.claim.auto && config.auth.mode === "oauth") {
+  if (config.claim.enabled && config.claim.auto) {
     Promise.resolve().then(() => (init_runtime(), runtime_exports)).then((m) => {
       m.startAutoClaim(config, auth);
       console.log(`[claim] auto ON (poll ${Math.round(config.claim.pollIntervalMs / 1e3)}s; waits for login)`);
@@ -119095,9 +119023,8 @@ function updateConfigYaml(path2, fields) {
   parsed.plan = fields.plan;
   (0, import_node_fs5.writeFileSync)(path2, (0, import_yaml2.stringify)(parsed), "utf-8");
 }
-function printDebugBanner(config, path2) {
-  const cred = config.providers[config.provider].credential ?? config.auth.apiKey;
-  const credShape = cred ? `${cred.slice(0, 6)}...${cred.slice(-4)} (${cred.length} chars)` : "(none \u2014 oauth)";
+function printDebugBanner(config, path2, cred) {
+  const credShape = cred ? `${cred.apiKey.slice(0, 6)}...${cred.apiKey.slice(-4)} (${cred.apiKey.length} chars)` : "(none)";
   const active = config.providers[config.provider];
   console.log("=== zcode-proxy DEBUG MODE ===");
   console.log(`  config file: ${path2}`);

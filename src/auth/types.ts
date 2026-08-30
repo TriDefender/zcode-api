@@ -5,9 +5,6 @@
  */
 import type { ProviderId } from "../provider/types.js";
 
-/** How the proxy obtains the upstream credential. */
-export type AuthMode = "apikey" | "oauth";
-
 /** A resolved credential ready to be injected into upstream requests. */
 export interface Credential {
   /** The API key portion (e.g. Z.AI API key id, or Bigmodel API key). */

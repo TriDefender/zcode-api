@@ -8,6 +8,14 @@ import { hkdfSync } from "node:crypto";
 import { proxyRequest } from "./handler.js";
 import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
 import { AuthManager } from "../auth/manager.js";
+
+/** AuthManager with a preset oauth credential (replaces the removed apikey mode). */
+function oauthAuth(key = "testkey.testsecret"): AuthManager {
+  const [apiKey, secret] = key.split(".");
+  const auth = new AuthManager();
+  auth.setOAuthCredential(secret ? { apiKey, secret, provider: "zai" } : { apiKey, provider: "zai" });
+  return auth;
+}
 import { EndpointRoutingService } from "./endpoint-routing.js";
 import { ClientSigningManager } from "./client-signing.js";
 
@@ -19,7 +27,7 @@ const IDENTITY: ProxyIdentity = {
 
 const TEST_CONFIG: ProxyConfig = {
   server: { port: 8080, host: "0.0.0.0" },
-  auth: { mode: "apikey", apiKey: "testkey.testsecret" },
+  auth: {},
   provider: "zai",
   plan: "coding-plan",
   providers: {
@@ -125,7 +133,7 @@ describe("proxyRequest endpoint-routing + client-signing wiring", () => {
 
     const resp = await proxyRequest(anthropicClientReq(), "anthropic", {
       config: TEST_CONFIG,
-      auth: new AuthManager({ mode: "apikey", provider: "zai", apiKey: CRED }),
+      auth: oauthAuth(CRED),
       fetchImpl: Object.assign(async (input: RequestInfo | URL) => {
         capturedUrl = String(input instanceof Request ? input.url : input);
         capturedHeaders = input instanceof Request ? input.headers : new Headers();
@@ -158,7 +166,7 @@ describe("proxyRequest endpoint-routing + client-signing wiring", () => {
       "X-App-Id": "spoofed",
     }), "anthropic", {
       config: TEST_CONFIG,
-      auth: new AuthManager({ mode: "apikey", provider: "zai", apiKey: CRED }),
+      auth: oauthAuth(CRED),
       fetchImpl: Object.assign(async (input: RequestInfo | URL) => {
         capturedUrl = String(input instanceof Request ? input.url : input);
         capturedHeaders = input instanceof Request ? input.headers : new Headers();

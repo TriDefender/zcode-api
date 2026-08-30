@@ -26,7 +26,7 @@ const IDENTITY: ProxyIdentity = {
 
 const TEST_CONFIG: ProxyConfig = {
   server: { port: 8080, host: "0.0.0.0" },
-  auth: { mode: "apikey", apiKey: "testk...ret" },
+  auth: {},
   provider: "zai",
   plan: "start-plan",
   providers: {
@@ -98,7 +98,7 @@ describe("proxyRequest — start-plan resilience (PR #34 review P1/P3)", () => {
       return new Response(ANTHROPIC_OK, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+    const auth = new AuthManager();
     auth.setOAuthCredential({ apiKey: "key-mock", provider: "zai", jwt: "jwt-mock" });
     const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
       method: "POST",
@@ -139,7 +139,7 @@ describe("proxyRequest — start-plan resilience (PR #34 review P1/P3)", () => {
       return new Response(ANTHROPIC_OK, { status: 200, headers: { "content-type": "application/json" } });
     });
 
-    const auth = new AuthManager({ mode: "oauth", provider: "zai" });
+    const auth = new AuthManager();
     auth.setOAuthCredential({ apiKey: "key-mock", provider: "zai", jwt: "jwt-mock" });
     const clientReq = new Request("http://localhost:8080/v1/chat/completions", {
       method: "POST",

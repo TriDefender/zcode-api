@@ -12,20 +12,13 @@ export const EXAMPLE_CONFIG_YAML: string = `server:
   host: "0.0.0.0"
 
 auth:
-  # "apikey"  = use a pre-obtained API key directly
-  # "oauth"   = use OAuth login flow (run \`bun run src/index.ts auth login\` first)
-  mode: apikey
-
-  # For apikey mode:
-  #   Z.AI:     "yourApiKey.yourSecretKey"
-  #   Bigmodel: "yourApiKey"
-  apiKey: "YOUR_API_KEY_HERE"
-
   # Key that clients must provide to use the proxy.
   # Set to null/omit to disable client auth.
   proxyApiKey: "your-proxy-secret"
 
-  # For oauth mode (path to stored credentials from login flow):
+  # Upstream credentials come from the OAuth login flow — run this first:
+  #   bun run src/index.ts auth login <zai|bigmodel>
+  # Path to the stored credentials (default shown):
   # oauthCredentialsPath: "~/.zcode-proxy/credentials.json"
 
 # Which upstream provider to use: "zai" or "bigmodel"

@@ -8,7 +8,7 @@
  *
  * Common pre-flight (B1 fix: validate BEFORE takeTicket so we never leak a ticket
  * on JSON parse / model-missing / translation failures):
- *   1. Verify credential has `jwt` (oauth-only — apikey mode lacks the JWT)
+ *   1. Verify credential has `jwt` (login-captured JWT; absent on imported keys)
  *   2. Read + parse client body (skip for health)
  *   3. Validate required fields + build the Anthropic-format upstream body
  *   4. ONLY THEN takeTicket (any failure above returns 4xx WITHOUT a ticket)
@@ -152,7 +152,7 @@ async function resolveCredential(opts: AsyncHandlerOptions): Promise<{ ok: true;
       response: errorResponse(
         400,
         "async_credentials_unavailable",
-        "async endpoints require oauth mode (credential lacks JWT). Re-login via `auth login` or use sync /v1/* endpoints.",
+        "async endpoints require a logged-in oauth credential (JWT missing). Re-run `auth login` or use sync /v1/* endpoints.",
       ),
     };
   }

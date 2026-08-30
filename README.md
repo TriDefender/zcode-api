@@ -10,7 +10,7 @@ bun install
 
 # Copy and edit config
 cp config.example.yaml config.yaml
-# Edit config.yaml — set your API key
+# Default auth is OAuth — log in first (see Authentication below)
 
 # Start the proxy
 bun run src/index.ts
@@ -21,21 +21,10 @@ bun run src/index.ts /path/to/config.yaml
 
 ## Authentication
 
-### Option 1: Direct API Key (simplest)
+Upstream credentials come exclusively from the OAuth login flow — run
+`auth login` before starting the proxy. There is no apikey mode anymore.
 
-1. Get an API key from [Z.AI](https://z.ai) or [Bigmodel](https://bigmodel.cn)
-2. For Z.AI you need `{apiKey}.{secretKey}` format
-3. For Bigmodel you need `{apiKey}` format
-4. Set it in `config.yaml`:
-
-```yaml
-auth:
-  mode: apikey
-  apiKey: "yourApiKey.yourSecretKey"
-provider: zai  # or bigmodel
-```
-
-### Option 2: OAuth Login (browser-based, both providers)
+### OAuth Login (browser-based, both providers)
 
 ```bash
 # Z.AI server-mediated CLI login (3.10 parity: init/poll at zcode.z.ai, no local callback)
@@ -50,14 +39,13 @@ bun run src/index.ts auth login bigmodel
 #    Bigmodel: receive the browser callback and exchange the auth code
 # 3. Resolve your coding-plan API key automatically
 # 4. Save encrypted credentials to ~/.zcode-proxy/credentials.json
-
-# Then set config.yaml:
-auth:
-  mode: oauth
-provider: zai  # or bigmodel
 ```
 
-### Option 3: Import from ZCode Config (skip OAuth)
+The encrypted credential store is keyed to the machine
+(`homedir-platform-arch` seed, or set `ZCODE_PROXY_CREDENTIAL_SECRET` for a
+portable seed). Then set `provider` in `config.yaml` and start the proxy.
+
+### Import from ZCode Config (skip OAuth)
 
 If you already use the ZCode desktop app, import the API key directly:
 
@@ -82,8 +70,8 @@ bun run src/index.ts auth login bigmodel --import
 ### Async (Off-Peak / Idle Plan)
 
 `/async/*` routes are gated by `async.enabled: true` in config (default `false`).
-They require `auth.mode: oauth` (the off-peak backend needs both the JWT from
-login and the coding-plan API key — apikey-only mode returns 400
+They require a logged-in oauth credential (the off-peak backend needs both the
+JWT from login and the coding-plan API key — a JWT-less credential returns 400
 `async_credentials_unavailable`).
 
 When enabled, requests are routed through ZCode's off-peak ticket-queue backend:
@@ -127,8 +115,8 @@ ZCode 3.10 exposes limited-quota trial plans (e.g. weekend packages) that are
 claimed first-come-first-served and activate at a future time. The proxy can
 grab them for you automatically — it polls the preview endpoint every 5 minutes
 and claims the highest-priority plan the moment the campaign endpoint goes live
-(a 404 before launch is the expected pre-campaign state). Requires
-`auth.mode: oauth` and `identity.appVersion >= 3.10.0`.
+(a 404 before launch is the expected pre-campaign state). Requires a logged-in
+oauth credential and `identity.appVersion >= 3.10.0`.
 
 ```yaml
 claim:
@@ -213,11 +201,10 @@ multi-session autosave (localStorage). Open Settings (⚙) to configure.
 | Field | Env Var | Default | Description |
 |-------|---------|---------|-------------|
 | `server.port` | `ZCODE_PROXY_PORT` | `8080` | Listen port |
-| `auth.apiKey` | `ZCODE_API_KEY` | — | Upstream API key |
 | `auth.proxyApiKey` | `ZCODE_PROXY_API_KEY` | — | Client auth key |
+| `auth.oauthCredentialsPath` | — | `~/.zcode-proxy/credentials.json` | Encrypted credential store from `auth login` |
 | `provider` | `ZCODE_PROVIDER` | `zai` | Upstream provider |
 | `plan` | — | `coding-plan` | Plan tier: `coding-plan` (direct upstream) or `start-plan` (zcode.z.ai gateway + JWT + captcha) |
-| `providers.<p>.credential` | — | — | Per-provider credential override (else uses `auth.apiKey`) |
 | `identity.appVersion` | `ZCODE_APP_VERSION` | `3.10.0` | `User-Agent: ZCode/{version}` |
 | `identity.deviceMid` | `ZCODE_IDENTITY_DEVICE_MID` | auto-generated | Device identity (`X-Device-Mid`); UUIDv4 generated once at first `auth login` / config creation and reused forever |
 | `identity.sourceTitle` | `ZCODE_SOURCE_TITLE` | `cli` | `X-Title: Z Code@{title}` |
@@ -305,21 +292,20 @@ Pull the multi-arch image from GitHub Packages (ghcr.io):
 docker pull ghcr.io/tridefender/zcode-proxy:latest
 ```
 
-Run with env-var configuration (no config file needed):
+Upstream auth is oauth-only, so the container needs the encrypted credential
+store. Log in on the host with a fixed encryption seed (the container cannot
+derive the default machine seed), then mount the store:
 
 ```bash
-docker run --rm -p 8080:8080 \
-  -e ZCODE_API_KEY="yourApiKey.yourSecretKey" \
-  -e ZCODE_PROVIDER=zai \
-  -e ZCODE_PROXY_API_KEY="your-proxy-secret" \
-  ghcr.io/tridefender/zcode-proxy:latest
-```
+# 1. Log in on the host with a portable seed
+ZCODE_PROXY_CREDENTIAL_SECRET="a-long-random-secret" \
+  bun run src/index.ts auth login zai
 
-Or mount a config file:
-
-```bash
+# 2. Point auth.oauthCredentialsPath in config.yaml at the mounted store, then run:
 docker run --rm -p 8080:8080 \
   -v "$(pwd)/config.yaml:/data/config.yaml:ro" \
+  -v "$(HOME)/.zcode-proxy/credentials.json:/data/credentials.json:ro" \
+  -e ZCODE_PROXY_CREDENTIAL_SECRET="a-long-random-secret" \
   ghcr.io/tridefender/zcode-proxy:latest
 ```
 
@@ -329,9 +315,9 @@ Common environment variables (see the Configuration table above for the full lis
 
 | Env Var | Description |
 |---------|-------------|
-| `ZCODE_API_KEY` | Upstream API key (`{apiKey}.{secretKey}` for Z.AI, `{apiKey}` for Bigmodel) |
 | `ZCODE_PROVIDER` | `zai` or `bigmodel` |
 | `ZCODE_PROXY_API_KEY` | Client auth shared secret |
+| `ZCODE_PROXY_CREDENTIAL_SECRET` | Encryption seed for the credential store (must match the seed used at `auth login`) |
 | `ZCODE_PROXY_PORT` | Listen port (default `8080`) |
 
 docker-compose:
@@ -342,10 +328,13 @@ services:
     image: ghcr.io/tridefender/zcode-proxy:latest
     ports:
       - "8080:8080"
+    volumes:
+      - ./config.yaml:/data/config.yaml:ro
+      - ./credentials.json:/data/credentials.json:ro
     environment:
-      ZCODE_API_KEY: "yourApiKey.yourSecretKey"
       ZCODE_PROVIDER: zai
       ZCODE_PROXY_API_KEY: "your-proxy-secret"
+      ZCODE_PROXY_CREDENTIAL_SECRET: "a-long-random-secret"
     restart: unless-stopped
 ```
 
