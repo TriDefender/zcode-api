@@ -10,9 +10,13 @@ bun install
 
 # Copy and edit config
 cp config.example.yaml config.yaml
+<<<<<<< Updated upstream
 
 # Log in (OAuth, browser-based)
 bun run src/index.ts auth login zai        # or: bigmodel
+=======
+# Log in first via OAuth (see Authentication below)
+>>>>>>> Stashed changes
 
 # Start the proxy
 bun run src/index.ts
@@ -62,9 +66,9 @@ bun run src/index.ts auth login bigmodel --import
 | `POST` | `/v1/chat/completions` | OpenAI-compatible chat completions (streaming + non-streaming) |
 | `POST` | `/v1/messages` | Anthropic-format messages (streaming + non-streaming) |
 | `POST` | `/v1/responses` | OpenAI Responses API (Codex CLI / Agents SDK; translates Responses → Chat → Anthropic upstream) |
-| `POST` | `/async/v1/messages` | **Async (off-peak)** Anthropic-format — routes to free idle-compute pool (oauth-only) |
+| `POST` | `/async/v1/messages` | **Async (off-peak)** Anthropic-format — routes to free idle-compute pool |
 | `POST` | `/async/v1/chat/completions` | **Async (off-peak)** OpenAI-format — same backend, translates request/response |
-| `GET`  | `/async/v1/health` | Probe off-peak queue availability (oauth-only) |
+| `GET`  | `/async/v1/health` | Probe off-peak queue availability |
 | `GET` | `/v1/models` | List available models |
 | `GET` | `/webui` | Built-in chat web UI (served without the proxy key; see below) |
 | `GET` | `/health` | Health check |
@@ -72,8 +76,9 @@ bun run src/index.ts auth login bigmodel --import
 ### Async (Off-Peak / Idle Plan)
 
 `/async/*` routes are gated by `async.enabled: true` in config (default `false`).
-They require a logged-in oauth credential (the off-peak backend needs both the
-JWT from login and the coding-plan API key — a JWT-less credential returns 400
+They require a logged-in credential that carries a JWT (the off-peak backend
+needs both the JWT from login and the coding-plan API key — a JWT-less
+credential, e.g. from `auth login --import`, returns 400
 `async_credentials_unavailable`).
 
 When enabled, requests are routed through ZCode's off-peak ticket-queue backend:
@@ -118,7 +123,7 @@ claimed first-come-first-served and activate at a future time. The proxy can
 grab them for you automatically — it polls the preview endpoint every 5 minutes
 and claims the highest-priority plan the moment the campaign endpoint goes live
 (a 404 before launch is the expected pre-campaign state). Requires a logged-in
-oauth credential and `identity.appVersion >= 3.10.0`.
+credential and `identity.appVersion >= 3.10.0`.
 
 ```yaml
 claim:
@@ -241,7 +246,7 @@ file (best-effort; never affects handling). Requires a TTY with at least
 | `identity.refererOrigin` | `ZCODE_REFERER_ORIGIN` | `https://zcode.z.ai` | `HTTP-Referer` URL |
 | `endpointRouting.enabled` | `ZCODE_ENDPOINT_ROUTING` | `true` | Server-controlled upstream URL remapping via `zcode.z.ai/api/v1/agent/configs` (mirrors ZCode's `ProviderEndpointRoutingService`; fail-open) |
 | `clientSigning.enabled` | `ZCODE_CLIENT_SIGNING` | `true` | Client request signing V4 (Ed25519 + proof-of-work, gate-driven; only activates when the server sets `codingPlanSignature.enable=true`; fail-open) |
-| `claim.enabled` | `ZCODE_CLAIM_ENABLED` | `false` | Weekend-plan auto-claim: poll `zcode.z.ai/api/v1/zcode-plan/billing/preview` and claim trial packages (oauth-only; see below) |
+| `claim.enabled` | `ZCODE_CLAIM_ENABLED` | `false` | Weekend-plan auto-claim: poll `zcode.z.ai/api/v1/zcode-plan/billing/preview` and claim trial packages (see below) |
 | config file path | `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file to load on `serve` |
 
 Start-plan captcha tunables (env only): `ZCODE_CAPTCHA_RETRIES` (per-token solve retries), `CAPTCHA_POOL_MIN` / `CAPTCHA_POOL_MAX` (pre-solved token pool sizing).
@@ -270,13 +275,13 @@ Route Detection + Plan-aware Routing (both plans post Anthropic upstream, v2.4+)
       │
       ▼
 Body Transformation (ZCode-equivalent mutations)
-  Anthropic upstream      → cache_control on last message + metadata.user_id (oauth)
+  Anthropic upstream      → cache_control on last message + metadata.user_id
   start-plan              → prepend ZCode system messages
       │
       ▼
 Auth + Identity Header Injection
   Anthropic upstream:      x-api-key: {credential} + anthropic-version
-  start-plan (oauth):      Authorization: Bearer {jwt}
+  start-plan:              Authorization: Bearer {jwt}
   Both:                    User-Agent: ZCode/{version} + X-ZCode-* + trace headers
       │
       ▼
@@ -322,9 +327,9 @@ Pull the multi-arch image from GitHub Packages (ghcr.io):
 docker pull ghcr.io/tridefender/zcode-proxy:latest
 ```
 
-Upstream auth is oauth-only, so the container needs the encrypted credential
-store. Log in on the host with a fixed encryption seed (the container cannot
-derive the default machine seed), then mount the store:
+Upstream credentials come only from `auth login`, so the container needs the
+encrypted credential store. Log in on the host with a fixed encryption seed
+(the container cannot derive the default machine seed), then mount the store:
 
 ```bash
 # 1. Log in on the host with a portable seed

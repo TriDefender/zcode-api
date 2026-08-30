@@ -2,7 +2,7 @@
 
 This document explains how to build the Android APK from source. The Android
 app wraps the TypeScript proxy server (bundled as a Node.js CJS bundle) inside
-a Kotlin shell; OAuth login happens in an embedded Android System WebView.
+a Kotlin shell; OAuth login happens in the system browser via Custom Tabs.
 
 ## Prerequisites
 
@@ -63,23 +63,27 @@ cd Android-APP
 ## OAuth flow
 
 1. App taps "Login with {provider}" → `ControlClient.startOAuth(provider)`.
-2. Node side starts the localhost callback server (port
-   `ZCODE_OAUTH_CALLBACK_PORT`) and returns the authorize URL.
-3. App launches `OAuthWebViewActivity` with the URL; Android System WebView
-   loads it.
-4. User authenticates against chat.z.ai / bigmodel.cn in-page.
-5. Provider redirects to `http://127.0.0.1:<port>/oauth/callback/...?authCode=...&state=...`.
-6. `WebViewClient.shouldOverrideUrlLoading` intercepts (host == `127.0.0.1`)
-   and forwards the code + state via `ControlClient.deliverOAuthCode`.
-7. Node validates state, exchanges at `zcode.z.ai/api/v1/oauth/token`, persists
-   the credential.
+2. Node starts the OAuth flow and returns the authorize URL:
+   - **zai** — server-mediated CLI flow (`/oauth/cli/init` +
+     `/oauth/cli/poll/{flow_id}` at zcode.z.ai); no localhost callback.
+   - **bigmodel** — auth-code flow; Node also starts the localhost callback
+     server (port `ZCODE_OAUTH_CALLBACK_PORT`).
+3. App opens the URL with `CustomTabsIntent.launchUrl()` — the system browser
+   handles login (OAuth providers block embedded WebViews).
+4. User authenticates in the browser:
+   - **zai**: Node polls the server until authorization completes.
+   - **bigmodel**: the provider redirects to
+     `http://127.0.0.1:<port>/oauth/callback/...`, which Node's callback
+     server receives directly (no Kotlin-side interception).
+5. Node exchanges the code / resolves the coding-plan API key and persists the
+   encrypted credential; the app reflects login state via `status`.
 
 ## Known limitations (v1)
 
 - **Start-plan tier untested on Android** — the in-process happy-dom captcha
   solver is bundled into `server.cjs` (jsdom was removed from the project
   entirely), but the tier has not been validated on-device. Coding-plan
-  (direct upstream API key) is the supported tier on Android v1.
+  (direct upstream) is the supported tier on Android v1.
 - **Not Play Store-distributed** — APK is sideload-only. Play Store rejects apps
   that launch external binaries from `jniLibs/`.
 - **arm64-v8a only** — no x86 / armeabi-v7a support. Covers 99%+ of modern
