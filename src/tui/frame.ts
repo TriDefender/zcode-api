@@ -76,12 +76,15 @@ const CYAN = "36";
 const BOLD = "1";
 const LABEL_W = 12; // fixed label column inside cards
 
-// Solid filled buttons (classic pressed-block look): background + fg codes.
-// Green = start/confirm, red = destructive, blue = primary/selected, gray = secondary.
-const BTN_GREEN = "1;30;42";
-const BTN_RED = "1;97;41";
-const BTN_BLUE = "1;97;44";
-const BTN_GRAY = "97;100";
+// Solid filled buttons — GitHub dark-theme button palette via 24-bit
+// truecolor SGR (Windows Terminal / mintty / modern Unix terminals render it
+// natively; a legacy terminal falls back to its defaults with text intact).
+//   green  #238636 success   red  #da3633 danger
+//   blue   #1f6feb primary   gray #30363d secondary (text #c9d1d9)
+const BTN_GREEN = "38;2;255;255;255;48;2;35;134;54";
+const BTN_RED = "38;2;255;255;255;48;2;218;54;51";
+const BTN_BLUE = "38;2;255;255;255;48;2;31;111;235";
+const BTN_GRAY = "38;2;201;209;217;48;2;48;54;61";
 const BTN_SELECTED = BTN_BLUE;
 
 function paint(code: string, t: string): string {
