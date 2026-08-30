@@ -84,8 +84,11 @@ export async function runTui(args: ServeArgs): Promise<void> {
   };
 
   // --- console interception → log pane (Android-entry pattern) ------------
-  const origLog = console.log;
-  const origWarn = console.warn;
+  // ALL console methods are intercepted, not just log/warn/error: guest
+  // scripts (the captcha SDK) probe the full console surface, and anything
+  // left unpatched would bypass the pane and write raw into the alt-screen
+  // frame. Originals are kept for the pre-TUI error path and restore.
+  const origConsole: Record<string, (...a: unknown[]) => void> = {};
   const origError = console.error;
   const logFile = process.env.ZCODE_TUI_LOGFILE;
   const emit = (text: string, level: "info" | "warn" | "error"): void => {
@@ -95,9 +98,20 @@ export async function runTui(args: ServeArgs): Promise<void> {
     }
     scheduleRender();
   };
-  console.log = (...a: unknown[]) => emit(a.map(String).join(" "), "info");
-  console.warn = (...a: unknown[]) => emit("[warn] " + a.map(String).join(" "), "warn");
-  console.error = (...a: unknown[]) => emit("[error] " + a.map(String).join(" "), "error");
+  const consoleOwner = console as unknown as Record<string, unknown>;
+  for (const key of Object.keys(console)) {
+    const fn = consoleOwner[key];
+    if (typeof fn !== "function") continue;
+    origConsole[key] = fn as (...a: unknown[]) => void;
+    consoleOwner[key] = (...a: unknown[]) => {
+      const level = key === "error" ? "error" : key === "warn" ? "warn" : "info";
+      const prefix = key === "error" ? "[error] " : key === "warn" ? "[warn] " : "";
+      emit(prefix + a.map(String).join(" "), level);
+    };
+  }
+  const restoreConsole = (): void => {
+    for (const [key, fn] of Object.entries(origConsole)) consoleOwner[key] = fn;
+  };
 
   // --- rendering -----------------------------------------------------------
   let renderTimer: ReturnType<typeof setTimeout> | null = null;
@@ -419,9 +433,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
   }
   function cleanup(): void {
     restore();
-    console.log = origLog;
-    console.warn = origWarn;
-    console.error = origError;
+    restoreConsole();
     try { serverRef.current?.stop(false); } catch { /* already closed */ }
   }
   process.on("SIGINT", quit);

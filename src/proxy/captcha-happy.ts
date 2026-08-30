@@ -1555,8 +1555,35 @@ function waitFor(cond, timeoutMs = 15_000, intervalMs = 40) {
   });
 }
 
+// ── Host console shield ────────────────────────────────────────────────────
+// The FeiLin/Aliyun SDK escapes the VM realm for bare-identifier lookups and
+// calls the HOST console with browser-style "%c" formatting — invisible
+// devtools noise that loops ~1 line/sec while a solve runs. It probes every
+// console method (log/debug/info/dir/table/group/time/…), so the shield wraps
+// ALL function-valued console keys and swallows exactly the "%c"-styled
+// lines; every other log passes through untouched. Display-only: it never
+// touches solving or rejections (anti-pattern #4 is about callbacks, not
+// logging). Skipped under CAPTCHA_DEBUG so guest logs stay inspectable.
+const CONSOLE_SHIELD_NOISE = (a: unknown): boolean =>
+  typeof a === "string" && (a.startsWith("%c") || a.includes("font-size:0;color:transparent"));
+let consoleShieldInstalled = false;
+export function installGuestConsoleShield(): void {
+  if (consoleShieldInstalled || process.env.CAPTCHA_DEBUG) return;
+  consoleShieldInstalled = true;
+  const owner = console as unknown as Record<string, unknown>;
+  for (const m of Object.keys(owner)) {
+    const orig = owner[m];
+    if (typeof orig !== "function") continue;
+    owner[m] = (...args: unknown[]) => {
+      if (args.some(CONSOLE_SHIELD_NOISE)) return;
+      return (orig as (...a: unknown[]) => void)(...args);
+    };
+  }
+}
+
 // ── createDom ──────────────────────────────────────────────────────────────
 async function createDom(region, prefix) {
+  installGuestConsoleShield();
   let cookies = [];
   const now = Date.now();
   if (_cookieCache.ts > 0 && now - _cookieCache.ts < COOKIE_CACHE_TTL_MS) {
