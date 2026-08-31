@@ -924,8 +924,11 @@ function applyPolyfills(w) {
       interval = 16;
     };
 
-  w.requestIdleCallback = w.requestIdleCallback || ((cb) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 10 }), 1));
-  w.cancelIdleCallback = w.cancelIdleCallback || ((id) => clearTimeout(id));
+  // Window-registry timers explicitly: these callbacks only touch the window
+  // and must die with it (they'd otherwise survive destroyDom via the dual
+  // dispatcher's host lane).
+  w.requestIdleCallback = w.requestIdleCallback || ((cb) => w.setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 10 }), 1));
+  w.cancelIdleCallback = w.cancelIdleCallback || ((id) => w.clearTimeout(id));
 
   w.matchMedia =
     w.matchMedia ||
@@ -1216,8 +1219,8 @@ function applyPolyfills(w) {
       }
     };
 
-  w.requestAnimationFrame = w.requestAnimationFrame || ((cb) => setTimeout(() => cb(Date.now()), 16));
-  w.cancelAnimationFrame = w.cancelAnimationFrame || ((id) => clearTimeout(id));
+  w.requestAnimationFrame = w.requestAnimationFrame || ((cb) => w.setTimeout(() => cb(Date.now()), 16));
+  w.cancelAnimationFrame = w.cancelAnimationFrame || ((id) => w.clearTimeout(id));
 
   try {
     Object.defineProperty(w.document, "hidden", { value: false, configurable: true });
@@ -1541,7 +1544,9 @@ function simulateBehavior(w, durationMs = 600) {
     i += 1;
     const done = Date.now() - start >= durationMs;
     if (i <= steps && !done) {
-      setTimeout(moveStep, 26 + Math.floor(Math.random() * 32));
+      // Window-registry timer: the drag chain only touches the window and
+      // must die with it, not ride the dual dispatcher's host lane.
+      w.setTimeout(moveStep, 26 + Math.floor(Math.random() * 32));
     } else {
       fire("mousedown", MouseEvent, { clientX: Math.round(x), clientY: Math.round(y), button: 0, buttons: 1 });
       fire("mouseup", MouseEvent, { clientX: Math.round(x), clientY: Math.round(y), button: 0, buttons: 0 });
@@ -1819,6 +1824,16 @@ let _aliasRefCount = 0;
 let _savedConsoleDescriptor: PropertyDescriptor | undefined;
 let _dualConsole: Record<string, unknown> | null = null;
 
+// Same save/restore contract as the console descriptor, for the four global
+// timers that the alias pass replaces with dual dispatchers (see
+// makeDualTimers). Captured on the FIRST install (globals are pristine then),
+// restored on the last destroyDom.
+let _savedTimerDescriptors: Record<string, PropertyDescriptor> | undefined;
+
+const TIMER_PROPS = ["setTimeout", "setInterval", "clearTimeout", "clearInterval"];
+
+// Guest-stack detector shared by the dual console and dual timers: guest
+// script frames carry their CDN source URL (o/g.alicdn.com, aliyuncs APIs).
 function isGuestConsoleCall(): boolean {
   const stack = new Error().stack ?? "";
   return /alicdn\.com|aliyuncs\.com/i.test(stack);
@@ -1845,7 +1860,58 @@ export function makeDualConsole(isGuest: () => boolean = isGuestConsoleCall): Re
   return dual;
 }
 
-function installGlobalWindowAlias(g, w) {
+function isGuestTimerCall(): boolean {
+  // Same evidence as the dual console — one shared predicate shape.
+  return isGuestConsoleCall();
+}
+
+/**
+ * Build dual setTimeout/setInterval/clearTimeout/clearInterval bound to one
+ * solve's window (test seam): calls whose stack originates from guest script
+ * URLs land on the window's timer registry (die with the window, so pe-VM
+ * callbacks can't outlive destroyDom), everything else — Bun internals like
+ * node:_http_server's keep-alive arming, our own modules — keeps the real
+ * host timer objects and their ref/unref contract. The window's function is
+ * read LIVE at call time so guest-side hooks of window.setTimeout still apply
+ * to guest callers; the host functions are captured once, immune to hooks.
+ */
+export function makeDualTimers(
+  win: Record<string, unknown>,
+  host: Record<string, (...args: unknown[]) => unknown>,
+  isGuest: () => boolean = isGuestTimerCall,
+): Record<string, (...args: unknown[]) => unknown> {
+  const dual: Record<string, (...args: unknown[]) => unknown> = {};
+  for (const prop of TIMER_PROPS) {
+    const fn = function (...args: unknown[]) {
+      let guest = false;
+      try {
+        guest = isGuest();
+      } catch (_) {}
+      if (guest) {
+        const wfn = win[prop];
+        return typeof wfn === "function" ? wfn.apply(win, args) : undefined;
+      }
+      return host[prop]?.apply(undefined, args);
+    };
+    // Look native to guest toString sweeps (same masking technique as
+    // installNativeToString): real browsers expose these as native code.
+    try {
+      Object.defineProperty(fn, "name", { value: prop, configurable: true });
+      const nativeStr = `function ${prop}() { [native code] }`;
+      Object.defineProperty(fn, "toString", {
+        value: () => nativeStr,
+        configurable: true,
+        writable: true,
+      });
+    } catch (_) {}
+    dual[prop] = fn;
+  }
+  return dual;
+}
+
+// Both take (g, w) explicitly so tests can drive the lifecycle against a
+// sandbox global (same test-seam pattern as makeDualConsole/makeDualTimers).
+export function installGlobalWindowAlias(g, w) {
   _aliasRefCount += 1;
   if (_aliasRefCount === 1 && !process.env.CAPTCHA_DEBUG) {
     _dualConsole = makeDualConsole();    _savedConsoleDescriptor = Object.getOwnPropertyDescriptor(g, "console");
@@ -1860,6 +1926,19 @@ function installGlobalWindowAlias(g, w) {
         configurable: true,
       });
     } catch (_) {}
+  }
+  // Capture the pristine timer descriptors BEFORE any aliasing: the generic
+  // props loop below aliases the timers as window-forwarding accessors (they
+  // are own props of GlobalWindow and not in HOST_CRITICAL_GLOBALS), so a
+  // capture taken after it would save those accessors — the dual's host lane
+  // would then dispatch into the window, destroyDom's happyDOM.close() would
+  // cancel host-lane timers, and the post-remove restore would leave the
+  // globals pointing at a closed window (the v4.5.2 unref crash reborn).
+  if (_aliasRefCount === 1 && !_savedTimerDescriptors) {
+    _savedTimerDescriptors = {};
+    for (const prop of TIMER_PROPS) {
+      _savedTimerDescriptors[prop] = Object.getOwnPropertyDescriptor(g, prop);
+    }
   }
   const props = new Set(Object.getOwnPropertyNames(w));
   for (const name of EXTRA_WINDOW_PROPS) props.add(name);
@@ -1892,10 +1971,31 @@ function installGlobalWindowAlias(g, w) {
   // Guest timers must live on the window's timer registry (destroyed with
   // the window). The host's setTimeout would let pe-VM callbacks fire after
   // destroyDom, when the `window` alias is gone ("window is not defined").
-  for (const prop of ["setTimeout", "setInterval", "clearTimeout", "clearInterval"]) {
+  // BUT a bare getter onto w's timers hijacks the HOST's global timers for
+  // the whole solve: Bun ≥1.4 arms its node:_http_server keep-alive socket
+  // timer through the bare global setTimeout and calls .unref() on the
+  // result, and a guest-side hook of window.setTimeout (pe-VM scheduler) or
+  // the post-close window stub returns a value without .unref — an uncaught
+  // TypeError that kills the whole proxy (v4.5.2 field crash, Bun v1.4.0
+  // binaries). So the four globals become DUAL dispatchers instead: calls
+  // whose stack originates from guest script URLs land on the window
+  // registry (same evidence base as the dual console), everything else
+  // keeps the real host timer objects and their ref/unref contract.
+  // (Descriptors were captured at the TOP of this function — see there.)
+  const hostTimers: Record<string, (...args: unknown[]) => unknown> = {};
+  for (const prop of TIMER_PROPS) {
+    hostTimers[prop] = _savedTimerDescriptors?.[prop]?.value ?? g[prop];
+  }
+  const dualTimers = makeDualTimers(w, hostTimers);
+  for (const prop of TIMER_PROPS) {
     try {
       Object.defineProperty(g, prop, {
-        get() { return w[prop]?.bind(w); },
+        get() { return dualTimers[prop]; },
+        // Writes through the alias (`setTimeout = x`, guest or host alike)
+        // land on the window like a real browser — they must NOT clobber
+        // the dispatcher itself; host callers always get the captured
+        // pristine functions regardless.
+        set(v) { try { w[prop] = v; } catch (_) {} },
         configurable: true,
       });
     } catch (_) {}
@@ -1910,7 +2010,7 @@ function installGlobalWindowAlias(g, w) {
     });
   } catch (_) {}
 }
-function removeGlobalWindowAlias(g, w) {
+export function removeGlobalWindowAlias(g, w) {
   _aliasRefCount -= 1;
   if (_aliasRefCount > 0) return;
   for (const name of Object.getOwnPropertyNames(w)) {
@@ -1931,6 +2031,15 @@ function removeGlobalWindowAlias(g, w) {
     } catch (_) {}
     _savedConsoleDescriptor = undefined;
     _dualConsole = null;
+  }
+  // Restore the pre-alias timer descriptors — a dual dispatcher left behind
+  // (bound to a closed window whose setTimeout turns into a stub) would keep
+  // routing host calls into it and reopen the unref crash window.
+  if (_savedTimerDescriptors) {
+    for (const [name, desc] of Object.entries(_savedTimerDescriptors)) {
+      try { Object.defineProperty(g, name, desc); } catch (_) {}
+    }
+    _savedTimerDescriptors = undefined;
   }
 }
 
