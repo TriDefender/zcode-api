@@ -2,6 +2,9 @@ import { describe, it, expect } from "bun:test";
 import { handleResponses } from "./responses-handler.js";
 import { ResponseStore } from "../responses/store.js";
 import type { ProxyConfig } from "../config/types.js";
+import type * as CaptchaExports from "./captcha.js";
+
+type CaptchaModule = typeof CaptchaExports;
 
 const CONFIG: ProxyConfig = {
   server: { port: 0, host: "127.0.0.1" },
@@ -154,5 +157,122 @@ describe("handleResponses", () => {
     expect(continuationUpstreamBody).toContain("first turn");
     expect(continuationUpstreamBody).toContain("turn1");
     expect(continuationUpstreamBody).toContain("second turn");
+  });
+});
+
+// /v1/responses used to skip captcha entirely (it passed `undefined` where
+// handler.ts passes captcha headers), so every start-plan request came back as
+// HTTP 400 {"code":3007,"msg":"captcha verify failed"} while the OpenAI and
+// Anthropic routes worked.
+describe("handleResponses captcha (start-plan)", () => {
+  const START_PLAN: ProxyConfig = { ...CONFIG, plan: "start-plan", provider: "bigmodel" };
+  const PARAM_HEADER = "x-aliyun-captcha-verify-param";
+  const REGION_HEADER = "x-aliyun-captcha-verify-region";
+
+  /** Fake captcha module: mints sequential tokens, records how many were asked for. */
+  function fakeCaptcha(): { module: CaptchaModule; minted: () => number } {
+    let n = 0;
+    const module = {
+      RETRY_HEADERS: { PARAM: PARAM_HEADER, REGION: REGION_HEADER },
+      getCaptchaToken: async () => {
+        n += 1;
+        return { verifyParam: `token-${n}`, region: "cn" };
+      },
+      detectCaptchaChallenge: (resp: Response) => resp.headers.get(PARAM_HEADER),
+    } as unknown as CaptchaModule;
+    return { module, minted: () => n };
+  }
+
+  it("sends a captcha token upstream on start-plan", async () => {
+    const seen: (string | null)[] = [];
+    const fetchImpl = (async (request: Request): Promise<Response> => {
+      seen.push(request.headers.get(PARAM_HEADER));
+      return new Response(anthropicMsg("ok"), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+
+    const captcha = fakeCaptcha();
+    const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
+      config: START_PLAN, auth, fetchImpl, captcha: captcha.module,
+    });
+    expect(resp.status).toBe(200);
+    expect(seen).toEqual(["token-1"]);
+    expect(captcha.minted()).toBe(1);
+  });
+
+  it("retries once with a fresh token when upstream answers in-body 3007", async () => {
+    const seen: (string | null)[] = [];
+    const fetchImpl = (async (request: Request): Promise<Response> => {
+      seen.push(request.headers.get(PARAM_HEADER));
+      if (seen.length === 1) {
+        return new Response(JSON.stringify({ code: 3007, msg: "captcha verify failed" }), {
+          status: 400, headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response(anthropicMsg("recovered"), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+
+    const captcha = fakeCaptcha();
+    const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
+      config: START_PLAN, auth, fetchImpl, captcha: captcha.module,
+    });
+    expect(resp.status).toBe(200);
+    const body = await resp.json();
+    expect(body.output[0].content[0].text).toBe("recovered");
+    // The challenged token is already spent, so the retry must carry a NEW one.
+    expect(seen).toEqual(["token-1", "token-2"]);
+  });
+
+  it("retries when the challenge arrives as a response header", async () => {
+    const seen: (string | null)[] = [];
+    const fetchImpl = (async (request: Request): Promise<Response> => {
+      seen.push(request.headers.get(PARAM_HEADER));
+      if (seen.length === 1) {
+        return new Response("denied", { status: 403, headers: { [PARAM_HEADER]: "challenge-abc" } });
+      }
+      return new Response(anthropicMsg("ok"), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+
+    const captcha = fakeCaptcha();
+    const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
+      config: START_PLAN, auth, fetchImpl, captcha: captcha.module,
+    });
+    expect(resp.status).toBe(200);
+    expect(seen).toEqual(["token-1", "token-2"]);
+  });
+
+  it("gives up after one retry instead of looping", async () => {
+    let calls = 0;
+    const fetchImpl = (async (): Promise<Response> => {
+      calls += 1;
+      return new Response(JSON.stringify({ code: 3007, msg: "captcha verify failed" }), {
+        status: 400, headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+
+    const captcha = fakeCaptcha();
+    const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
+      config: START_PLAN, auth, fetchImpl, captcha: captcha.module,
+    });
+    expect(calls).toBe(2);
+    expect(resp.status).toBe(400);
+    const body = await resp.json();
+    expect(body.error.type).toBe("upstream_error");
+    expect(body.error.message).toContain("3007");
+  });
+
+  it("does not touch captcha on coding-plan", async () => {
+    const seen: (string | null)[] = [];
+    const fetchImpl = (async (request: Request): Promise<Response> => {
+      seen.push(request.headers.get(PARAM_HEADER));
+      return new Response(anthropicMsg("ok"), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+
+    const captcha = fakeCaptcha();
+    const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
+      config: CONFIG, auth, fetchImpl, captcha: captcha.module,
+    });
+    expect(resp.status).toBe(200);
+    expect(seen).toEqual([null]);
+    expect(captcha.minted()).toBe(0);
   });
 });
