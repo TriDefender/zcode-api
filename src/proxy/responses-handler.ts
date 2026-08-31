@@ -21,7 +21,18 @@ import { transformRequestBody } from "./body-transformer.js";
 import { getProvider } from "../provider/providers.js";
 import type { ProxyConfig } from "../config/types.js";
 import type { AuthManager } from "../auth/manager.js";
-import { buildUpstreamRequest, buildUpstreamHeaderPairs } from "./upstream.js";
+import { buildUpstreamRequest, buildUpstreamHeaderPairs, type UpstreamHeaderPair } from "./upstream.js";
+import type * as CaptchaExports from "./captcha.js";
+
+// Lazy, runtime-gated module load (exception to the static-import rule, same
+// as handler.ts): pulling captcha.ts eagerly drags in the happy-dom solver, so
+// only start-plan — the one plan whose upstream is captcha-gated — pays for it.
+type CaptchaModule = typeof CaptchaExports;
+let captchaModule: CaptchaModule | null = null;
+async function loadCaptcha(): Promise<CaptchaModule> {
+  if (!captchaModule) captchaModule = await import("./captcha.js");
+  return captchaModule;
+}
 import { getDefaultEndpointRouting, type EndpointRoutingService } from "./endpoint-routing.js";
 import { getDefaultClientSigning, sendWithClientSigning, type ClientSigningManager } from "./client-signing.js";
 import { credentialString } from "../auth/types.js";
@@ -64,6 +75,8 @@ export interface ResponsesHandlerOptions {
   endpointRouting?: EndpointRoutingService | null;
   /** Override the process-wide client signing manager (for testing). `null` disables. */
   clientSigning?: ClientSigningManager | null;
+  /** Override the lazily-imported captcha module (for testing). */
+  captcha?: CaptchaModule;
 }
 
 /** Handle POST /v1/responses. */
@@ -166,22 +179,35 @@ export async function handleResponses(
   const transformedBody = upstreamRequestBody;
 
   // ── 6. POST upstream ──
-  const upstreamHeaders = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, undefined, undefined);
-  const upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, providerDef, cred, transformedBody, opts.config.identity, opts.config.plan, undefined, undefined);
+  // start-plan gates every upstream call behind an Aliyun captcha token. The
+  // Anthropic/OpenAI routes mint one in handler.ts; /v1/responses did not, so
+  // start-plan users got {"code":3007,"msg":"captcha verify failed"} surfaced
+  // as HTTP 400 upstream_error on every request.
+  let captchaHeaders: Record<string, string> | undefined;
+  if (startPlan) {
+    try {
+      const captcha = opts.captcha ?? (await loadCaptcha());
+      const token = await captcha.getCaptchaToken(opts.config.identity.appVersion);
+      captchaHeaders = { [captcha.RETRY_HEADERS.PARAM]: token.verifyParam, [captcha.RETRY_HEADERS.REGION]: token.region };
+    } catch {
+      // Fall through: the 3007 retry below solves on demand.
+    }
+  }
+  const upstreamHeaders = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, captchaHeaders, undefined);
+  const upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, providerDef, cred, transformedBody, opts.config.identity, opts.config.plan, captchaHeaders, undefined);
   if (debug) console.log(`[responses] → POST ${upstreamReq.url}`);
 
-  let upstreamResp: Response;
-  try {
-    const routing = opts.endpointRouting !== undefined ? opts.endpointRouting : getDefaultEndpointRouting(opts.config);
+  const routing = opts.endpointRouting !== undefined ? opts.endpointRouting : getDefaultEndpointRouting(opts.config);
+  const signer = opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(opts.config);
+  const dispatch = async (pairs: UpstreamHeaderPair[]): Promise<Response> => {
     const routed = routing ? await routing.resolve(upstreamReq.url, credentialString(cred)) : null;
     const sendUrl = routed?.routed ? routed.url : upstreamReq.url;
     if (debug && routed?.routed) console.log(`[responses] endpoint routing: ${upstreamReq.url} -> ${sendUrl}`);
-    const signer = opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(opts.config);
     // signing decisions run against the PRE-routing provider URL (mirrors the
     // client, whose signer wraps the routing transport)
-    upstreamResp = await sendWithClientSigning(signer, {
+    return sendWithClientSigning(signer, {
       url: upstreamReq.url,
-      headerPairs: upstreamHeaders,
+      headerPairs: pairs,
       credential: credentialString(cred),
       appVersion: opts.config.identity.appVersion,
       debug: debug ? (message) => console.log(`[responses] ${message}`) : undefined,
@@ -194,8 +220,42 @@ export async function handleResponses(
         return fetchImpl(req, { method: "POST", headers: Object.fromEntries(finalPairs), body: transformedBody ?? undefined, signal: clientReq.signal });
       },
     });
+  };
+
+  let upstreamResp: Response;
+  try {
+    upstreamResp = await dispatch(upstreamHeaders);
   } catch (err) {
     return errorResponse(502, "upstream_unreachable", (err as Error).message);
+  }
+
+  // Captcha challenge retry (mirrors handler.ts): the gateway signals it either
+  // through the captcha response header or as HTTP 400 with {"code":3007} in
+  // the body. The challenged token is already spent, so retry once with a fresh
+  // pooled one.
+  if (startPlan && !upstreamResp.ok) {
+    const captcha = opts.captcha ?? (await loadCaptcha());
+    let challenged = captcha.detectCaptchaChallenge(upstreamResp) !== null;
+    if (!challenged && !upstreamResp.headers.get("content-type")?.includes("text/event-stream")) {
+      const peek = await upstreamResp.clone().text().catch(() => "");
+      challenged = peek.includes('"code":3007') || peek.includes('"code": 3007');
+    }
+    if (challenged) {
+      if (debug) console.log("[responses] captcha challenge — re-solving and retrying once");
+      try { await upstreamResp.body?.cancel(); } catch { /* already drained */ }
+      try {
+        const fresh = await captcha.getCaptchaToken(opts.config.identity.appVersion);
+        const retryHeaders = {
+          [captcha.RETRY_HEADERS.PARAM]: fresh.verifyParam,
+          [captcha.RETRY_HEADERS.REGION]: fresh.region,
+        };
+        upstreamResp = await dispatch(
+          buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, retryHeaders, undefined),
+        );
+      } catch (err) {
+        return errorResponse(503, "captcha_solver_failed", (err as Error).message);
+      }
+    }
   }
 
   if (!upstreamResp.ok) {
