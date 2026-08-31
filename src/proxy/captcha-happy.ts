@@ -515,12 +515,21 @@ function makeInterceptor(bypassPeCache = false) {
   };
 }
 
-// ── Parse-fail instrumentation (host side) ─────────────────────────────────
+// ── Parse-fail instrumentation + guest timer scoping (host side) ────────────
 // Wraps happy-dom's VM eval funnel (window[PropertySymbol.evaluateScript]).
 // Every script tag / compiled module / dynamic chunk that happy-dom parses
 // passes through here with options.filename = source URL, so any SyntaxError
 // is dumped with URL + length + head/tail + sha1, and the disk cache is
 // re-validated against a fresh CDN fetch when the URL is an http(s) file.
+//
+// This is also where guest timers are scoped (Bun only). happy-dom hands us a
+// wrapper EXPRESSION (`(function anonymous($happy_dom) { ... })`), whose value
+// the caller invokes. Wrapping it in an immediately-invoked outer function
+// whose parameters are named setTimeout/setInterval/clearTimeout/clearInterval
+// puts our per-window shims in the guest's lexical scope — bare guest
+// references and direct `eval()` inside guest code resolve to them, while the
+// host globalThis keeps its real Node timers. `//# sourceURL` is preserved by
+// appending it after the wrapper, so guest stack frames keep their CDN URLs.
 function installEvalInstrumentation(w) {
   const sym = PropertySymbol && PropertySymbol.evaluateScript;
   if (!sym || typeof w[sym] !== "function") {
@@ -528,9 +537,27 @@ function installEvalInstrumentation(w) {
     return;
   }
   const orig = w[sym];
+  const scopeTimers = typeof Bun !== "undefined";
+  const timers = scopeTimers ? makeGuestTimers(w) : null;
   w[sym] = function (code, options) {
+    const evaluate = () => {
+      if (!scopeTimers) return orig.call(this, code, options);
+      // Only wrap the expression form happy-dom's compilers emit; anything
+      // else (statement lists) must pass through untouched.
+      const src = String(code ?? "");
+      if (!/^\s*\(/.test(src)) return orig.call(this, code, options);
+      const scoped = `(function(${GUEST_TIMER_NAMES.join(",")}){return (\n${src}\n);})`;
+      const factory = orig.call(this, scoped, options);
+      if (typeof factory !== "function") return orig.call(this, code, options);
+      return factory(
+        timers.setTimeout,
+        timers.setInterval,
+        timers.clearTimeout,
+        timers.clearInterval,
+      );
+    };
     try {
-      return orig.call(this, code, options);
+      return evaluate();
     } catch (err) {
       try {
         const src = String(code || "");
@@ -924,8 +951,26 @@ function applyPolyfills(w) {
       interval = 16;
     };
 
-  w.requestIdleCallback = w.requestIdleCallback || ((cb) => setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 10 }), 1));
-  w.cancelIdleCallback = w.cancelIdleCallback || ((id) => clearTimeout(id));
+  // Tracked window-lifetime timers: these polyfills used to schedule bare
+  // host timers that outlived happyDOM.close() and fired against a dead window.
+  const polyfillTimers = makeGuestTimers(w);
+  // Put the same shims on the window so `setTimeout === window.setTimeout`
+  // holds for guest code, as it does in a real browser. happy-dom's own
+  // window timers are replaced deliberately: they return handles without
+  // `unref` and a bare `{}` once closed.
+  for (const name of GUEST_TIMER_NAMES) {
+    try {
+      Object.defineProperty(w, name, {
+        value: polyfillTimers[name],
+        configurable: true,
+        writable: true,
+      });
+    } catch {}
+  }
+  w.requestIdleCallback =
+    w.requestIdleCallback ||
+    ((cb) => polyfillTimers.setTimeout(() => cb({ didTimeout: false, timeRemaining: () => 10 }), 1));
+  w.cancelIdleCallback = w.cancelIdleCallback || ((id) => polyfillTimers.clearTimeout(id));
 
   w.matchMedia =
     w.matchMedia ||
@@ -1216,8 +1261,9 @@ function applyPolyfills(w) {
       }
     };
 
-  w.requestAnimationFrame = w.requestAnimationFrame || ((cb) => setTimeout(() => cb(Date.now()), 16));
-  w.cancelAnimationFrame = w.cancelAnimationFrame || ((id) => clearTimeout(id));
+  w.requestAnimationFrame =
+    w.requestAnimationFrame || ((cb) => polyfillTimers.setTimeout(() => cb(Date.now()), 16));
+  w.cancelAnimationFrame = w.cancelAnimationFrame || ((id) => polyfillTimers.clearTimeout(id));
 
   try {
     Object.defineProperty(w.document, "hidden", { value: false, configurable: true });
@@ -1758,7 +1804,125 @@ async function createDom(region, prefix) {
   return { window: w, browserFrame };
 }
 
-// Bun-only: alias the active window on globalThis (script tags run in the
+// ── Guest timer scoping (replaces the old globalThis timer aliasing) ───────
+// Guest SDK code must get timers that (a) return REAL Node timer handles, so
+// nothing downstream chokes on a missing `unref`, and (b) are cancelled when
+// the window that scheduled them is destroyed, so pe-VM callbacks cannot fire
+// against a torn-down window ("window is not defined").
+//
+// The window's own setTimeout/setInterval satisfy (b) but violate (a). So we
+// schedule on the REAL host timers and track the handles per window
+// ourselves. `_guestTimers` is keyed by window and holds live handles; the
+// last destroyDom for a window clears them.
+//
+// Injection is lexical, NOT global: happy-dom funnels every guest script
+// through window[PropertySymbol.evaluateScript] as a wrapper expression
+// (`(function anonymous($happy_dom) { ... })`). We wrap that in another
+// function whose parameters are named setTimeout/setInterval/... so bare
+// guest references — and `eval()` inside guest code, which inherits the
+// enclosing scope — resolve to our shims while the host global stays intact.
+const HOST_TIMERS = {
+  setTimeout: globalThis.setTimeout.bind(globalThis),
+  clearTimeout: globalThis.clearTimeout.bind(globalThis),
+  setInterval: globalThis.setInterval.bind(globalThis),
+  clearInterval: globalThis.clearInterval.bind(globalThis),
+};
+const GUEST_TIMER_NAMES = ["setTimeout", "setInterval", "clearTimeout", "clearInterval"];
+const _guestTimers = new WeakMap();
+
+/**
+ * Build the four timer shims a guest script sees. Handles are real Node
+ * timers (so `unref`/`refresh`/`_idleTimeout` all exist) tracked per window,
+ * so a destroyed window cannot leave callbacks running.
+ */
+function makeGuestTimers(w) {
+  // Cache per window: applyPolyfills and installEvalInstrumentation both need
+  // these, and guest code can compare identities (`setTimeout ===
+  // window.setTimeout` holds in a real browser), so every call site must get
+  // the exact same four function objects.
+  const cached = _guestTimers.get(w);
+  if (cached) return cached.shims;
+  const handles = new Set();
+  // A destroyed window must not run more guest code, but the SDK expects a
+  // usable handle back — hand out an inert real timer instead of `{}`.
+  const inert = () => HOST_TIMERS.setTimeout(() => {}, 0);
+  const runGuest = (cb, args) => {
+    try {
+      cb(...args);
+    } catch (err) {
+      try { w[PropertySymbol.dispatchError](err); } catch {}
+    }
+  };
+  // Fingerprint parity: the FeiLin risk engine sweeps platform APIs with
+  // Function.prototype.toString and flags anything whose source is visible
+  // JS. The previous global aliasing leaked nothing only because
+  // `w.setTimeout.bind(w)` is a BOUND function ("[native code]" by spec) —
+  // plain closures print their body, which upstream answered with
+  // {"code":3007,"msg":"captcha verify failed"}. Mask each shim and match the
+  // real signature (name + arity), the two other properties the sweep reads.
+  const shims = {
+    setTimeout: (cb, delay, ...args) => {
+      if (w.closed || typeof cb !== "function") return inert();
+      const h = HOST_TIMERS.setTimeout(() => {
+        handles.delete(h);
+        if (w.closed) return;
+        runGuest(cb, args);
+      }, delay || 0);
+      handles.add(h);
+      return h;
+    },
+    setInterval: (cb, delay, ...args) => {
+      if (w.closed || typeof cb !== "function") return inert();
+      const h = HOST_TIMERS.setInterval(() => {
+        if (w.closed) {
+          HOST_TIMERS.clearInterval(h);
+          handles.delete(h);
+          return;
+        }
+        runGuest(cb, args);
+      }, delay || 0);
+      handles.add(h);
+      return h;
+    },
+    clearTimeout: (h) => {
+      handles.delete(h);
+      HOST_TIMERS.clearTimeout(h);
+    },
+    clearInterval: (h) => {
+      handles.delete(h);
+      HOST_TIMERS.clearInterval(h);
+    },
+  };
+  for (const name of GUEST_TIMER_NAMES) {
+    const fn = shims[name];
+    const host = globalThis[name];
+    try {
+      Object.defineProperty(fn, "name", { value: name, configurable: true });
+      Object.defineProperty(fn, "length", { value: host.length, configurable: true });
+      const nativeStr = `function ${name}() { [native code] }`;
+      Object.defineProperty(fn, "toString", {
+        value: () => nativeStr,
+        configurable: true,
+        writable: true,
+      });
+    } catch {}
+  }
+  _guestTimers.set(w, { handles, shims });
+  return shims;
+}
+
+/** Cancel every still-pending guest timer for a window (called on destroy). */
+function cancelGuestTimers(w) {
+  const entry = _guestTimers.get(w);
+  if (!entry) return;
+  for (const h of entry.handles) {
+    try { HOST_TIMERS.clearTimeout(h); } catch {}
+    try { HOST_TIMERS.clearInterval(h); } catch {}
+  }
+  entry.handles.clear();
+  _guestTimers.delete(w);
+}
+
 // Bun-only: alias the active window on globalThis (script tags run in the
 // host realm under Bun). Every own enumerable window property is exposed as a
 // getter so guest scripts resolving bare identifiers (window, document,
@@ -1770,6 +1934,20 @@ const HOST_CRITICAL_GLOBALS = new Set([
   "process", "Bun", "console", "performance", "crypto", "fetch",
   "queueMicrotask", "structuredClone", "TextEncoder", "TextDecoder",
   "requestAnimationFrame", "cancelAnimationFrame",
+  // Timers: NEVER alias onto the host global. happy-dom's BrowserWindow
+  // timer methods return either a happy-dom `Timeout` (no `unref`) or, once
+  // `window.closed`, a bare `{}` — while Bun's `node:http` keep-alive path
+  // (onResponseFinishHandleSocket → socket.setTimeout → `timer.unref()`)
+  // requires a real Node Timeout. Aliasing them crashed the proxy with
+  // "TypeError: timer.unref is not a function" on response finish, and the
+  // teardown `delete` left globalThis with NO setTimeout at all
+  // ("ReferenceError: setTimeout is not defined"). Worse silently: host
+  // timers scheduled while aliased were owned by the window's
+  // asyncTaskManager and got cancelled by happyDOM.close() — killing pool
+  // refill, keepalive and OAuth timeouts with no error. Guest scripts get
+  // window-scoped timers lexically instead (see makeGuestTimerScope).
+  "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+  "setImmediate", "clearImmediate",
   // NOTE: `print` was removed from this list (2026-08-29). The polyfill
   // defines a harmless no-op on the window, but the alias pass skipped it,
   // so under Bun (guest scripts run in the HOST realm) the Aliyun pe risk
@@ -1806,6 +1984,11 @@ const EXTRA_WINDOW_PROPS = [
 // aliases alive until the LAST concurrent window is destroyed, otherwise one
 // destroyDom() pulls `window` out from under a sibling mid-solve.
 let _aliasRefCount = 0;
+
+// Host property descriptors captured before the alias pass shadowed them, so
+// teardown restores the host global object byte-for-byte instead of deleting
+// properties it does not own. Dynamic keys + clear() → Map, not Record.
+const _savedHostDescriptors = new Map<string, PropertyDescriptor | undefined>();
 
 // Under Bun, guest scripts run in the HOST realm — a bare `console` inside
 // SDK code resolves to the HOST console (that is the FeiLin spam channel:
@@ -1872,34 +2055,38 @@ function installGlobalWindowAlias(g, w) {
   for (const prop of props) {
     if (HOST_CRITICAL_GLOBALS.has(prop)) continue;
     try {
+      // Remember what the host had here so teardown can put it back verbatim.
+      // A blind `delete` (the old behaviour) permanently destroyed any host
+      // global the window happened to shadow — under Bun these are own
+      // properties with no prototype fallback, so the host lost them for good.
+      if (!_savedHostDescriptors.has(prop)) {
+        _savedHostDescriptors.set(prop, Object.getOwnPropertyDescriptor(g, prop));
+      }
       Object.defineProperty(g, prop, {
         get() {
           return w[prop];
         },
         set(v) {
-          try { w[prop] = v; } catch (_) {}
+          try { w[prop] = v; } catch {}
         },
         configurable: true,
       });
-    } catch (_) {}
+    } catch {}
   }
   // w.window/self may not exist as own props on this happy-dom build
   for (const prop of ["window", "self", "top", "parent"]) {
     try {
+      if (!_savedHostDescriptors.has(prop)) {
+        _savedHostDescriptors.set(prop, Object.getOwnPropertyDescriptor(g, prop));
+      }
       Object.defineProperty(g, prop, { get() { return w; }, configurable: true });
-    } catch (_) {}
+    } catch {}
   }
-  // Guest timers must live on the window's timer registry (destroyed with
-  // the window). The host's setTimeout would let pe-VM callbacks fire after
-  // destroyDom, when the `window` alias is gone ("window is not defined").
-  for (const prop of ["setTimeout", "setInterval", "clearTimeout", "clearInterval"]) {
-    try {
-      Object.defineProperty(g, prop, {
-        get() { return w[prop]?.bind(w); },
-        configurable: true,
-      });
-    } catch (_) {}
-  }
+  // NOTE: setTimeout/setInterval/clearTimeout/clearInterval are deliberately
+  // NOT aliased here (they are in HOST_CRITICAL_GLOBALS). Guest scripts get
+  // window-lifetime timers lexically via installEvalInstrumentation instead;
+  // aliasing them onto the host global crashed Bun's node:http keep-alive path
+  // and silently cancelled host timers on window close.
   // Dynamic catch-all: guest code occasionally references window methods that
   // only exist on the prototype (moveBy, scrollTo, ...) or lands mid-solve on
   // new props. Proxy fallback for any still-missing global property.
@@ -1913,22 +2100,24 @@ function installGlobalWindowAlias(g, w) {
 function removeGlobalWindowAlias(g, w) {
   _aliasRefCount -= 1;
   if (_aliasRefCount > 0) return;
-  for (const name of Object.getOwnPropertyNames(w)) {
+  // Restore, never delete. Every property we shadowed is put back exactly as
+  // the host had it; properties the host never owned are removed. Deleting
+  // blindly used to strip real host globals (setTimeout among them) with no
+  // prototype fallback, leaving the process unable to schedule anything.
+  for (const [prop, descriptor] of _savedHostDescriptors) {
     try {
-      const d = Object.getOwnPropertyDescriptor(g, name);
-      if (d?.get) delete g[name];
-    } catch (_) {}
+      if (descriptor) Object.defineProperty(g, prop, descriptor);
+      else delete g[prop];
+    } catch {}
   }
-  for (const prop of ["window", "self", "top", "parent"]) {
-    try { delete g[prop]; } catch (_) {}
-  }
-  // Restore the pre-alias console descriptor — `delete g.console` above (the
-  // getter installed for the dual console) would otherwise leave globalThis
-  // without a console at all.
+  _savedHostDescriptors.clear();
+  try { delete g.__capWindowFor; } catch {}
+  // Restore the pre-alias console descriptor — the dual-console getter
+  // installed above would otherwise stay in place for the host's logging.
   if (_savedConsoleDescriptor) {
     try {
       Object.defineProperty(g, "console", _savedConsoleDescriptor);
-    } catch (_) {}
+    } catch {}
     _savedConsoleDescriptor = undefined;
     _dualConsole = null;
   }
@@ -1939,15 +2128,19 @@ function destroyDom(win) {
     const cap = win.document.getElementById("cap");
     if (cap) cap.replaceChildren();
     win.happyDOM.close();
-  } catch (_) {}
+  } catch {}
+  // Cancel this window's guest timers explicitly. They are real host timers
+  // (see makeGuestTimers), so happyDOM.close() does not reap them; without
+  // this a pe-VM callback could still fire against the torn-down window.
+  try { cancelGuestTimers(win); } catch {}
   try {
     global.__cookieContainer = null;
     global.__browserFrame = null;
-  } catch (_) {}
+  } catch {}
   try {
     if (typeof Bun !== "undefined") removeGlobalWindowAlias(globalThis, win);
-  } catch (_) {}
-  try { shutdownSyncFetchWorker(); } catch (_) {}
+  } catch {}
+  try { shutdownSyncFetchWorker(); } catch {}
 }
 
 function extractVerifyParam(param) {
@@ -2203,4 +2396,16 @@ async function solveTraceless(opts) {
   }
 }
 
-export { solveTraceless, createDom, destroyDom };
+// installGlobalWindowAlias/removeGlobalWindowAlias mutate the PROCESS-WIDE
+// global object; they are exported so tests can assert host-global integrity
+// (a regression there took the whole proxy down, see captcha-happy.test.ts).
+export {
+  solveTraceless,
+  createDom,
+  destroyDom,
+  installGlobalWindowAlias,
+  removeGlobalWindowAlias,
+  makeGuestTimers,
+  cancelGuestTimers,
+  HOST_CRITICAL_GLOBALS,
+};
