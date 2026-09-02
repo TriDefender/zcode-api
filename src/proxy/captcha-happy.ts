@@ -1812,6 +1812,30 @@ const EXTRA_WINDOW_PROPS = [
 // destroyDom() pulls `window` out from under a sibling mid-solve.
 let _aliasRefCount = 0;
 
+// Post-teardown tombstone (see removeGlobalWindowAlias): how long window-
+// sourced alias getters keep resolving — to the CLOSED window — after the
+// last destroyDom. Guest (FeiLin) async fingerprint chains ride host
+// machinery (fetch/promise continuations) and can outlive the window; a
+// hard delete turns their next bare `Text`/`document` reference into an
+// uncaught ReferenceError (v4.5.2 field report: "Text is not defined" from
+// feilin005.js). The closed window's objects stay readable, so stragglers
+// run harmlessly to completion; a new solve wave (generation bump) cancels
+// the pending deletion entirely. The pristine host setTimeout captured at
+// module load schedules it — never the aliased one.
+const ALIAS_TOMBSTONE_MS = 30_000;
+let _aliasGeneration = 0;
+let _tombstoneMs = ALIAS_TOMBSTONE_MS;
+const _hostSetTimeout = globalThis.setTimeout;
+// Every getter this module installs on the alias target (generic window
+// forwarders, window/self/top/parent, dual timers, __capWindowFor). The
+// host-global snapshot skips descriptors whose getter is in here: a wave
+// that starts inside a previous wave's grace period finds OUR OWN stale
+// accessors still on `g`, and saving them would "restore" window accessors
+// at removal — permanently pinning the first closed window (review-caught
+// 2026-08-31). Host getters (Bun's navigator/self accessors) are never in
+// this set and always flow to the restore path.
+const _aliasGetters = new WeakSet<object>();
+
 // Under Bun, guest scripts run in the HOST realm — a bare `console` inside
 // SDK code resolves to the HOST console (that is the FeiLin spam channel:
 // invisible devtools-format lines probed across every console method, ~1/sec
@@ -1824,11 +1848,11 @@ let _aliasRefCount = 0;
 let _savedConsoleDescriptor: PropertyDescriptor | undefined;
 let _dualConsole: Record<string, unknown> | null = null;
 
-// Same save/restore contract as the console descriptor, for the four global
-// timers that the alias pass replaces with dual dispatchers (see
-// makeDualTimers). Captured on the FIRST install (globals are pristine then),
-// restored on the last destroyDom.
-let _savedTimerDescriptors: Record<string, PropertyDescriptor> | undefined;
+// Same save/restore contract as the console descriptor, generalized to every
+// HOST-EXISTING global the alias pass overwrites (see installGlobalWindowAlias
+// for the full list rationale). Captured on the FIRST install of a wave
+// (globals are pristine then), restored on the last remove.
+let _savedHostGlobalDescriptors: Record<string, PropertyDescriptor> | undefined;
 
 const TIMER_PROPS = ["setTimeout", "setInterval", "clearTimeout", "clearInterval"];
 
@@ -1911,15 +1935,25 @@ export function makeDualTimers(
 
 // Both take (g, w) explicitly so tests can drive the lifecycle against a
 // sandbox global (same test-seam pattern as makeDualConsole/makeDualTimers).
-export function installGlobalWindowAlias(g, w) {
+// `tombstoneMs` (tests only) shortens the post-teardown grace period.
+export function installGlobalWindowAlias(g, w, tombstoneMs?) {
+  // Clamp a negative refcount (an unbalanced remove would otherwise land the
+  // NEXT install at 0 instead of 1: the snapshot is skipped and the dual
+  // timers' host lane falls back to just-installed window accessors — the
+  // v4.5.2 unref crash shape).
+  if (_aliasRefCount < 0) _aliasRefCount = 0;
   _aliasRefCount += 1;
+  _aliasGeneration += 1; // cancels any pending tombstone from a prior wave
+  _tombstoneMs = typeof tombstoneMs === "number" ? tombstoneMs : ALIAS_TOMBSTONE_MS;
   if (_aliasRefCount === 1 && !process.env.CAPTCHA_DEBUG) {
     _dualConsole = makeDualConsole();    _savedConsoleDescriptor = Object.getOwnPropertyDescriptor(g, "console");
     try {
+      const consoleGetter = function () {
+        return _dualConsole;
+      };
+      _aliasGetters.add(consoleGetter);
       Object.defineProperty(g, "console", {
-        get() {
-          return _dualConsole;
-        },
+        get: consoleGetter,
         set(v) {
           try { w.console = v; } catch (_) {}
         },
@@ -1927,19 +1961,17 @@ export function installGlobalWindowAlias(g, w) {
       });
     } catch (_) {}
   }
-  // Capture the pristine timer descriptors BEFORE any aliasing: the generic
-  // props loop below aliases the timers as window-forwarding accessors (they
-  // are own props of GlobalWindow and not in HOST_CRITICAL_GLOBALS), so a
-  // capture taken after it would save those accessors — the dual's host lane
-  // would then dispatch into the window, destroyDom's happyDOM.close() would
-  // cancel host-lane timers, and the post-remove restore would leave the
-  // globals pointing at a closed window (the v4.5.2 unref crash reborn).
-  if (_aliasRefCount === 1 && !_savedTimerDescriptors) {
-    _savedTimerDescriptors = {};
-    for (const prop of TIMER_PROPS) {
-      _savedTimerDescriptors[prop] = Object.getOwnPropertyDescriptor(g, prop);
-    }
-  }
+  // Build the alias name set FIRST, then snapshot every HOST-EXISTING global
+  // in it BEFORE anything is aliased. The generic props loop below overwrites
+  // them with window-forwarding accessors (GlobalWindow own props outside
+  // HOST_CRITICAL_GLOBALS) — a capture taken after it would save those
+  // accessors, the dual-timer host lane would dispatch into the window,
+  // happyDOM.close() would cancel host-lane timers mid-solve, and the
+  // post-remove restore would reinstate accessors to a closed window (the
+  // v4.5.2 unref crash reborn). The snapshot covers far more than the four
+  // timers: atob/btoa (client-signing's base64 — field-reported
+  // ReferenceError), WebSocket, MessageEvent, CustomEvent, navigator, self,
+  // ... — every host global the window happens to expose (~25 today).
   const props = new Set(Object.getOwnPropertyNames(w));
   for (const name of EXTRA_WINDOW_PROPS) props.add(name);
   // also walk the prototype chain one level (BrowserWindow getters like
@@ -1948,13 +1980,40 @@ export function installGlobalWindowAlias(g, w) {
     for (const name of Object.getOwnPropertyNames(proto)) props.add(name);
     break;
   }
+  if (_aliasRefCount === 1 && !_savedHostGlobalDescriptors) {
+    const saved: Record<string, PropertyDescriptor> = {};
+    for (const prop of props) {
+      if (prop === "constructor" || HOST_CRITICAL_GLOBALS.has(prop)) continue;
+      try {
+        const d = Object.getOwnPropertyDescriptor(g, prop);
+        // Skip OUR OWN stale accessors from a previous wave that was
+        // cancelled mid-grace (retry ladder / pool bursts start the next
+        // wave within the 30s tombstone): saving them would "restore"
+        // window-forwarding accessors at removal and permanently pin the
+        // first closed window on globalThis. They are window-sourced — the
+        // new wave's tombstone owns their cleanup. Host getters (Bun's
+        // navigator/self accessors) are never in the WeakSet and keep
+        // flowing to the restore path.
+        if (d && d.get && _aliasGetters.has(d.get)) continue;
+        if (d) saved[prop] = d;
+      } catch (_) {}
+    }
+    for (const prop of ["window", "self", "top", "parent", "__capWindowFor"]) {
+      try {
+        const d = Object.getOwnPropertyDescriptor(g, prop);
+        if (d && d.get && _aliasGetters.has(d.get)) continue;
+        if (d && !saved[prop]) saved[prop] = d;
+      } catch (_) {}
+    }
+    _savedHostGlobalDescriptors = saved;
+  }
   for (const prop of props) {
     if (HOST_CRITICAL_GLOBALS.has(prop)) continue;
     try {
+      const getter = function () { return w[prop]; };
+      _aliasGetters.add(getter);
       Object.defineProperty(g, prop, {
-        get() {
-          return w[prop];
-        },
+        get: getter,
         set(v) {
           try { w[prop] = v; } catch (_) {}
         },
@@ -1965,7 +2024,9 @@ export function installGlobalWindowAlias(g, w) {
   // w.window/self may not exist as own props on this happy-dom build
   for (const prop of ["window", "self", "top", "parent"]) {
     try {
-      Object.defineProperty(g, prop, { get() { return w; }, configurable: true });
+      const getter = function () { return w; };
+      _aliasGetters.add(getter);
+      Object.defineProperty(g, prop, { get: getter, configurable: true });
     } catch (_) {}
   }
   // Guest timers must live on the window's timer registry (destroyed with
@@ -1984,13 +2045,15 @@ export function installGlobalWindowAlias(g, w) {
   // (Descriptors were captured at the TOP of this function — see there.)
   const hostTimers: Record<string, (...args: unknown[]) => unknown> = {};
   for (const prop of TIMER_PROPS) {
-    hostTimers[prop] = _savedTimerDescriptors?.[prop]?.value ?? g[prop];
+    hostTimers[prop] = _savedHostGlobalDescriptors?.[prop]?.value ?? g[prop];
   }
   const dualTimers = makeDualTimers(w, hostTimers);
   for (const prop of TIMER_PROPS) {
     try {
+      const getter = function () { return dualTimers[prop]; };
+      _aliasGetters.add(getter);
       Object.defineProperty(g, prop, {
-        get() { return dualTimers[prop]; },
+        get: getter,
         // Writes through the alias (`setTimeout = x`, guest or host alike)
         // land on the window like a real browser — they must NOT clobber
         // the dispatcher itself; host callers always get the captured
@@ -2004,8 +2067,10 @@ export function installGlobalWindowAlias(g, w) {
   // only exist on the prototype (moveBy, scrollTo, ...) or lands mid-solve on
   // new props. Proxy fallback for any still-missing global property.
   try {
+    const capGetter = function () { return w; };
+    _aliasGetters.add(capGetter);
     Object.defineProperty(g, "__capWindowFor", {
-      get() { return w; },
+      get: capGetter,
       configurable: true,
     });
   } catch (_) {}
@@ -2013,18 +2078,11 @@ export function installGlobalWindowAlias(g, w) {
 export function removeGlobalWindowAlias(g, w) {
   _aliasRefCount -= 1;
   if (_aliasRefCount > 0) return;
-  for (const name of Object.getOwnPropertyNames(w)) {
-    try {
-      const d = Object.getOwnPropertyDescriptor(g, name);
-      if (d?.get) delete g[name];
-    } catch (_) {}
-  }
-  for (const prop of ["window", "self", "top", "parent"]) {
-    try { delete g[prop]; } catch (_) {}
-  }
-  // Restore the pre-alias console descriptor — `delete g.console` above (the
-  // getter installed for the dual console) would otherwise leave globalThis
-  // without a console at all.
+  // Host-contract globals come back IMMEDIATELY: the console (host logging
+  // between solves) and every HOST-EXISTING global the wave overwrote — the
+  // four timers (Bun internals call them by bare identifier and unref the
+  // result), atob/btoa (client-signing's JWT base64 — the field-reported
+  // ReferenceError), WebSocket/MessageEvent/navigator/self/...
   if (_savedConsoleDescriptor) {
     try {
       Object.defineProperty(g, "console", _savedConsoleDescriptor);
@@ -2032,15 +2090,48 @@ export function removeGlobalWindowAlias(g, w) {
     _savedConsoleDescriptor = undefined;
     _dualConsole = null;
   }
-  // Restore the pre-alias timer descriptors — a dual dispatcher left behind
-  // (bound to a closed window whose setTimeout turns into a stub) would keep
-  // routing host calls into it and reopen the unref crash window.
-  if (_savedTimerDescriptors) {
-    for (const [name, desc] of Object.entries(_savedTimerDescriptors)) {
+  const restored = new Set<string>();
+  if (_savedHostGlobalDescriptors) {
+    for (const [name, desc] of Object.entries(_savedHostGlobalDescriptors)) {
       try { Object.defineProperty(g, name, desc); } catch (_) {}
+      restored.add(name);
     }
-    _savedTimerDescriptors = undefined;
+    _savedHostGlobalDescriptors = undefined;
   }
+  // Window-sourced globals get a TOMBSTONE grace period instead of an
+  // immediate delete (see the ALIAS_TOMBSTONE_MS comment). Collect what is
+  // still accessor-aliased, EXCLUDING the restored set — a restored host
+  // descriptor may itself be a getter (Bun's navigator/self are accessors)
+  // and must never be tombstone-deleted.
+  const generation = _aliasGeneration;
+  const names: string[] = [];
+  try {
+    for (const name of Object.getOwnPropertyNames(w)) {
+      if (restored.has(name)) continue;
+      try {
+        if (Object.getOwnPropertyDescriptor(g, name)?.get) names.push(name);
+      } catch (_) {}
+    }
+    for (const prop of ["window", "self", "top", "parent", "__capWindowFor"]) {
+      if (restored.has(prop)) continue;
+      try {
+        if (Object.getOwnPropertyDescriptor(g, prop)?.get) names.push(prop);
+      } catch (_) {}
+    }
+  } catch (_) {}
+  try {
+    const t = _hostSetTimeout(() => {
+      if (generation !== _aliasGeneration || _aliasRefCount > 0) return;
+      for (const name of names) {
+        try {
+          if (Object.getOwnPropertyDescriptor(g, name)?.get) delete g[name];
+        } catch (_) {}
+      }
+    }, _tombstoneMs);
+    try {
+      if (t && typeof t.unref === "function") t.unref();
+    } catch (_) {}
+  } catch (_) {}
 }
 
 function destroyDom(win) {
