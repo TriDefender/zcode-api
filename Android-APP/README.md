@@ -6,7 +6,8 @@ a Kotlin shell; OAuth login happens in the system browser via Custom Tabs.
 
 ## Prerequisites
 
-- **Bun** (latest stable) — for building the TS bundle
+- **Bun** 1.4.0 (pinned — CI and release builds use exactly this version) —
+  for building the TS bundle
 - **JDK 17** (Temurin recommended)
 - **Android SDK** with platform `android-35` and build-tools `35.0.0`
 - **GNU binutils** (`ar`, `tar`, `xz`) on PATH — only needed if you re-extract

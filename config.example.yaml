@@ -114,7 +114,8 @@ mcp:
 # Off-peak is a coding-plan feature: when `plan: start-plan`, the /async/*
 # routes return 400 `async_plan_unsupported` even when enabled: true.
 #
-# Env overrides: ZCODE_ASYNC_ENABLED, ZCODE_ASYNC_ORIGIN.
+# Env overrides: ZCODE_ASYNC_ENABLED, ZCODE_ASYNC_ORIGIN,
+# ZCODE_ASYNC_MAX_RETRIES, ZCODE_ASYNC_MAX_WAIT_MS.
 async:
   enabled: false
   origin: "https://zcode.z.ai"
