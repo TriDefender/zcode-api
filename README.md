@@ -250,6 +250,7 @@ file (best-effort; never affects handling). Requires a TTY with at least
 | `endpointRouting.enabled` | `ZCODE_ENDPOINT_ROUTING` | `true` | Server-controlled upstream URL remapping via `zcode.z.ai/api/v1/agent/configs` (mirrors ZCode's `ProviderEndpointRoutingService`; fail-open) |
 | `clientSigning.enabled` | `ZCODE_CLIENT_SIGNING` | `true` | Client request signing V4 (Ed25519 + proof-of-work, gate-driven; only activates when the server sets `codingPlanSignature.enable=true`; fail-open) |
 | `claim.enabled` | `ZCODE_CLAIM_ENABLED` | `false` | Weekend-plan auto-claim: poll `zcode.z.ai/api/v1/zcode-plan/billing/preview` and claim trial packages (see below) |
+| `async.enabled` / `origin` / `maxRetries` / `maxWaitMs` | `ZCODE_ASYNC_ENABLED` / `ZCODE_ASYNC_ORIGIN` / `ZCODE_ASYNC_MAX_RETRIES` / `ZCODE_ASYNC_MAX_WAIT_MS` | `false` / `https://zcode.z.ai` / `3` / `0` | Async off-peak bridge gating + tuning (see Async section) |
 | config file path | `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file to load on `serve` |
 
 Start-plan captcha tunables (env only): `ZCODE_CAPTCHA_RETRIES` (per-token solve retries), `CAPTCHA_POOL_MIN` / `CAPTCHA_POOL_MAX` (pre-solved token pool sizing).
@@ -315,7 +316,7 @@ bun test
 # Type check
 bun x tsc --noEmit
 
-# Run in dev mode
+# Run in dev mode (opens the interactive TUI; add `--cli serve` for headless)
 bun run src/index.ts config.yaml
 
 # Compile a single-file binary (→ zcode-proxy.exe, gitignored)
