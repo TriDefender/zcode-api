@@ -131,7 +131,7 @@ export interface AsyncConfig {
  * @see _reverse/NOTEPAD.md "Manual Claim Plan" section for the protocol.
  */
 export interface ClaimConfig {
-  /** Enable the claim subsystem (CLI `claim` command + auto scheduler). Default `false`. */
+  /** Enable the claim subsystem (CLI `claim` command + auto scheduler). Default `true`. */
   enabled: boolean;
   /** Auto-claim in the background while the proxy is serving. Default `true` (effective when `enabled`). */
   auto: boolean;

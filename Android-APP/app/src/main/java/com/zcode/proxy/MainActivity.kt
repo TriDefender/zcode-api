@@ -335,6 +335,7 @@ private fun AppScreen(themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Un
                                 reachable = reachable,
                                 loggedIn = loggedIn,
                                 provider = provider,
+                                proxyRunning = proxyRunning,
                                 onLogin = ::startLogin,
                                 onLogout = ::logout,
                             )
@@ -594,6 +595,7 @@ private fun AccountCard(
     reachable: Boolean,
     loggedIn: Boolean,
     provider: String,
+    proxyRunning: Boolean,
     onLogin: () -> Unit,
     onLogout: () -> Unit,
 ) {
@@ -633,7 +635,12 @@ private fun AccountCard(
                 )
                 Spacer(Modifier.width(6.dp))
                 Text(
-                    if (loggedIn) "已登录 · OAuth 授权" else "未登录",
+                    when {
+                        proxyRunning && loggedIn -> "已登录 · 代理运行中 · 登出已锁定"
+                        proxyRunning -> "未登录 · 代理运行中"
+                        loggedIn -> "已登录 · OAuth 授权"
+                        else -> "未登录"
+                    },
                     fontSize = 13.sp,
                     color = cs.onSurfaceVariant,
                 )
@@ -642,13 +649,13 @@ private fun AccountCard(
         if (loggedIn) {
             OutlinedButton(
                 onClick = onLogout,
-                enabled = reachable,
+                enabled = reachable && !proxyRunning,
                 shape = RoundedCornerShape(50),
                 colors = ButtonDefaults.outlinedButtonColors(
                     contentColor = cs.error,
                     disabledContentColor = cs.error.copy(alpha = 0.38f),
                 ),
-                border = BorderStroke(1.5.dp, cs.error.copy(alpha = if (reachable) 0.55f else 0.25f)),
+                border = BorderStroke(1.5.dp, cs.error.copy(alpha = if (reachable && !proxyRunning) 0.55f else 0.25f)),
                 modifier = Modifier.semantics { testTag = "logoutButton" },
             ) {
                 Text("登出", fontSize = 14.sp, fontWeight = FontWeight.Medium)

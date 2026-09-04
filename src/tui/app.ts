@@ -380,6 +380,12 @@ export async function runTui(args: ServeArgs): Promise<void> {
   }
 
   async function logout(): Promise<void> {
+    // Stop-first guard: the running proxy keeps serving with its in-memory
+    // credential until restarted, so logging out mid-run would only look applied.
+    if (state.serverStatus === "running" || state.serverStatus === "starting") {
+      setToast("stop the proxy before logging out (press s)", "err");
+      return;
+    }
     if (activeOauth) {
       void activeOauth.client.close().catch(() => {});
       activeOauth = null;

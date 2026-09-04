@@ -249,7 +249,7 @@ file (best-effort; never affects handling). Requires a TTY with at least
 | `identity.refererOrigin` | `ZCODE_REFERER_ORIGIN` | `https://zcode.z.ai` | `HTTP-Referer` URL |
 | `endpointRouting.enabled` | `ZCODE_ENDPOINT_ROUTING` | `true` | Server-controlled upstream URL remapping via `zcode.z.ai/api/v1/agent/configs` (mirrors ZCode's `ProviderEndpointRoutingService`; fail-open) |
 | `clientSigning.enabled` | `ZCODE_CLIENT_SIGNING` | `true` | Client request signing V4 (Ed25519 + proof-of-work, gate-driven; only activates when the server sets `codingPlanSignature.enable=true`; fail-open) |
-| `claim.enabled` | `ZCODE_CLAIM_ENABLED` | `false` | Weekend-plan auto-claim: poll `zcode.z.ai/api/v1/zcode-plan/billing/preview` and claim trial packages (see below) |
+| `claim.enabled` | `ZCODE_CLAIM_ENABLED` | `true` | Weekend-plan auto-claim: poll `zcode.z.ai/api/v1/zcode-plan/billing/preview` and claim trial packages (see below) |
 | `async.enabled` / `origin` / `maxRetries` / `maxWaitMs` | `ZCODE_ASYNC_ENABLED` / `ZCODE_ASYNC_ORIGIN` / `ZCODE_ASYNC_MAX_RETRIES` / `ZCODE_ASYNC_MAX_WAIT_MS` | `false` / `https://zcode.z.ai` / `3` / `0` | Async off-peak bridge gating + tuning (see Async section) |
 | config file path | `ZCODE_PROXY_CONFIG` | `config.yaml` | Config file to load on `serve` |
 

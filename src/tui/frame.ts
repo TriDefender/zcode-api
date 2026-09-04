@@ -277,7 +277,11 @@ export function buildFrame(s: FrameState): Frame {
       ? [
           { t: " Logged In ", c: DIM },
           { t: "  " },
-          { t: " Logout ", c: BTN_GRAY, action: { kind: "key", key: "o" } },
+          // Logout is stop-first while the proxy is running — the server keeps
+          // serving with its in-memory credential until restarted.
+          busy
+            ? { t: " Logout ", c: DIM }
+            : { t: " Logout ", c: BTN_GRAY, action: { kind: "key", key: "o" } },
         ]
       : [
           { t: " OAuth Login ", c: BTN_GREEN, action: { kind: "key", key: "l" } },

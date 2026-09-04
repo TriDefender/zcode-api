@@ -138,7 +138,7 @@ logging:
       defaultModel: "",
     });
     expect(cfg.claim).toEqual({
-      enabled: false,
+      enabled: true,
       auto: true,
       origin: "https://zcode.z.ai",
       pollIntervalMs: 300000,
