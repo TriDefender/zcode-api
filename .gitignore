@@ -21,3 +21,4 @@ Android-APP/gradlew.bat
 # Generated server bundle (esbuild output) — CI/local builds regenerate it via
 # "bun run build:android-bundle" + copy; see Android-APP/AGENTS.md BUILD section.
 Android-APP/app/src/main/assets/server_bundle/server.cjs
+/Android-APP/design/previews

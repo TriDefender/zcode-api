@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 深色模式下启动瞬间的窗口底色（android:Theme.Material 即深色主题） -->
+    <style name="Theme.ZcodeProxy" parent="android:Theme.Material.NoActionBar" />
+</resources>
