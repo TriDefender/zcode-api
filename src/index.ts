@@ -8,13 +8,14 @@ import { AuthManager } from "./auth/manager.js";
 import { startServer, type ProxyServer } from "./server/server.js";
 import { startControlListener, LogBuffer, type ControlState } from "./android/control.js";
 import { loadCredential, saveCredential, clearCredential, getStorePath } from "./auth/store.js";
-import { ZaiOAuthClient, BigmodelOAuthClient } from "./auth/oauth.js";
+import { ZaiOAuthClient, BigmodelOAuthClient, LOGIN_TIMEOUT_MS, parsePastedCallbackUrl, type OAuthResult } from "./auth/oauth.js";
 import { KeyResolver } from "./auth/resolver.js";
 import type { Credential } from "./auth/types.js";
 import type { ProviderId } from "./provider/types.js";
 import type { ProxyConfig } from "./config/types.js";
 import { updateConfigYaml } from "./config/edit.js";
 import { openBrowser } from "./runtime/open-browser.js";
+import { pasteLoginInstructions, readPastedLine, boldIfTTY } from "./runtime/paste-login.js";
 import { buildServerOptions } from "./server/server-options.js";
 import { readFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -405,22 +406,31 @@ async function claimCommand(args: string[]): Promise<void> {
 async function authLogin(args: string[]): Promise<void> {
   const provider = args[0] as ProviderId | undefined;
   const importMode = args.includes("--import");
+  // Headless paste login: --paste flag or ZCODE_OAUTH_PASTE=1 (docker-friendly).
+  const pasteMode =
+    args.includes("--paste") || /^(1|true|yes)$/i.test(process.env.ZCODE_OAUTH_PASTE ?? "");
 
   if (!provider || (provider !== "zai" && provider !== "bigmodel")) {
-    console.error("Usage: zcode-proxy auth login <zai|bigmodel> [--import]");
+    console.error("Usage: zcode-proxy auth login <zai|bigmodel> [--import] [--paste]");
+    process.exit(1);
+  }
+  if (pasteMode && provider !== "bigmodel") {
+    console.error("--paste applies to the bigmodel auth-code flow only.");
+    console.error("zai login is server-mediated (no localhost callback) and already works headless.");
     process.exit(1);
   }
 
   ensureConfigWithDeviceMid();
 
-  console.log(`Logging in: ${provider}${importMode ? " (import)" : " (OAuth)"}\n`);
+  const mode = importMode ? "(import)" : pasteMode ? "(OAuth, paste)" : "(OAuth)";
+  console.log(`Logging in: ${provider} ${mode}\n`);
 
   let cred: Credential;
 
   if (importMode) {
     cred = importFromZCodeConfig(provider);
   } else {
-    const { accessToken, userId, jwt } = await runOAuth(provider);
+    const { accessToken, userId, jwt } = await runOAuth(provider, pasteMode);
     console.log("\nResolving API key...");
     const resolver = new KeyResolver();
     cred = await resolver.resolveCodingPlanCredential(accessToken, provider, userId);
@@ -506,16 +516,21 @@ async function authStatus(): Promise<void> {
   console.log(`  Store:   ${getStorePath()}`);
 }
 
-async function runOAuth(provider: ProviderId): Promise<{ accessToken: string; userId?: string; jwt?: string }> {
+async function runOAuth(provider: ProviderId, pasteMode: boolean): Promise<OAuthResult> {
   if (provider === "bigmodel") {
     const oauth = new BigmodelOAuthClient();
+    if (pasteMode) return runPasteLogin(oauth);
     const result = await oauth.authorize((url) => {
       console.log("Open this URL to authorize:\n");
       console.log(`  ${url}\n`);
       console.log("Waiting for authorization... (expires in 300s)\n");
+      console.log(
+        "Headless/Docker? The callback page will NOT load here — Ctrl-C and " +
+        "re-run with `auth login bigmodel --paste` to paste the redirected URL instead.\n",
+      );
       openBrowser(url);
     });
-    return { accessToken: result.accessToken, userId: result.userId, jwt: result.jwt };
+    return result;
   }
 
   const oauth = new ZaiOAuthClient();
@@ -525,7 +540,32 @@ async function runOAuth(provider: ProviderId): Promise<{ accessToken: string; us
     console.log("Waiting for authorization... (expires in 300s)\n");
     openBrowser(url);
   });
-  return { accessToken: result.accessToken, userId: result.userId, jwt: result.jwt };
+  return result;
+}
+
+/**
+ * Headless bigmodel login (`auth login bigmodel --paste`): the localhost
+ * callback server is still bound — it defines the redirect port and the
+ * browser can never reach it from inside a container anyway — but instead of
+ * waiting on it, the user pastes the redirected URL back. The exact
+ * `started.callbackUrl` string is used BOTH as the authorize `redirect` param
+ * and as the exchange `redirect_uri` (the token endpoint requires them to
+ * match), so the pair stays consistent by construction.
+ */
+async function runPasteLogin(oauth: BigmodelOAuthClient): Promise<OAuthResult> {
+  const started = await oauth.start();
+  try {
+    console.log(pasteLoginInstructions(started.authorizeUrl, started.callbackUrl, LOGIN_TIMEOUT_MS));
+    openBrowser(started.authorizeUrl);
+    process.stdout.write("\n" + boldIfTTY("Paste the FULL redirected URL here, then press Enter:") + "\n> ");
+    const pasted = await readPastedLine(LOGIN_TIMEOUT_MS);
+    const code = parsePastedCallbackUrl(pasted, started.state);
+    console.log("\nExchanging authorization code...");
+    const tokens = await oauth.exchangeCode(code, started.callbackUrl, started.state);
+    return { accessToken: tokens.accessToken, provider: "bigmodel", userId: tokens.userId, jwt: tokens.jwt };
+  } finally {
+    await oauth.close();
+  }
 }
 
 function importFromZCodeConfig(provider: ProviderId): Credential {

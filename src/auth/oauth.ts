@@ -38,7 +38,7 @@ const BIGMODEL_HOST = "https://bigmodel.cn";
 const BIGMODEL_APP_ID = "zcode";
 
 /** Overall login timeout shared by both flows (bundle `tln`). */
-const LOGIN_TIMEOUT_MS = 300_000;
+export const LOGIN_TIMEOUT_MS = 300_000;
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -513,6 +513,49 @@ export class BigmodelOAuthClient extends AuthCodeOAuthClient {
       fetchImpl,
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Headless paste login (auth-code flow)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a callback URL the user pasted back into the terminal (headless
+ * `--paste` login, mirroring gcloud/gh CLI). Only the query string is
+ * inspected — the pathname/host are whatever the browser's address bar shows
+ * and are never validated. Tolerates copy artifacts from web pages: wrapping
+ * quotes/brackets, surrounding whitespace, and `&amp;` entities (a paste from
+ * a rendered page splits the query at the `&` inside `&amp;`, which breaks
+ * `state`). Returns the auth code (`authCode` or `code` param); throws on a
+ * CSRF `state` mismatch or a missing code.
+ */
+export function parsePastedCallbackUrl(raw: string, expectedState: string): string {
+  let text = raw.trim().replace(/^["'`<([{]+/, "").replace(/["'`>\])}]+$/, "");
+  text = text.replace(/&amp;/gi, "&");
+
+  const q = text.indexOf("?");
+  const query = (q >= 0 ? text.slice(q + 1) : text).split("#")[0];
+  const params = new URLSearchParams(query);
+
+  const state = params.get("state") ?? "";
+  if (!state || state !== expectedState) {
+    throw new Error(
+      "OAuth state mismatch — the pasted URL does not belong to this login " +
+      "session (possible CSRF). Retry the login.",
+    );
+  }
+
+  const providerError = params.get("error");
+  const code = params.get("authCode") ?? params.get("code") ?? "";
+  if (!code) {
+    throw new Error(
+      providerError
+        ? `Authorization failed: provider returned error=${providerError}`
+        : "No authorization code in the pasted URL — paste the redirected " +
+          "127.0.0.1 callback URL (the one that failed to load), not the authorize URL.",
+    );
+  }
+  return code;
 }
 
 // ---------------------------------------------------------------------------

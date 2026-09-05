@@ -85,6 +85,8 @@ const BTN_RED = "38;2;255;255;255;48;2;218;54;51";
 const BTN_BLUE = "38;2;255;255;255;48;2;31;111;235";
 const BTN_GRAY = "38;2;201;209;217;48;2;48;54;61";
 const BTN_SELECTED = BTN_BLUE;
+/** Black on bright yellow — login-hint attention chip, 16-color safe. */
+const HINT_CHIP = "30;103";
 
 function paint(code: string, t: string): string {
   return `\x1b[${code}m${t}\x1b[0m`;
@@ -292,7 +294,10 @@ export function buildFrame(s: FrameState): Frame {
   regions.push(...loginRow.regions);
 
   if (s.loginInFlight && s.loginHint) {
-    emit((composeRow(w, lines.length, "Login", [{ t: `» ${s.loginHint}`, c: AMBER }])).line);
+    // High-contrast attention chip (black on bright yellow): the headless
+    // paste fallback hint must not be missed — plain amber text reads as
+    // ordinary on many terminal palettes.
+    emit((composeRow(w, lines.length, "Login", [{ t: ` ▸ ${s.loginHint} `, c: HINT_CHIP }])).line);
   }
 
   emit(renderBottomBorder(w));

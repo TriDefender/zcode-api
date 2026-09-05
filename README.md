@@ -54,6 +54,33 @@ If you already use the ZCode desktop app, import the API key directly:
 bun run src/index.ts auth login bigmodel --import
 ```
 
+### Headless / Docker Login (paste mode, bigmodel)
+
+On a headless machine (Docker container, VPS) the browser cannot reach the
+localhost callback server inside the container.
+
+```bash
+bun run src/index.ts auth login bigmodel --paste
+```
+or via env (handy in docker):
+```bash
+ZCODE_OAUTH_PASTE=1 bun run src/index.ts auth login bigmodel
+```
+
+1. The CLI prints the bigmodel authorize URL — open it in a browser **on any
+   machine** (your laptop is fine).
+2. After authorizing, the browser redirects to
+   `http://127.0.0.1:<port>/oauth/callback/bigmodel?...` and the page will
+   not load (connection refused).
+3. Copy the full redirected URL from the address bar, paste it back into
+   the CLI, and press Enter. The CLI exchanges it for credentials.
+
+Tips:
+
+- The TUI supports the same flow: press `l` (or click `OAuth Login`); if the callback can't reach the machine
+  (headless), press `L` and the panel temporarily suspends while you paste the
+  redirected URL, then resumes.
+
 ## Endpoints
 
 | Method | Path | Description |
@@ -223,6 +250,7 @@ captured in-process) with scrollback and tail-following.
 |-----|--------|
 | `s` | Start / stop the proxy server |
 | `l` | OAuth login for the current provider (opens the browser) |
+| `L` | Headless paste login (`bigmodel`): while a login is waiting, switch it to paste-the-redirected-URL mode |
 | `o` | Logout (cancels an in-flight login and releases its callback port) |
 | `p` / `t` | Switch provider (`zai` ↔ `bigmodel`) / plan (`coding-plan` ↔ `start-plan`) — requires the proxy stopped, persisted to `config.yaml` |
 | `↑↓` / `PgUp`/`PgDn` / `Home`/`End` | Scroll the log pane |
@@ -333,7 +361,9 @@ docker pull ghcr.io/tridefender/zcode-proxy:latest
 
 Upstream credentials come only from `auth login`, so the container needs the
 encrypted credential store. Log in on the host with a fixed encryption seed
-(the container cannot derive the default machine seed), then mount the store:
+(the container cannot derive the default machine seed), then mount the store
+— or log in **inside** the container with bigmodel paste mode (see
+[Headless / Docker Login](#headless--docker-login-paste-mode-bigmodel)):
 
 ```bash
 # 1. Log in on the host with a portable seed
@@ -359,6 +389,7 @@ Common environment variables (see the Configuration table above for the full lis
 | `ZCODE_PROXY_API_KEY` | Client auth shared secret |
 | `ZCODE_PROXY_CREDENTIAL_SECRET` | Encryption seed for the credential store (must match the seed used at `auth login`) |
 | `ZCODE_PROXY_PORT` | Listen port (default `8080`) |
+| `ZCODE_OAUTH_PASTE` | Set `1` for bigmodel paste-mode login inside the container (see [Headless / Docker Login](#headless--docker-login-paste-mode-bigmodel)) |
 
 docker-compose:
 
