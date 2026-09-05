@@ -11,7 +11,7 @@
  */
 import { loadCredential } from "../auth/store.js";
 import { buildIdentityHeaders } from "../proxy/identity.js";
-import { inspectJwt, JWT_STALE_HOURS } from "../auth/jwt-age.js";
+import { inspectJwt } from "../auth/jwt-age.js";
 import type { ProxyConfig } from "../config/types.js";
 import { errorResponse } from "../proxy/handler.js";
 
@@ -34,8 +34,13 @@ export interface QuotaPlanEntry {
 export interface QuotaSnapshot {
   provider: string;
   serverTime: number;
-  /** Stored start-plan JWT age info — stale JWTs cause silent billing 401s. */
-  jwt: { ageHours: number; issuedAt: number; stale: boolean } | null;
+  /**
+   * Stored start-plan JWT age (informational). The token has no `exp` and is
+   * not rejected by age — an 8-day-old JWT still serves billing/balance. Only
+   * a real 401/3012 from the billing gateway indicates re-login is needed,
+   * which surfaces in `errors`.
+   */
+  jwt: { ageHours: number; issuedAt: number } | null;
   balances: QuotaBalanceEntry[];
   claimablePlans: QuotaPlanEntry[];
   errors: string[];
@@ -69,7 +74,7 @@ export async function collectQuotaSnapshot(config: ProxyConfig, fetchImpl: typeo
   }
   const jwtInfo = inspectJwt(cred.jwt);
   const jwt = jwtInfo
-    ? { ageHours: Number(jwtInfo.ageHours.toFixed(2)), issuedAt: jwtInfo.iat, stale: jwtInfo.ageHours >= JWT_STALE_HOURS }
+    ? { ageHours: Number(jwtInfo.ageHours.toFixed(2)), issuedAt: jwtInfo.iat }
     : null;
   const identity = config.identity;
   const idHeaders = buildIdentityHeaders(identity);

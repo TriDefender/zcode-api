@@ -1,12 +1,11 @@
 /**
  * JWT age inspection for the stored start-plan token.
  *
- * The upstream issues `zcodejwttoken` with a short server-side session; the
- * token payload carries `iat` but no `exp`, so staleness is judged by age.
- * Empirically the billing gateway starts returning `3012 unusual activity` /
- * empty 401s once the token is hours old, while the chat path keeps working
- * off warm upstream state — a silent failure that is hard to debug. Surfacing
- * the age lets operators (and the /quota endpoint) warn before that happens.
+ * Informational only: the token payload carries `iat` but no `exp`, and the
+ * billing gateway does NOT reject by age — an 8-day-old JWT still serves
+ * `billing/balance` (verified live). Re-login is only needed when the gateway
+ * actually returns 401 / 3012. The age is surfaced so operators can see how
+ * fresh the credential is.
  */
 export interface JwtInfo {
   /** Unix seconds when the token was issued. */
@@ -38,6 +37,3 @@ export function inspectJwt(jwt: string): JwtInfo | null {
     return null;
   }
 }
-
-/** Age (hours) beyond which the start-plan JWT is considered stale for billing APIs. */
-export const JWT_STALE_HOURS = 6;

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { inspectJwt, JWT_STALE_HOURS } from "./jwt-age.js";
+import { inspectJwt } from "./jwt-age.js";
 
 function makeJwt(payload: object): string {
   const b64 = (s: string) => Buffer.from(s).toString("base64url");
@@ -22,7 +22,10 @@ describe("inspectJwt", () => {
     expect(inspectJwt(makeJwt({ sub: "x" }))).toBeNull();
   });
 
-  it("stale threshold is 6h", () => {
-    expect(JWT_STALE_HOURS).toBe(6);
+  it("reports old tokens as informational (age can exceed days)", () => {
+    const iat = Math.floor(Date.now() / 1000) - 8 * 24 * 3600; // 8 days ago
+    const info = inspectJwt(makeJwt({ iat }));
+    expect(info).not.toBeNull();
+    expect(info!.ageHours).toBeGreaterThan(190);
   });
 });
