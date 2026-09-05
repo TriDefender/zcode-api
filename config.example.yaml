@@ -139,7 +139,7 @@ async:
 #
 # IMPORTANT: requires a logged-in credential (claim uses the JWT from
 # `auth login`), and identity.appVersion must be >= the campaign's minimum
-  # client version (default 3.11.2) or the server rejects with `ineligible`.
+# client version (default 3.11.2) or the server rejects with `ineligible`.
 #
 # Env overrides: ZCODE_CLAIM_ENABLED, ZCODE_CLAIM_AUTO, ZCODE_CLAIM_ORIGIN,
 # ZCODE_CLAIM_POLL_INTERVAL_MS.
