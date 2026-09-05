@@ -243,7 +243,7 @@ file (best-effort; never affects handling). Requires a TTY with at least
 | `auth.oauthCredentialsPath` | — | — | Parsed but currently not honored — the credential store path is fixed at `~/.zcode-proxy/credentials.json` |
 | `provider` | `ZCODE_PROVIDER` | `zai` | Upstream provider |
 | `plan` | — | `coding-plan` | Plan tier: `coding-plan` (direct upstream) or `start-plan` (zcode.z.ai gateway + JWT + captcha) |
-| `identity.appVersion` | `ZCODE_APP_VERSION` | `3.10.0` | `User-Agent: ZCode/{version}` |
+| `identity.appVersion` | `ZCODE_APP_VERSION` | `3.11.2` | `User-Agent: ZCode/{version}` |
 | `identity.deviceMid` | `ZCODE_IDENTITY_DEVICE_MID` | auto-generated | Device identity (`X-Device-Mid`); UUIDv4 generated once at first `auth login` / config creation and reused forever |
 | `identity.sourceTitle` | `ZCODE_SOURCE_TITLE` | `cli` | `X-Title: Z Code@{title}` |
 | `identity.refererOrigin` | `ZCODE_REFERER_ORIGIN` | `https://zcode.z.ai` | `HTTP-Referer` URL |

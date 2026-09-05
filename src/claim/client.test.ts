@@ -56,11 +56,11 @@ describe("createClaimClient — getPreviews", () => {
       capturedUrl = req.url;
       return Promise.resolve(jsonResp(PREVIEW_BODY));
     });
-    const client = createClaimClient({ origin: "https://zcode.z.ai/", jwt: "jwt-1", appVersion: "3.10.0", platform: "win32-x64", fetchImpl });
+    const client = createClaimClient({ origin: "https://zcode.z.ai/", jwt: "jwt-1", appVersion: "3.11.2", platform: "win32-x64", fetchImpl });
 
     const plans = await client.getPreviews();
 
-    expect(capturedUrl).toBe("https://zcode.z.ai/api/v1/zcode-plan/billing/preview?app_version=3.10.0&platform=win32-x64");
+    expect(capturedUrl).toBe("https://zcode.z.ai/api/v1/zcode-plan/billing/preview?app_version=3.11.2&platform=win32-x64");
     expect(plans).toHaveLength(1);
     const p = plans[0];
     expect(p.planId).toBe("weekend-free-1024");
@@ -88,9 +88,9 @@ describe("createClaimClient — getPreviews", () => {
       auths.push(req.headers.get("authorization"));
       return Promise.resolve(jsonResp(PREVIEW_BODY));
     });
-    const withJwt = createClaimClient({ origin: "https://zcode.z.ai", jwt: "jwt-1", appVersion: "3.10.0", platform: "win32-x64", fetchImpl });
+    const withJwt = createClaimClient({ origin: "https://zcode.z.ai", jwt: "jwt-1", appVersion: "3.11.2", platform: "win32-x64", fetchImpl });
     await withJwt.getPreviews();
-    const anon = createClaimClient({ origin: "https://zcode.z.ai", appVersion: "3.10.0", platform: "win32-x64", fetchImpl });
+    const anon = createClaimClient({ origin: "https://zcode.z.ai", appVersion: "3.11.2", platform: "win32-x64", fetchImpl });
     await anon.getPreviews();
     expect(auths[0]).toBe("Bearer jwt-1");
     expect(auths[1]).toBeNull();
@@ -98,10 +98,10 @@ describe("createClaimClient — getPreviews", () => {
 
   it("throws on non-zero biz code and missing data", async () => {
     const fetchImpl = makeMockFetch(() => Promise.resolve(jsonResp({ code: 1002, msg: "campaign ended" })));
-    const client = createClaimClient({ origin: "https://zcode.z.ai", appVersion: "3.10.0", platform: "win32-x64", fetchImpl });
+    const client = createClaimClient({ origin: "https://zcode.z.ai", appVersion: "3.11.2", platform: "win32-x64", fetchImpl });
     await expect(client.getPreviews()).rejects.toThrow("1002");
     const fetchNoData = makeMockFetch(() => Promise.resolve(jsonResp({ code: 0 })));
-    const client2 = createClaimClient({ origin: "https://zcode.z.ai", appVersion: "3.10.0", platform: "win32-x64", fetchImpl: fetchNoData });
+    const client2 = createClaimClient({ origin: "https://zcode.z.ai", appVersion: "3.11.2", platform: "win32-x64", fetchImpl: fetchNoData });
     await expect(client2.getPreviews()).rejects.toThrow("preview failed");
   });
 });
@@ -121,9 +121,9 @@ describe("createClaimClient — identity header set", () => {
     const client = createClaimClient({
       origin: "https://zcode.z.ai",
       jwt: "jwt-1",
-      appVersion: "3.10.0",
+      appVersion: "3.11.2",
       platform: "win32-x64",
-      identity: { appVersion: "3.10.0", refererOrigin: "https://zcode.z.ai", sourceTitle: "cli", deviceMid: "d4ad5b5e-1234-4abc-9def-aabbccddeeff" },
+      identity: { appVersion: "3.11.2", refererOrigin: "https://zcode.z.ai", sourceTitle: "cli", deviceMid: "d4ad5b5e-1234-4abc-9def-aabbccddeeff" },
       fetchImpl,
     });
 
@@ -134,7 +134,7 @@ describe("createClaimClient — identity header set", () => {
     for (const r of seen) {
       expect(r.deviceMid).toBe("d4ad5b5e-1234-4abc-9def-aabbccddeeff");
       expect(r.agent).toBeNull();
-      expect(r.version).toBe("3.10.0");
+      expect(r.version).toBe("3.11.2");
     }
     expect(seen[0].path).toBe("/api/v1/zcode-plan/billing/preview");
     expect(seen[1].path).toBe("/api/v1/zcode-plan/billing/claim");
@@ -162,7 +162,7 @@ describe("createClaimClient — claim", () => {
       body = await req.text();
       return jsonResp({ code: 0, data: { plan: { starts_at: 1783000000, ends_at: 1783200000 } } });
     });
-    const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "jwt-1", appVersion: "3.10.0", platform: "linux-x64", fetchImpl });
+    const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "jwt-1", appVersion: "3.11.2", platform: "linux-x64", fetchImpl });
 
     const out = await client.claim("weekend-free-1024", { verifyParam: "cap-token", region: "cn-hangzhou" });
 
@@ -170,7 +170,7 @@ describe("createClaimClient — claim", () => {
     expect(cap!.auth).toBe("Bearer jwt-1");
     expect(cap!.captchaParam).toBe("cap-token");
     expect(cap!.captchaRegion).toBe("cn-hangzhou");
-    expect(cap!.appVersion).toBe("3.10.0");
+    expect(cap!.appVersion).toBe("3.11.2");
     expect(cap!.platform).toBe("linux-x64");
     expect(cap!.contentType).toBe("application/json");
     expect(JSON.parse(body)).toEqual({ plan_id: "weekend-free-1024" });
@@ -183,7 +183,7 @@ describe("createClaimClient — claim", () => {
       region = req.headers.get("x-aliyun-captcha-verify-region");
       return Promise.resolve(jsonResp({ code: 0, data: { plan: {} } }));
     });
-    const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "jwt-1", appVersion: "3.10.0", platform: "win32-x64", fetchImpl });
+    const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "jwt-1", appVersion: "3.11.2", platform: "win32-x64", fetchImpl });
     await client.claim("p1", { verifyParam: "t" });
     expect(region).toBeNull();
   });
@@ -203,7 +203,7 @@ describe("createClaimClient — claim", () => {
       const fetchImpl = makeMockFetch(() =>
         Promise.resolve(jsonResp({ code, msg: `biz ${code}`, data: { plan: { ends_at: 1783100000 } } })),
       );
-      const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "jwt-1", appVersion: "3.10.0", platform: "win32-x64", fetchImpl });
+      const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "jwt-1", appVersion: "3.11.2", platform: "win32-x64", fetchImpl });
       const out = await client.claim("p1", { verifyParam: "t" });
       expect(out.ok).toBe(false);
       if (!out.ok) {
@@ -216,13 +216,13 @@ describe("createClaimClient — claim", () => {
 
   it("derives http_error / login_required from HTTP status without biz code", async () => {
     const fetch500 = makeMockFetch(() => Promise.resolve(jsonResp({ msg: "boom" }, 500)));
-    const c1 = createClaimClient({ origin: "https://zcode.z.ai", jwt: "j", appVersion: "3.10.0", platform: "p", fetchImpl: fetch500 });
+    const c1 = createClaimClient({ origin: "https://zcode.z.ai", jwt: "j", appVersion: "3.11.2", platform: "p", fetchImpl: fetch500 });
     const out1 = await c1.claim("p1", { verifyParam: "t" });
     expect(out1.ok).toBe(false);
     if (!out1.ok) expect(out1.failureKind).toBe("http_error");
 
     const fetch401 = makeMockFetch(() => Promise.resolve(new Response("", { status: 401 })));
-    const c2 = createClaimClient({ origin: "https://zcode.z.ai", jwt: "j", appVersion: "3.10.0", platform: "p", fetchImpl: fetch401 });
+    const c2 = createClaimClient({ origin: "https://zcode.z.ai", jwt: "j", appVersion: "3.11.2", platform: "p", fetchImpl: fetch401 });
     const out2 = await c2.claim("p1", { verifyParam: "t" });
     expect(out2.ok).toBe(false);
     if (!out2.ok) expect(out2.failureKind).toBe("login_required");
@@ -232,7 +232,7 @@ describe("createClaimClient — claim", () => {
     const fetchImpl = makeMockFetch(() => {
       throw new Error("should not be called");
     });
-    const client = createClaimClient({ origin: "https://zcode.z.ai", appVersion: "3.10.0", platform: "p", fetchImpl });
+    const client = createClaimClient({ origin: "https://zcode.z.ai", appVersion: "3.11.2", platform: "p", fetchImpl });
     const out = await client.claim("p1", { verifyParam: "t" });
     expect(out.ok).toBe(false);
     if (!out.ok) expect(out.failureKind).toBe("login_required");
