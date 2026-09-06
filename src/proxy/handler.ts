@@ -1,11 +1,15 @@
 /**
  * Main proxy handler — routes requests, injects auth, forwards, and streams responses.
  *
- * **Translation mode**:
- * - coding-plan and start-plan both use an OpenAI-compatible upstream.
- * - Anthropic clients are translated Anthropic → OpenAI upstream → Anthropic
- *   response. OpenAI clients are already in the upstream's native format and
- *   pass through.
+ * **v2.6 upstream reality (post-PR #34)**: BOTH plan tiers post an
+ * Anthropic-format upstream — coding-plan mirrors the real ZCode client
+ * (api.z.ai/api/anthropic → ultra via endpoint routing); start-plan posts to
+ * zcode.z.ai's Anthropic gateway with the plan JWT. Consequently:
+ * - OpenAI clients are translated OpenAI→Anthropic on the way up and
+ *   Anthropic→OpenAI on the way down ("translation" mode).
+ * - Anthropic clients speak the upstream's native format — requests are
+ *   forwarded with body transforms only ("passthrough" mode,
+ *   `decompress: false`).
  *
  * @see .omo/plans/zcode-proxy.md Task 6
  */
@@ -40,6 +44,7 @@ import { translateRequestAnthropicToOpenAI, translateResponseOpenAIToAnthropic }
 import { anthropicSseToOpenaiSse, openaiSseToAnthropicSse } from "../translator/sse-translator.js";
 import type { OpenAIChatRequest, OpenAIChatResponse, AnthropicMessagesRequest, AnthropicMessagesResponse } from "../translator/types.js";
 import { dumpPhase, dumpHeaders, dumpBody, dumpEnabled } from "./dump.js";
+import { inflateWithCap } from "./inflate.js";
 
 /** Options for the proxy handler. */
 export interface ProxyHandlerOptions {
@@ -508,34 +513,12 @@ export class InflatedBodyTooLargeError extends Error {
 }
 
 async function inflateGzipBody(bytes: Uint8Array): Promise<Uint8Array> {
-  const gunzip = new DecompressionStream("gzip") as unknown as ReadableWritablePair<Uint8Array, Uint8Array>;
-  const source = new ReadableStream<Uint8Array>({
-    start(controller) {
-      controller.enqueue(bytes);
-      controller.close();
-    },
-  });
-  const reader = source.pipeThrough(gunzip).getReader();
-  const parts: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_INFLATED_BODY_BYTES) {
-        await reader.cancel().catch(() => {});
-        throw new InflatedBodyTooLargeError(MAX_INFLATED_BODY_BYTES);
-      }
-      parts.push(value);
-    }
-  } catch (err) {
-    if (err instanceof InflatedBodyTooLargeError) throw err;
-    throw new Error(`request body is marked content-encoding: gzip but failed to decompress: ${(err as Error).message}`);
-  } finally {
-    reader.releaseLock?.();
+  const result = await inflateWithCap(bytes, MAX_INFLATED_BODY_BYTES);
+  if (!result.ok) {
+    if (result.reason === "too_large") throw new InflatedBodyTooLargeError(MAX_INFLATED_BODY_BYTES);
+    throw new Error(`request body is marked content-encoding: gzip but failed to decompress: ${result.detail}`);
   }
-  return Buffer.concat(parts);
+  return result.bytes;
 }
 
 /**
@@ -543,13 +526,15 @@ async function inflateGzipBody(bytes: Uint8Array): Promise<Uint8Array> {
  * Preserves status and the allowlisted headers, and honors the client's
  * `Accept-Encoding` for gzip.
  *
- * The upstream request always advertises `accept-encoding: gzip` (see
- * `buildUpstreamHeaderPairs`), so the upstream typically returns a gzip body.
- * If THIS client did not advertise gzip, we decompress before forwarding and
- * drop the now-mismatched `content-encoding`/`content-length` headers —
- * otherwise clients whose HTTP stack does not auto-decompress (e.g. some
- * Tauri-based clients) receive raw gzip bytes and fail to parse the JSON
- * body with "non-JSON body" errors despite a 200 status.
+ * The upstream request FORWARDS the client's `accept-encoding` (only
+ * defaulting to "gzip" when the client sent none — see
+ * `buildUpstreamHeaderPairs`), so the upstream compresses only when the
+ * client can decode it. If THIS client did not advertise gzip but the body
+ * arrived gzip-compressed anyway, we decompress before forwarding and drop
+ * the now-mismatched `content-encoding`/`content-length` headers — otherwise
+ * clients whose HTTP stack does not auto-decompress (e.g. some Tauri-based
+ * clients) receive raw gzip bytes and fail to parse the JSON body with
+ * "non-JSON body" errors despite a 200 status.
  */
 function passthroughResponse(
   upstream: Response,

@@ -172,9 +172,13 @@ export async function handleResponses(
     } catch (err) {
       return errorResponse(400, "translation_failed", `Chat→Anthropic translation failed: ${(err as Error).message}`);
     }
+    // userId gating mirrors handler.ts: coding-plan injects the OAuth userId,
+    // start-plan omits it (internal consistency; the bundle is presence-gated
+    // with no plan concept — whether start-plan should carry it is not
+    // determinable from _reverse, kept aligned with the sibling path).
     upstreamRequestBody = transformRequestBody(JSON.stringify(anthropicReq), {
       format: "anthropic",
-      userId: cred.userId,
+      userId: startPlan ? undefined : cred.userId,
       startPlan,
     }) ?? JSON.stringify(anthropicReq);
   }

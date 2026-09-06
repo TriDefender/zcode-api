@@ -14,7 +14,13 @@ import type { Credential } from "./types.js";
 export class AuthManager {
   private oauthCred: Credential | null = null;
 
-  /** Returns the current credential, refreshing if necessary. */
+  /**
+   * Returns the current credential or throws when none is stored.
+   *
+   * There is no proactive refresh: the login flows never populate
+   * `expiresAt`, so expiry surfaces as an upstream 401, not here. The guard
+   * below is retained for the day a flow starts filling `expiresAt`.
+   */
   async getCredential(): Promise<Credential> {
     if (this.oauthCred) {
       if (this.oauthCred.expiresAt && Date.now() >= this.oauthCred.expiresAt) {

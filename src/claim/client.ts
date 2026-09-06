@@ -17,7 +17,7 @@
  * carry the full identity set minus `X-ZCode-Agent` — same header set the
  * endpoint-routing config fetch uses for zcode.z.ai control-plane calls.
  *
- * @see _reverse/NOTEPAD.md "Manual Claim Plan" section.
+ * @see _reverse/NOTEPAD.md (billing/claim endpoints section).
  */
 import type { ClaimablePlan, ClaimOutcome, PlanEntitlement } from "./types.js";
 import { classifyClaimCode } from "./types.js";

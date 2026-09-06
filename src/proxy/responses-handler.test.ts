@@ -275,6 +275,26 @@ describe("handleResponses captcha (start-plan)", () => {
     expect(seen).toEqual([null]);
     expect(captcha.minted()).toBe(0);
   });
+
+  it("injects metadata.user_id on coding-plan but NOT on start-plan (CL-15, mirrors handler.ts)", async () => {
+    const START_PLAN: ProxyConfig = { ...CONFIG, plan: "start-plan", provider: "bigmodel" };
+    let codingBody = "";
+    let startBody = "";
+    const codingFetch = (async (request: Request): Promise<Response> => {
+      codingBody = await request.text();
+      return new Response(anthropicMsg("ok"), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const startFetch = (async (request: Request): Promise<Response> => {
+      startBody = await request.text();
+      return new Response(anthropicMsg("ok"), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+
+    await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), { config: CONFIG, auth, fetchImpl: codingFetch });
+    await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), { config: START_PLAN, auth, fetchImpl: startFetch });
+
+    expect(JSON.parse(codingBody).metadata?.user_id).toBe("u1");
+    expect(JSON.parse(startBody).metadata?.user_id).toBeUndefined();
+  });
 });
 
 // CL-08: /v1/responses used to give up on the FIRST connect-level failure and

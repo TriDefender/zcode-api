@@ -3,7 +3,7 @@
  * @see .omo/plans/zcode-proxy.md Task 12
  */
 import { describe, it, expect } from "bun:test";
-import { anthropicSseToOpenaiSse, openaiSseToAnthropicSse } from "./sse-translator.js";
+import { anthropicSseToOpenaiSse, openaiSseToAnthropicSse, parseSSEChunk } from "./sse-translator.js";
 
 function makeStream(text: string): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
@@ -93,6 +93,47 @@ const ANTHROPIC_SSE = [
   'data: {"type":"message_stop"}',
   '',
 ].join('\n');
+
+describe("parseSSEChunk — lenient frame/data parsing (R2-18)", () => {
+  it("parses a data line without the optional space after the colon", () => {
+    const parsed = parseSSEChunk('event: message_stop\ndata:{"type":"message_stop"}\n\n');
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0].event).toBe("message_stop");
+    expect(parsed[0].data).toEqual({ type: "message_stop" });
+  });
+
+  it("keeps byte-identical output for classic 'data: x' (one space) payloads", () => {
+    const parsed = parseSSEChunk('data: {"a":1}\n\n');
+    expect(parsed[0].data).toEqual({ a: 1 });
+    // two spaces after the colon: only ONE is stripped (SSE spec); the
+    // remaining leading space is JSON whitespace, so it still parses.
+    const twoSpaces = parseSSEChunk('data:  {"a":1}\n\n');
+    expect(twoSpaces[0].data).toEqual({ a: 1 });
+  });
+
+  it("tolerates CRLF frame boundaries and CRLF line endings", () => {
+    const crlf = 'event: message_start\r\ndata: {"type":"message_start"}\r\n\r\nevent: message_stop\r\ndata: {"type":"message_stop"}\r\n\r\n';
+    const parsed = parseSSEChunk(crlf);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0].event).toBe("message_start");
+    expect(parsed[1].event).toBe("message_stop");
+    expect(parsed[1].data).toEqual({ type: "message_stop" });
+  });
+
+  it("anthropicSseToOpenaiSse no longer buffers forever on a CRLF-only stream", async () => {
+    const crlfStream = [
+      'event: message_start',
+      'data: {"type":"message_start","message":{"id":"msg_crlf","role":"assistant","content":[],"usage":{"input_tokens":1,"output_tokens":0}}}',
+      '',
+      'event: message_stop',
+      'data: {"type":"message_stop"}',
+      '',
+    ].join("\r\n") + "\r\n";
+    const out = await collectStream(anthropicSseToOpenaiSse(makeStream(crlfStream), "glm-4.6"));
+    expect(out).toContain('"role":"assistant"');
+    expect(out).toContain("data: [DONE]");
+  });
+});
 
 describe("anthropicSseToOpenaiSse", () => {
   it("translates message_start to first chunk with role", async () => {

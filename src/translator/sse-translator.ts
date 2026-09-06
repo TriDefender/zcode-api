@@ -13,9 +13,17 @@ export interface ParsedSSE {
   data: unknown;
 }
 
+/**
+ * SSE frame boundary splitter: a blank line in any of the three line-ending
+ * styles. Mirrors the 3.11.2 bundle's `Kxo` frame regex — a CRLF-only
+ * upstream (`\r\n\r\n`) never produces a `\n\n` boundary and would buffer
+ * forever under a plain `indexOf("\n\n")` / `split("\n\n")`.
+ */
+export const SSE_FRAME_SPLIT = /\r\n\r\n|\n\n|\r\r/;
+
 export function parseSSEChunk(raw: string): ParsedSSE[] {
   const results: ParsedSSE[] = [];
-  const blocks = raw.split("\n\n");
+  const blocks = raw.split(SSE_FRAME_SPLIT);
 
   for (const block of blocks) {
     const lines = block.trim().split("\n").filter(Boolean);
@@ -27,8 +35,13 @@ export function parseSSEChunk(raw: string): ParsedSSE[] {
     for (const line of lines) {
       if (line.startsWith("event: ")) {
         eventType = line.slice(7).trim();
-      } else if (line.startsWith("data: ")) {
-        dataStr = line.slice(6);
+      } else if (line.startsWith("data:")) {
+        // SSE spec: the colon may be followed by at most ONE space. Strip at
+        // most one leading space so both `data: x` and `data:x` parse while
+        // existing `data: x` payloads stay byte-identical.
+        let data = line.slice(5);
+        if (data.startsWith(" ")) data = data.slice(1);
+        dataStr = data;
       }
     }
 
@@ -127,7 +140,7 @@ export function anthropicSseToOpenaiSse(
           if (done) break;
 
           buffer += decoder.decode(value, { stream: true });
-          const blocks = buffer.split("\n\n");
+          const blocks = buffer.split(SSE_FRAME_SPLIT);
           buffer = blocks.pop() ?? "";
 
           for (const block of blocks) {

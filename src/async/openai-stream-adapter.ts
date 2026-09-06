@@ -19,7 +19,7 @@
  * or downstream clients see inconsistent IDs, missing tool arguments, and
  * duplicate finish reasons.
  */
-import { initState, parseSSEChunk, translateEvent, type TranslationState, type ParsedSSE } from "../translator/sse-translator.js";
+import { initState, parseSSEChunk, translateEvent, SSE_FRAME_SPLIT, type TranslationState, type ParsedSSE } from "../translator/sse-translator.js";
 
 export function anthropicSseToOpenaiSseWithKeepalive(
   upstream: ReadableStream<Uint8Array>,
@@ -60,7 +60,7 @@ export function anthropicSseToOpenaiSseWithKeepalive(
           return;
         }
         buffer += decoder.decode(value, { stream: true });
-        const blocks = buffer.split("\n\n");
+        const blocks = buffer.split(SSE_FRAME_SPLIT);
         buffer = blocks.pop() ?? "";
         for (const block of blocks) {
           processBlock(block, state);

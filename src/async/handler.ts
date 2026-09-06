@@ -25,6 +25,7 @@ import type { Credential } from "../auth/types.js";
 import { credentialString } from "../auth/types.js";
 import { errorResponse } from "../proxy/handler.js";
 import { transformRequestBody } from "../proxy/body-transformer.js";
+import { inflateWithCap } from "../proxy/inflate.js";
 import { translateRequestOpenAIToAnthropic, translateResponseAnthropicToOpenAI } from "../translator/openai-to-anthropic.js";
 import { anthropicSseToOpenaiSseWithKeepalive } from "./openai-stream-adapter.js";
 import type { AnthropicMessagesRequest, OpenAIChatRequest, AnthropicMessagesResponse } from "../translator/types.js";
@@ -104,33 +105,14 @@ async function readBody(req: Request): Promise<{ ok: true; body: string } | { ok
   const encoding = req.headers.get("content-encoding")?.toLowerCase().trim() ?? "";
   let bytes: Uint8Array = Buffer.concat(chunks);
   if (encoding === "gzip" || encoding === "x-gzip") {
-    const gunzip = new DecompressionStream("gzip") as unknown as ReadableWritablePair<Uint8Array, Uint8Array>;
-    const source = new ReadableStream<Uint8Array>({
-      start(controller) {
-        controller.enqueue(bytes);
-        controller.close();
-      },
-    });
-    const inflateReader = source.pipeThrough(gunzip).getReader();
-    const inflated: Uint8Array[] = [];
-    let inflatedTotal = 0;
-    try {
-      for (;;) {
-        const { done, value } = await inflateReader.read();
-        if (done) break;
-        inflatedTotal += value.byteLength;
-        if (inflatedTotal > MAX_REQUEST_BODY_BYTES) {
-          await inflateReader.cancel().catch(() => {});
-          return { ok: false, response: errorResponse(413, "request_too_large", `decompressed body exceeds ${MAX_REQUEST_BODY_BYTES} byte cap`) };
-        }
-        inflated.push(value);
+    const inflated = await inflateWithCap(bytes, MAX_REQUEST_BODY_BYTES);
+    if (!inflated.ok) {
+      if (inflated.reason === "too_large") {
+        return { ok: false, response: errorResponse(413, "request_too_large", `decompressed body exceeds ${MAX_REQUEST_BODY_BYTES} byte cap`) };
       }
-      bytes = Buffer.concat(inflated);
-    } catch {
       return { ok: false, response: errorResponse(400, "invalid_request_error", "could not decompress gzip request body") };
-    } finally {
-      inflateReader.releaseLock?.();
     }
+    bytes = inflated.bytes;
   }
   const body = new TextDecoder().decode(bytes);
   if (!body || body.length === 0) {
