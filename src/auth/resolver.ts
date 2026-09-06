@@ -44,7 +44,13 @@ export class KeyResolver {
       throw new Error(`z/login failed: ${resp.status}`);
     }
     const data = await resp.json();
-    return data.access_token ?? data.accessToken ?? data.data?.access_token;
+    const token = data.access_token ?? data.accessToken ?? data.data?.access_token;
+    // Shape guard: silently returning undefined used to store a bogus
+    // credential that surfaced only as cryptic upstream 401s.
+    if (typeof token !== "string" || token.length === 0) {
+      throw new Error("z/login returned unexpected shape: access_token missing or empty");
+    }
+    return token;
   }
 
   async resolveCustomerInfo(
@@ -94,7 +100,10 @@ export class KeyResolver {
 
     if (Array.isArray(existing)) {
       const found = existing.find((k: any) => k.name === ZAI_API_KEY_NAME);
-      if (found?.apiKey) {
+      // Reuse the listed key only when it has a usable shape; a malformed
+      // entry falls through to the create path instead of poisoning the
+      // stored credential.
+      if (found && typeof found.apiKey === "string" && found.apiKey.length > 0) {
         return { apiKey: found.apiKey };
       }
     }
@@ -103,6 +112,12 @@ export class KeyResolver {
       method: "POST",
       body: JSON.stringify({ name: ZAI_API_KEY_NAME }),
     });
+    // Shape guard (CL-06): an upstream response drift (renamed/nested field)
+    // must fail the login with a clear error — not store the string
+    // "undefined" and 401 on every later request.
+    if (typeof created?.apiKey !== "string" || created.apiKey.length === 0) {
+      throw new Error("API key creation returned unexpected shape: apiKey missing or empty");
+    }
     return { apiKey: created.apiKey };
   }
 

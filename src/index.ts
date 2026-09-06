@@ -3,7 +3,6 @@
  * @see .omo/plans/zcode-proxy.md Task 7
  */
 import { loadConfig } from "./config/loader.js";
-import { EXAMPLE_CONFIG_YAML } from "./config/template.js";
 import { AuthManager } from "./auth/manager.js";
 import { startServer, type ProxyServer } from "./server/server.js";
 import { startControlListener, LogBuffer, type ControlState } from "./android/control.js";
@@ -13,7 +12,7 @@ import { KeyResolver } from "./auth/resolver.js";
 import type { Credential } from "./auth/types.js";
 import type { ProviderId } from "./provider/types.js";
 import type { ProxyConfig } from "./config/types.js";
-import { updateConfigYaml } from "./config/edit.js";
+import { updateConfigYaml, ensureConfigFile } from "./config/edit.js";
 import { openBrowser } from "./runtime/open-browser.js";
 import { pasteLoginInstructions, readPastedLine, boldIfTTY } from "./runtime/paste-login.js";
 import { buildServerOptions } from "./server/server-options.js";
@@ -165,8 +164,7 @@ Examples:
 
 async function serve(configPath: string | undefined, debug: boolean): Promise<void> {
   const path = configPath ?? process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
-  if (!existsSync(path)) {
-    writeFileSync(path, EXAMPLE_CONFIG_YAML, "utf-8");
+  if (ensureConfigFile(path)) {
     ensureDeviceMidInConfig(path);
     console.log(`Created ${path} from bundled template.`);
     console.log(`Run: zcode-proxy auth login <zai|bigmodel>\n`);
@@ -245,9 +243,7 @@ export function applyAndroidIdentityDefaults(): void {
 async function runAndroid(): Promise<void> {
   applyAndroidIdentityDefaults();
   const path = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
-  if (!existsSync(path)) {
-    writeFileSync(path, EXAMPLE_CONFIG_YAML, "utf-8");
-  }
+  ensureConfigFile(path);
   const config = loadConfig(path);
 
   const logBuffer = new LogBuffer();
@@ -452,8 +448,7 @@ async function authLogin(args: string[]): Promise<void> {
  */
 function ensureConfigWithDeviceMid(): string {
   const path = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
-  if (!existsSync(path)) {
-    writeFileSync(path, EXAMPLE_CONFIG_YAML, "utf-8");
+  if (ensureConfigFile(path)) {
     console.log(`Created ${path} from bundled template.`);
   }
   return ensureDeviceMidInConfig(path);

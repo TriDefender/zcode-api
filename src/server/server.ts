@@ -9,6 +9,7 @@
  */
 import { createServer, type Server } from "node:http";
 import { Readable } from "node:stream";
+import { timingSafeEqual } from "node:crypto";
 import webuiHtml from "./webui.txt" with { type: "text" };
 import type { ProxyConfig } from "../config/types.js";
 import type { AuthManager } from "../auth/manager.js";
@@ -282,13 +283,19 @@ async function writeWebResponseToNodeResp(resp: Response, res: import("node:http
   }
 }
 
-/** Check whether the client provided the correct proxy API key. */
+/**
+ * Check whether the client provided the correct proxy API key.
+ * Constant-time comparison (audit R2-10): a plain `===` on the presented vs
+ * expected key is a timing side channel on public-network deployments
+ * (default bind is 0.0.0.0). Behavior is unchanged for honest callers.
+ */
 function checkProxyKey(authHeader: string, expected: string): boolean {
   const trimmed = authHeader.trim();
-  if (trimmed.startsWith("Bearer ")) {
-    return trimmed.slice(7).trim() === expected;
-  }
-  return trimmed === expected;
+  const presented = trimmed.startsWith("Bearer ") ? trimmed.slice(7).trim() : trimmed;
+  const a = Buffer.from(presented, "utf-8");
+  const b = Buffer.from(expected, "utf-8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 /** Build a CORS preflight response. */

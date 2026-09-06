@@ -13,8 +13,7 @@
  * back from index.js), mirroring the claimCommand pattern.
  */
 import { loadConfig } from "../config/loader.js";
-import { EXAMPLE_CONFIG_YAML } from "../config/template.js";
-import { updateConfigYaml } from "../config/edit.js";
+import { updateConfigYaml, ensureConfigFile } from "../config/edit.js";
 import { AuthManager } from "../auth/manager.js";
 import { startServer, type ProxyServer } from "../server/server.js";
 import { buildServerOptions } from "../server/server-options.js";
@@ -25,7 +24,7 @@ import { openBrowser } from "../runtime/open-browser.js";
 import { pasteLoginInstructions, readPastedLine, boldIfTTY } from "../runtime/paste-login.js";
 import { isGuestOriginError, describeGuestError } from "../runtime/guest-error.js";
 import { ensureDeviceMidInConfig, VERSION, type ServeArgs } from "../index.js";
-import { writeFileSync, existsSync, appendFileSync } from "node:fs";
+import { appendFileSync } from "node:fs";
 import type { ProxyConfig } from "../config/types.js";
 import type { ProviderId } from "../provider/types.js";
 import { LogPane, type LogLevel } from "./log-pane.js";
@@ -51,8 +50,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
   const path = args.configPath ?? process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
   let config: ProxyConfig;
   try {
-    if (!existsSync(path)) {
-      writeFileSync(path, EXAMPLE_CONFIG_YAML, "utf-8");
+    if (ensureConfigFile(path)) {
       ensureDeviceMidInConfig(path);
       process.stderr.write(`Created ${path} from bundled template.\n`);
     }

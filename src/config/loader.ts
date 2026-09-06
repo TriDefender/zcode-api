@@ -313,9 +313,17 @@ function resolveProvider(raw: unknown): "zai" | "bigmodel" {
   return v;
 }
 
+/**
+ * Resolve and validate the plan tier. Mirrors `resolveProvider`'s hard
+ * validation style: an unrecognized value (e.g. `start_plan`/`startplan`
+ * typos) THROWS instead of silently falling back to coding-plan — a silent
+ * fallback sent users to the wrong upstream (401/403, no captcha/quota flow)
+ * with nothing pointing at the config typo.
+ */
 function resolvePlan(raw: unknown): "coding-plan" | "start-plan" {
-  if (raw === "start-plan") return "start-plan";
-  return DEFAULTS.PLAN;
+  if (raw === undefined || raw === null) return DEFAULTS.PLAN;
+  if (raw === "coding-plan" || raw === "start-plan") return raw;
+  throw new Error(`Invalid plan "${String(raw)}": must be "coding-plan" or "start-plan"`);
 }
 
 /** Resolve log level with fallback. */

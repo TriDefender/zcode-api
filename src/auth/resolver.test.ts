@@ -24,6 +24,16 @@ function mockFetch(responses: Record<string, (body?: string) => Response>): type
 }
 
 describe("KeyResolver", () => {
+  it("resolveZaiBizToken THROWS on shape drift (access_token missing) instead of returning undefined (CL-06)", async () => {
+    const fetchImpl = mockFetch({
+      "/auth/z/login": () => new Response(JSON.stringify({ renamed_token: "biz_token_123" }), {
+        status: 200, headers: { "content-type": "application/json" },
+      }),
+    });
+    const resolver = new KeyResolver(fetchImpl);
+    await expect(resolver.resolveZaiBizToken("access_abc")).rejects.toThrow(/unexpected shape/);
+  });
+
   it("resolveZaiBizToken exchanges access token for biz token", async () => {
     const fetchImpl = mockFetch({
       "/auth/z/login": () => new Response(JSON.stringify({
@@ -102,6 +112,35 @@ describe("KeyResolver", () => {
     const result = await resolver.findOrCreateApiKey("https://api.z.ai", "Bearer tok", "org1", "proj1");
     expect(createdKey).toBe(true);
     expect(result.apiKey).toBe("newApiKey123");
+  });
+
+  it("findOrCreateApiKey THROWS when the create response loses apiKey (shape drift, CL-06)", async () => {
+    const fetchImpl = mockFetch({
+      "api_keys": (body) => {
+        if (body) return bizResponse({ key: "renamed-field" }); // drift: apiKey → key
+        return bizResponse([]);
+      },
+    });
+    const resolver = new KeyResolver(fetchImpl);
+    await expect(resolver.findOrCreateApiKey("https://api.z.ai", "Bearer tok", "org1", "proj1"))
+      .rejects.toThrow(/unexpected shape/);
+  });
+
+  it("findOrCreateApiKey falls through to create when the listed key entry is malformed (CL-06)", async () => {
+    let created = false;
+    const fetchImpl = mockFetch({
+      "api_keys": (body) => {
+        if (body) {
+          created = true;
+          return bizResponse({ apiKey: "freshlyCreated" });
+        }
+        return bizResponse([{ name: "zcode-api-key", apiKey: "" }]);
+      },
+    });
+    const resolver = new KeyResolver(fetchImpl);
+    const result = await resolver.findOrCreateApiKey("https://api.z.ai", "Bearer tok", "org1", "proj1");
+    expect(created).toBe(true);
+    expect(result.apiKey).toBe("freshlyCreated");
   });
 
   it("getSecretKey retrieves secret via apiKey value", async () => {

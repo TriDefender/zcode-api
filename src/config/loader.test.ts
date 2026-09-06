@@ -298,6 +298,24 @@ clientIdentity:
     expect(() => loadConfig(path)).toThrow(/Invalid clientIdentity\.mode/);
   });
 
+  it("plan: accepts coding-plan and start-plan, defaults when absent (CL-07)", () => {
+    const coding = loadConfig(writeYaml("plan: coding-plan\n"));
+    expect(coding.plan).toBe("coding-plan");
+    const start = loadConfig(writeYaml("plan: start-plan\n"));
+    expect(start.plan).toBe("start-plan");
+    const dflt = loadConfig(writeYaml("server:\n  port: 8080\n"));
+    expect(dflt.plan).toBe("coding-plan");
+  });
+
+  it("plan: THROWS on a typo'd value instead of silently falling back (CL-07)", () => {
+    // NOTE: `plan:` with NO value parses as null → default (tested above);
+    // only a present-but-unrecognized string throws.
+    for (const bad of ["start_plan", "startplan", "Start-Plan", "team-plan", "openai-plan"]) {
+      const path = writeYaml(`plan: ${bad}\n`);
+      expect(() => loadConfig(path), `plan: ${bad}`).toThrow(/Invalid plan/);
+    }
+  });
+
   it("env vars override YAML values", () => {
     const path = writeYaml(`
 server:
