@@ -113,11 +113,15 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
    * Wait until ticket becomes ready/active OR expired/not_found OR abort OR total maxWaitMs exceeded.
    * `settled` and unknown states are treated as expired (server can't dispatch this ticket again).
    * Polls respect clientSignal for immediate cancellation.
+   *
+   * `maxWaitExceeded: true` marks a CLIENT-SIDE deadline overrun (distinct from
+   * a server-side ticket expiry) so the caller terminates with a timeout error
+   * instead of misreading it as "ticket expired" and burning retakes.
    */
-  async function waitForReady(ticketId: string, deadlineAt: number): Promise<{ state: TicketState }> {
+  async function waitForReady(ticketId: string, deadlineAt: number): Promise<{ state: TicketState; maxWaitExceeded?: boolean }> {
     while (true) {
       if (aborted) return { state: "expired" as TicketState };
-      const result = await opts.client.batchStatus([ticketId], opts.clientSignal);
+      const result = await pollBatchStatusWithRetry(ticketId);
       if (aborted) return { state: "expired" as TicketState };
       const ticket = result.tickets[0];
       if (!ticket) return { state: "not_found" as TicketState };
@@ -127,10 +131,41 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
 
       const delay = result.nextPollAfterMs ?? opts.pollIntervalMs;
       if (opts.maxWaitMs > 0 && Date.now() + delay > deadlineAt) {
-        return { state: "expired" as TicketState };
+        // The NEXT poll would overrun the total wait budget. Sleep out the
+        // remainder and report a deadline overrun (NOT "expired" — an early
+        // `expired` here used to send the caller into the retake loop against
+        // the same deadline until maxRetries burned out).
+        await sleep(Math.max(0, deadlineAt - Date.now()), opts.clientSignal);
+        return { state: "expired" as TicketState, maxWaitExceeded: true };
       }
       await sleep(delay, opts.clientSignal);
     }
+  }
+
+  /**
+   * Single batchStatus poll with local tolerance for transient control-plane
+   * errors: up to POLL_RETRY_LIMIT consecutive failures (backoff
+   * min(pollIntervalMs, 2s) between them) before the error escapes. A single
+   * network blip must not kill an hours-long queue wait — the sync path
+   * (proxy/handler.ts connect-retry) retries the same class of failure.
+   * Abandon immediately (no retry) once the client has aborted.
+   */
+  async function pollBatchStatusWithRetry(ticketId: string): Promise<Awaited<ReturnType<OffPeakClient["batchStatus"]>>> {
+    const POLL_RETRY_LIMIT = 3;
+    const retryDelayMs = Math.min(opts.pollIntervalMs, 2000);
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= POLL_RETRY_LIMIT; attempt++) {
+      if (aborted || opts.clientSignal?.aborted) throw lastErr ?? new Error("client aborted during poll");
+      try {
+        return await opts.client.batchStatus([ticketId], opts.clientSignal);
+      } catch (err) {
+        lastErr = err;
+        // Client disconnected mid-poll — retrying would delay the abort path.
+        if (aborted || opts.clientSignal?.aborted) throw err;
+        if (attempt < POLL_RETRY_LIMIT) await sleep(retryDelayMs, opts.clientSignal);
+      }
+    }
+    throw lastErr;
   }
 
   async function forwardLLM(ticketId: string): Promise<{ response: Response; expiredInBody: boolean }> {
@@ -208,6 +243,16 @@ export function runAsyncBridge(opts: BridgeOptions): { stream: ReadableStream<Ui
               stopKeepalive();
               log({ phase: "abort", attempt, ticketId: currentTicket.ticketId });
               settleOnce(currentTicket.ticketId);
+              return;
+            }
+            if (wait.maxWaitExceeded) {
+              // CL-02: client-side maxWaitMs overrun — terminal timeout, NOT a
+              // server expiry. Retaking would just re-wait against the same
+              // (already blown) deadline until maxRetries exhausts.
+              stopKeepalive();
+              settleOnce(currentTicket.ticketId);
+              emitTerminalError(controller, `async max wait timeout (${opts.maxWaitMs}ms exceeded)`, "timeout");
+              resolveOutcome({ attempts: attempt + 1, finalTicketId: currentTicket.ticketId, terminalPhase: "error" });
               return;
             }
             if (isTicketExpired(wait.state)) {

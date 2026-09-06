@@ -257,10 +257,13 @@ export async function handleAsyncMessages(req: Request, opts: AsyncHandlerOption
     return new Response(stream, { status: 200, headers: sseHeaders() });
   }
 
-  // Non-stream: chunked response with leading whitespace during wait + final JSON (B10)
+  // Non-stream: chunked response with leading whitespace during wait + final JSON (B10).
+  // NOTE: no explicit `transfer-encoding` header — it is a forbidden Response
+  // constructor header (runtimes drop/override it) and Node http already sends
+  // chunked when no content-length is set.
   return new Response(nonStreamChunkedJson(stream), {
     status: 200,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache", "transfer-encoding": "chunked" },
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" },
   });
 }
 
@@ -308,7 +311,7 @@ export async function handleAsyncChat(req: Request, opts: AsyncHandlerOptions): 
 
   return new Response(nonStreamChunkedJson(rawStream, { translate: "openai", model: openaiReq.model }), {
     status: 200,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache", "transfer-encoding": "chunked" },
+    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-cache" },
   });
 }
 

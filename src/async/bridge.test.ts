@@ -443,6 +443,115 @@ describe("runAsyncBridge — abort handling", () => {
   });
 });
 
+describe("runAsyncBridge — maxWaitMs overrun (CL-02)", () => {
+  it("nextPollAfterMs exceeding the remaining budget: terminal timeout, no retake", async () => {
+    // The single poll returns `queued` with a huge server-suggested delay that
+    // would overrun maxWaitMs. The bridge must terminate with a timeout error
+    // — NOT misread the overrun as "ticket expired" and burn retakes.
+    const client = makeMockClient({ initialTicketState: "queued" });
+    (client as any).batchStatus = async () => ({
+      nextPollAfterMs: 60_000,
+      tickets: [{ ticketId: "t-init", state: "queued" as TicketState }],
+    });
+
+    const { stream, outcome } = runAsyncBridge({
+      client,
+      credentials: CRED,
+      origin: "https://zcode.z.ai",
+      identity: TEST_IDENTITY,
+      llmRequestBody: '{"model":"x"}',
+      initialTicket: { ticketId: "t-init", state: "queued", registeredAt: Date.now() },
+      taskId: "task-1",
+      pollIntervalMs: 10,
+      keepAliveIntervalMs: 5,
+      maxRetries: 3,
+      maxWaitMs: 80,
+      fetchImpl: async () => makeAnthropicSseResponse([]),
+    });
+
+    const text = await drainStream(stream);
+    const o = await outcome;
+
+    expect(text).toContain("async max wait timeout");
+    expect(text).toContain('"type":"timeout"');
+    expect(client.takeTicketCalls.length).toBe(0); // no retake — the budget is spent, retrying is pointless
+    expect(client.settleCalls).toContain("t-init");
+    expect(o.terminalPhase).toBe("error");
+  });
+});
+
+describe("runAsyncBridge — batchStatus transient-error tolerance (CL-03)", () => {
+  function makeFlakyClient(
+    failuresBeforeSuccess: number,
+    behaviour: Parameters<typeof makeMockClient>[0],
+  ): OffPeakClient & { settleCalls: string[]; takeTicketCalls: string[] } {
+    const base = makeMockClient(behaviour);
+    let calls = 0;
+    return {
+      ...base,
+      async batchStatus(ticketIds: string[], signal?: AbortSignal) {
+        if (calls < failuresBeforeSuccess) {
+          calls++;
+          throw new Error(`control-plane blip ${calls}`);
+        }
+        return base.batchStatus(ticketIds, signal);
+      },
+    };
+  }
+
+  it("2 transient batchStatus failures then ready: bridge proceeds to READY", async () => {
+    const client = makeFlakyClient(2, { initialTicketState: "queued", queueProgression: ["ready"] });
+    const fetchImpl = async () => makeAnthropicSseResponse([`event: message_stop\ndata: {"type":"message_stop"}\n\n`]);
+
+    const { stream, outcome } = runAsyncBridge({
+      client,
+      credentials: CRED,
+      origin: "https://zcode.z.ai",
+      identity: TEST_IDENTITY,
+      llmRequestBody: '{"model":"x"}',
+      initialTicket: { ticketId: "t-init", state: "queued", registeredAt: Date.now() },
+      taskId: "task-1",
+      pollIntervalMs: 10,
+      keepAliveIntervalMs: 5,
+      maxRetries: 3,
+      maxWaitMs: 0,
+      fetchImpl,
+    });
+
+    const text = await drainStream(stream);
+    const o = await outcome;
+
+    expect(text).toContain("message_stop");
+    expect(o.terminalPhase).toBe("done");
+    expect(client.settleCalls).toContain("t-init");
+  });
+
+  it("3 consecutive batchStatus failures: bridge terminal internal error", async () => {
+    const client = makeFlakyClient(99, { initialTicketState: "queued" });
+
+    const { stream, outcome } = runAsyncBridge({
+      client,
+      credentials: CRED,
+      origin: "https://zcode.z.ai",
+      identity: TEST_IDENTITY,
+      llmRequestBody: '{"model":"x"}',
+      initialTicket: { ticketId: "t-init", state: "queued", registeredAt: Date.now() },
+      taskId: "task-1",
+      pollIntervalMs: 10,
+      keepAliveIntervalMs: 5,
+      maxRetries: 3,
+      maxWaitMs: 0,
+      fetchImpl: async () => makeAnthropicSseResponse([]),
+    });
+
+    const text = await drainStream(stream);
+    const o = await outcome;
+
+    expect(text).toContain("async bridge internal error");
+    expect(o.terminalPhase).toBe("error");
+  });
+});
+
 describe("runAsyncBridge — credentials + URL composition", () => {
   it("forwards credentials as headers + ticket id on the upstream LLM call", async () => {
     const client = makeMockClient({ initialTicketState: "ready" });
