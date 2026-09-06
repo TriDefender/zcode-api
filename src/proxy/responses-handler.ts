@@ -22,6 +22,8 @@ import { getProvider } from "../provider/providers.js";
 import type { ProxyConfig } from "../config/types.js";
 import type { AuthManager } from "../auth/manager.js";
 import { buildUpstreamRequest, buildUpstreamHeaderPairs, type UpstreamHeaderPair } from "./upstream.js";
+import { isCaptchaChallenged, retryOnCaptchaChallenge } from "./captcha-retry.js";
+import { dispatchWithConnectRetry } from "./handler.js";
 import type * as CaptchaExports from "./captcha.js";
 
 // Lazy, runtime-gated module load (exception to the static-import rule, same
@@ -224,37 +226,39 @@ export async function handleResponses(
 
   let upstreamResp: Response;
   try {
-    upstreamResp = await dispatch(upstreamHeaders);
+    // Connect-retry ladder mirrors the chat hot path (handler.ts): 3 attempts,
+    // fresh Request per dispatch (built inside `dispatch`), 500ms×attempt
+    // backoff, no retry once the client aborted.
+    upstreamResp = await dispatchWithConnectRetry(() => dispatch(upstreamHeaders), {
+      isAborted: () => clientReq.signal.aborted,
+    });
   } catch (err) {
     return errorResponse(502, "upstream_unreachable", (err as Error).message);
   }
 
-  // Captcha challenge retry (mirrors handler.ts): the gateway signals it either
-  // through the captcha response header or as HTTP 400 with {"code":3007} in
-  // the body. The challenged token is already spent, so retry once with a fresh
-  // pooled one.
+  // Captcha challenge retry (mirrors handler.ts via the shared captcha-retry
+  // seam): the gateway signals it either through the captcha response header
+  // or as HTTP 400 with {"code":3007} in the body. The challenged token is
+  // already spent, so retry once with a fresh pooled one.
   if (startPlan && !upstreamResp.ok) {
     const captcha = opts.captcha ?? (await loadCaptcha());
-    let challenged = captcha.detectCaptchaChallenge(upstreamResp) !== null;
-    if (!challenged && !upstreamResp.headers.get("content-type")?.includes("text/event-stream")) {
-      const peek = await upstreamResp.clone().text().catch(() => "");
-      challenged = peek.includes('"code":3007') || peek.includes('"code": 3007');
-    }
-    if (challenged) {
+    if (await isCaptchaChallenged(upstreamResp, captcha)) {
       if (debug) console.log("[responses] captcha challenge — re-solving and retrying once");
-      try { await upstreamResp.body?.cancel(); } catch { /* already drained */ }
-      try {
-        const fresh = await captcha.getCaptchaToken(opts.config.identity.appVersion);
-        const retryHeaders = {
-          [captcha.RETRY_HEADERS.PARAM]: fresh.verifyParam,
-          [captcha.RETRY_HEADERS.REGION]: fresh.region,
-        };
-        upstreamResp = await dispatch(
+      const outcome = await retryOnCaptchaChallenge({
+        captcha,
+        appVersion: opts.config.identity.appVersion,
+        challengedResp: upstreamResp,
+        debug: debug ? (message) => console.log(`[responses] ${message}`) : undefined,
+        solveAndRetry: (retryHeaders) => dispatch(
           buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, retryHeaders, undefined),
-        );
-      } catch (err) {
-        return errorResponse(503, "captcha_solver_failed", (err as Error).message);
-      }
+        ),
+        mapError: (err, phase) =>
+          phase === "solver"
+            ? errorResponse(503, "captcha_solver_failed", err.message)
+            : errorResponse(502, "upstream_unreachable", err.message),
+      });
+      if (!outcome.ok) return outcome.resp;
+      upstreamResp = outcome.resp;
     }
   }
 
@@ -371,6 +375,12 @@ function streamResponse(upstreamResp: Response, context: StreamResponseContext):
               for (const evt of chatChunkToResponsesEvents(chunk, state)) send(evt);
             } catch (err) {
               errored = true;
+              // Release the upstream reader too — without the cancel the
+              // upstream connection lingers until GC. Fire-and-forget so a
+              // slow cancel never delays the client-visible error. The
+              // errored-flag + early-return semantics (anti-pattern #24) are
+              // unchanged: no further reads, no finalize, no close().
+              reader.cancel().catch(() => {});
               controller.error(err);
               return;
             }

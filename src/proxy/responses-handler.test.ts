@@ -276,3 +276,110 @@ describe("handleResponses captcha (start-plan)", () => {
     expect(captcha.minted()).toBe(0);
   });
 });
+
+// CL-08: /v1/responses used to give up on the FIRST connect-level failure and
+// mislabel captcha-retry dispatch failures as captcha_solver_failed.
+describe("handleResponses resilience (CL-08)", () => {
+  it("retries transient connect failures (3 attempts, fresh dispatch each)", async () => {
+    let calls = 0;
+    const fetchImpl = (async (): Promise<Response> => {
+      calls += 1;
+      if (calls < 3) throw new Error("Unable to connect");
+      return new Response(anthropicMsg("after retry"), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+
+    const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), { config: CONFIG, auth, fetchImpl });
+    expect(resp.status).toBe(200);
+    expect(calls).toBe(3);
+    const body = await resp.json();
+    expect(body.output[0].content[0].text).toBe("after retry");
+  });
+
+  it("surfaces 502 upstream_unreachable after exhausting connect attempts", async () => {
+    let calls = 0;
+    const fetchImpl = (async (): Promise<Response> => {
+      calls += 1;
+      throw new Error("Unable to connect");
+    }) as unknown as typeof fetch;
+
+    const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), { config: CONFIG, auth, fetchImpl });
+    expect(resp.status).toBe(502);
+    expect(calls).toBe(3);
+    const body = await resp.json();
+    expect(body.error.type).toBe("upstream_unreachable");
+  });
+
+  it("does not retry once the client aborted", async () => {
+    const controller = new AbortController();
+    const req = new Request("http://localhost/v1/responses", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "glm-5.2", input: "hi" }),
+      signal: controller.signal,
+    });
+    let calls = 0;
+    const fetchImpl = (async (): Promise<Response> => {
+      calls += 1;
+      controller.abort(); // abort while the first attempt is "in flight"
+      throw new Error("Unable to connect");
+    }) as unknown as typeof fetch;
+
+    const resp = await handleResponses(req, { config: CONFIG, auth, fetchImpl });
+    expect(resp.status).toBe(502);
+    expect(calls).toBe(1);
+  });
+
+  it("captcha retry dispatch failure → 502 upstream_unreachable (not mislabeled 503)", async () => {
+    const START_PLAN: ProxyConfig = { ...CONFIG, plan: "start-plan", provider: "bigmodel" };
+    let calls = 0;
+    const fetchImpl = (async (): Promise<Response> => {
+      calls += 1;
+      if (calls === 1) {
+        return new Response(JSON.stringify({ code: 3007, msg: "captcha verify failed" }), {
+          status: 400, headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error("connection reset during retry");
+    }) as unknown as typeof fetch;
+
+    let n = 0;
+    const captcha = {
+      RETRY_HEADERS: { PARAM: "x-aliyun-captcha-verify-param", REGION: "x-aliyun-captcha-verify-region" },
+      getCaptchaToken: async () => {
+        n += 1;
+        return { verifyParam: `token-${n}`, region: "cn" };
+      },
+      detectCaptchaChallenge: (resp: Response) => resp.headers.get("x-aliyun-captcha-verify-param"),
+    } as unknown as CaptchaModule;
+
+    const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
+      config: START_PLAN, auth, fetchImpl, captcha,
+    });
+    expect(resp.status).toBe(502);
+    const body = await resp.json();
+    expect(body.error.type).toBe("upstream_unreachable");
+  });
+
+  it("captcha solver failure → 503 captcha_solver_failed", async () => {
+    const START_PLAN: ProxyConfig = { ...CONFIG, plan: "start-plan", provider: "bigmodel" };
+    const fetchImpl = (async (): Promise<Response> =>
+      new Response(JSON.stringify({ code: 3007, msg: "captcha verify failed" }), {
+        status: 400, headers: { "content-type": "application/json" },
+      })) as unknown as typeof fetch;
+
+    const captcha = {
+      RETRY_HEADERS: { PARAM: "x-aliyun-captcha-verify-param", REGION: "x-aliyun-captcha-verify-region" },
+      getCaptchaToken: async () => {
+        throw new Error("solver exploded");
+      },
+      detectCaptchaChallenge: (resp: Response) => resp.headers.get("x-aliyun-captcha-verify-param"),
+    } as unknown as CaptchaModule;
+
+    const resp = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
+      config: START_PLAN, auth, fetchImpl, captcha,
+    });
+    expect(resp.status).toBe(503);
+    const body = await resp.json();
+    expect(body.error.type).toBe("captcha_solver_failed");
+  });
+});

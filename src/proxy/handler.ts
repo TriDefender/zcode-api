@@ -19,6 +19,7 @@ import { getDefaultClientSigning, sendWithClientSigning, type ClientSigningManag
 import { credentialString } from "../auth/types.js";
 import { sendOrderedUpstreamRequest } from "./ordered-transport.js";
 import { transformRequestBody } from "./body-transformer.js";
+import { isCaptchaChallenged, retryOnCaptchaChallenge } from "./captcha-retry.js";
 import { type ClientSessionResult } from "./client-session.js";
 import { resolveSessionContext } from "./session-context.js";
 import { gzipSync } from "node:zlib";
@@ -230,35 +231,28 @@ export async function proxyRequest(
     // connect") happen a few times a day against the gateway. Retry the
     // CONNECT twice with a short backoff before surfacing a 502 — the
     // request never reached upstream, so resending is side-effect-free.
-    // Guard rails (review P1/P2 + nits): skip retry when the client already
-    // aborted, and re-dispatch a FRESH Request each attempt — a reused
-    // Request has its body stream marked used after the first fetch, so
-    // attempt 2+ would throw "Request body already used" before any I/O
-    // (start-plan hits the plain pass-through path where dispatch does NOT
-    // rebuild the Request).
-    const maxConnectAttempts = 3;
-    for (let attempt = 1; ; attempt++) {
-      if (clientReq.signal.aborted) throw new Error("client aborted before upstream connect");
-      try {
-        upstreamResp = await dispatch(upstreamReq, upstreamHeaderPairs);
-        break;
-      } catch (err) {
-        // Review follow-up #2 (PR #34): if the ordered transport already
-        // wrote the full request to the wire before failing, the upstream
-        // may have processed it — resending could consume quota twice. Skip
-        // the retry for those post-write failures.
-        if ((err as { postWrite?: boolean }).postWrite) throw err;
-        if (attempt >= maxConnectAttempts) throw err;
-        const backoffMs = 500 * attempt;
-        if (debug) debugError(reqId, "upstream_connect_retry", `attempt ${attempt}/${maxConnectAttempts - 1} failed (${(err as Error).message}), retrying in ${backoffMs}ms`);
-        console.log(`${reqId} upstream connect failed (${(err as Error).message}), retry ${attempt + 1}/${maxConnectAttempts} in ${backoffMs}ms`);
-        await new Promise((r) => setTimeout(r, backoffMs));
-        // Rebuild the Request so the body stream is fresh for the next
-        // dispatch (mirrors the captcha retry, which already constructs a
-        // new Request per attempt).
-        upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
-      }
-    }
+    // Guard rails: skip retry when the client already aborted or the ordered
+    // transport flagged the failure postWrite; re-dispatch a FRESH Request
+    // each attempt — a reused Request has its body stream marked used after
+    // the first fetch (start-plan hits the plain pass-through path where
+    // dispatch does NOT rebuild the Request).
+    let dispatchAttempt = 0;
+    upstreamResp = await dispatchWithConnectRetry(
+      () => {
+        dispatchAttempt += 1;
+        const currentReq = dispatchAttempt === 1
+          ? upstreamReq
+          : buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, captchaHeaders, clientSession);
+        return dispatch(currentReq, upstreamHeaderPairs);
+      },
+      {
+        isAborted: () => clientReq.signal.aborted,
+        onRetry: (attempt, err) => {
+          if (debug) debugError(reqId, "upstream_connect_retry", `attempt ${attempt}/${MAX_CONNECT_ATTEMPTS - 1} failed (${err.message}), retrying in ${500 * attempt}ms`);
+          console.log(`${reqId} upstream connect failed (${err.message}), retry ${attempt + 1}/${MAX_CONNECT_ATTEMPTS} in ${500 * attempt}ms`);
+        },
+      },
+    );
   } catch (err) {
     if (debug) debugError(reqId, "upstream_unreachable", (err as Error).message);
     printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
@@ -289,51 +283,41 @@ export async function proxyRequest(
 
   // start-plan: on explicit captcha challenge, retry once with a fresh
   // pooled token (the challenged token was already consumed by this request;
-  // getCaptchaToken takes the next pre-solved one). `&& captcha` looks
-  // redundant but is required for TS null-narrowing.
+  // getCaptchaToken takes the next pre-solved one). Detection covers the
+  // response-header variant AND the in-body `{"code":3007}` variant (observed
+  // 2026-08-29 as HTTP 400 JSON with no captcha header) via the shared
+  // captcha-retry seam (used by /v1/responses too).
   const captcha = startPlan ? await loadCaptcha() : null;
-  let captchaChallenge = captcha ? captcha.detectCaptchaChallenge(upstreamResp) : null;
-  // In-body challenge variant (observed 2026-08-29): the gateway sometimes
-  // returns the challenge as HTTP 400 with {"code":3007,...} in the JSON body
-  // instead of the captcha response header, so detectCaptchaChallenge never
-  // fires and the client just gets a raw 502. Peek a clone of the body (error
-  // responses are small; the original body stays untouched for the retry or
-  // the error path) and treat it as a challenge too.
-  if (!captchaChallenge && captcha && !upstreamResp.ok) {
-    const ctype = upstreamResp.headers.get("content-type") ?? "";
-    if (!ctype.includes("text/event-stream")) {
-      try {
-        const peek = await upstreamResp.clone().text();
-        if (peek.includes('"code":3007') || peek.includes('"code": 3007')) {
-          captchaChallenge = "in-body-3007";
-        }
-      } catch {}
-    }
-  }
+  const captchaChallenge = captcha ? await isCaptchaChallenged(upstreamResp, captcha) : false;
   if (captchaChallenge && captcha) {
-    if (debug) debugLine(reqId, "captcha challenge — re-solving and retrying once");
-    try { upstreamResp.body?.cancel(); } catch {}
     console.log(`${reqId} captcha challenge, re-solving...`);
-    try {
-      const fresh = await captcha.getCaptchaToken(config.identity.appVersion);
-      console.log(`${reqId} captcha re-solved (token ${fresh.verifyParam.length} chars), retrying...`);
-      const retryHeaders = {
-        [captcha.RETRY_HEADERS.PARAM]: fresh.verifyParam,
-        [captcha.RETRY_HEADERS.REGION]: fresh.region,
-      };
-      upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, retryHeaders, clientSession);
-      upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, retryHeaders, clientSession);
-      upstreamResp = await dispatch(upstreamReq, upstreamHeaderPairs).catch((err: Error) => {
+    const outcome = await retryOnCaptchaChallenge({
+      captcha,
+      appVersion: config.identity.appVersion,
+      challengedResp: upstreamResp,
+      debug: debug ? (message) => debugLine(reqId, message) : undefined,
+      solveAndRetry: (retryHeaders) => {
+        console.log(`${reqId} captcha re-solved (token ${retryHeaders[captcha.RETRY_HEADERS.PARAM].length} chars), retrying...`);
+        upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, retryHeaders, clientSession);
+        upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, retryHeaders, clientSession);
+        return dispatch(upstreamReq, upstreamHeaderPairs).then((resp) => {
+          if (debug) debugLine(reqId, `← retry ${resp.status} ${resp.statusText}`);
+          return resp;
+        });
+      },
+      mapError: (err, phase) => {
+        if (phase === "solver") {
+          if (debug) debugError(reqId, "captcha_solver_failed", err.message);
+          printRow(reqId, format, meta, 503, started, Date.now(), 0, 0, 0);
+          return errorResponse(503, "captcha_solver_failed", err.message);
+        }
         if (debug) debugError(reqId, "upstream_unreachable", err.message);
         printRow(reqId, format, meta, 502, started, Date.now(), 0, 0, 0);
         return errorResponse(502, "upstream_unreachable", err.message);
-      });
-      if (debug) debugLine(reqId, `← retry ${upstreamResp.status} ${upstreamResp.statusText}`);
-    } catch (err) {
-      if (debug) debugError(reqId, "captcha_solver_failed", (err as Error).message);
-      printRow(reqId, format, meta, 503, started, Date.now(), 0, 0, 0);
-      return errorResponse(503, "captcha_solver_failed", (err as Error).message);
-    }
+      },
+    });
+    if (!outcome.ok) return outcome.resp;
+    upstreamResp = outcome.resp;
   }
 
   const isSSE = upstreamResp.headers.get("content-type")?.includes("text/event-stream") ?? false;
@@ -381,6 +365,40 @@ export async function proxyRequest(
 export function shouldUseOrderedTransport(config: ProxyConfig, clientSession: ClientSessionResult | undefined, hasCustomFetchImpl: boolean): boolean {
   if (hasCustomFetchImpl) return false;
   return clientSession?.action === "enforce" || clientSession?.source === "explicit";
+}
+
+/** Max attempts (initial + 2 retries) for transient CONNECT-level failures. */
+export const MAX_CONNECT_ATTEMPTS = 3;
+
+/**
+ * Connect-level retry ladder shared by the chat hot path and /v1/responses.
+ * Transient connect failures (DNS blip, TLS reset, Bun "Unable to connect")
+ * happen a few times a day against the gateway; the request never reached
+ * upstream, so resending is side-effect-free.
+ *
+ * Contract (review P1/P2, PR #34/#35):
+ *   - `attemptDispatch` must dispatch a FRESH request each call — a reused
+ *     Request has its body stream marked used after the first fetch.
+ *   - failures flagged `postWrite` (ordered transport already wrote the full
+ *     request) are never retried — the upstream may have processed it.
+ *   - no retry once the client aborted (`opts.isAborted`).
+ */
+export async function dispatchWithConnectRetry(
+  attemptDispatch: () => Promise<Response>,
+  opts: { isAborted?: () => boolean; onRetry?: (attempt: number, err: Error) => void } = {},
+): Promise<Response> {
+  for (let attempt = 1; ; attempt++) {
+    if (opts.isAborted?.()) throw new Error("client aborted before upstream connect");
+    try {
+      return await attemptDispatch();
+    } catch (err) {
+      if ((err as { postWrite?: boolean }).postWrite) throw err;
+      if (attempt >= MAX_CONNECT_ATTEMPTS) throw err;
+      const backoffMs = 500 * attempt;
+      opts.onRetry?.(attempt, err as Error);
+      await new Promise((r) => setTimeout(r, backoffMs));
+    }
+  }
 }
 
 /**
