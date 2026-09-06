@@ -12,7 +12,7 @@
  * previous snapshot (or none) and requests go to their original URL after a
  * cooldown. See `_reverse/NOTEPAD.md` "Server-side endpoint remapping".
  */
-import { buildIdentityHeaders } from "./identity.js";
+import { buildIdentityHeaders, identityCacheKey } from "./identity.js";
 import type { ProxyIdentity } from "../config/types.js";
 
 const DEFAULT_ORIGIN = "https://zcode.z.ai";
@@ -191,10 +191,6 @@ export class EndpointRoutingService {
 
 let defaultRouting: EndpointRoutingService | null = null;
 let defaultRoutingKey = "";
-
-function identityCacheKey(identity: ProxyIdentity): string {
-  return JSON.stringify([identity.appVersion, identity.sourceTitle, identity.refererOrigin, identity.deviceMid ?? ""]);
-}
 
 /**
  * Process-wide routing service, shared across requests (snapshot cache).

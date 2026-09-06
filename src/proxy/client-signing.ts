@@ -16,7 +16,7 @@
  * Full protocol: `_reverse/NOTEPAD.md` "Client Request Signing V4".
  */
 import type { UpstreamHeaderPair } from "./upstream.js";
-import { buildIdentityHeaders } from "./identity.js";
+import { buildIdentityHeaders, identityCacheKey } from "./identity.js";
 import type { ProxyIdentity } from "../config/types.js";
 
 const DEFAULT_ORIGIN = "https://zcode.z.ai";
@@ -571,10 +571,6 @@ export async function sendWithClientSigning(
 
 let defaultSigner: ClientSigningManager | null = null;
 let defaultSignerKey = "";
-
-function identityCacheKey(identity: ProxyIdentity): string {
-  return JSON.stringify([identity.appVersion, identity.sourceTitle, identity.refererOrigin, identity.deviceMid ?? ""]);
-}
 
 /**
  * Process-wide signing manager, shared across requests (gate + key caches).

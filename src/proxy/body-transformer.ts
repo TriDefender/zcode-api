@@ -9,11 +9,12 @@
  *      (matches `@ai-sdk/openai-compatible` default in `_reverse/zcode.cjs`).
  *   2. start-plan → prepend ZCode gateway system blocks. OpenAI upstream gets
  *      system messages; Anthropic-shaped input gets the Anthropic `system` field.
- *   3. Anthropic format → add `cache_control: { type: "ephemeral" }` to the
- *      last non-system message (mirrors `HLr` ("finalizeLatestNonSystemCacheControl")
- *      at offset ~636888 in the bundle). Anthropic's API silently ignores
- *      `cache_control` below the per-model token floor, so unconditional add
- *      is safe and matches ZCode's `applyCacheControl: true` default.
+ *   3. Anthropic format → clear existing `cache_control` markers on all
+ *      non-system messages, then add `{ type: "ephemeral" }` to the last
+ *      content block of the last non-system message (mirrors the bundle's
+ *      `zsi`+`Fsi` pair). Anthropic's API silently ignores `cache_control`
+ *      below the per-model token floor, so unconditional marking is safe and
+ *      matches ZCode's `applyCacheControl: true` default.
  *   4. Anthropic format + `ctx.userId` set → inject `metadata: { user_id }`.
  *      Mirrors `user_id: B.metadata.userId` at bundle offset ~4760586.
  *
@@ -85,14 +86,44 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 /**
- * Anthropic: add `cache_control: { type: "ephemeral" }` to the last content
- * block of the last non-system message. Mirrors ZCode's `HLr` algorithm.
- * Idempotent — skips if any block on that message already carries cache_control.
+ * Anthropic: two-phase cache_control injection, mirroring the bundle's
+ * `zsi` (clear) + `Fsi` (mark) pair:
+ *   (1) strip `cache_control` from every content block of every NON-system
+ *       message (string content carries no marker to clear);
+ *   (2) mark the last content block of the LAST non-system message (existing
+ *       location algorithm) with `{type: "ephemeral"}`; string content is
+ *       converted to a block array first (kept from the previous behavior).
+ *
+ * Without the clear phase, client-supplied `cache_control` on earlier messages
+ * would pass through alongside our marker → multiple cache breakpoints and
+ * more cache writes than the real client produces. The top-level `system`
+ * field is untouched. The bundle's skipCacheWrite variant (marks the
+ * second-to-last message instead) is NOT implemented — this proxy always
+ * writes cache.
+ *
+ * Idempotent: when the body already has our target shape (no stray markers,
+ * last block already `{type:"ephemeral"}`), nothing is reported as modified
+ * so the caller skips re-serialization.
  */
 function applyAnthropicCacheControl(body: Record<string, unknown>): boolean {
   const messages = body.messages;
   if (!Array.isArray(messages) || messages.length === 0) return false;
 
+  // Phase 1 (bundle `zsi`): clear stale markers on non-system messages.
+  let cleaned = false;
+  for (const msg of messages) {
+    if (typeof msg !== "object" || msg === null) continue;
+    if (msg.role === "system") continue;
+    if (!Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (typeof block === "object" && block !== null && "cache_control" in block) {
+        delete block.cache_control;
+        cleaned = true;
+      }
+    }
+  }
+
+  // Phase 2 (bundle `Fsi`): mark the last non-system message's last block.
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (typeof msg !== "object" || msg === null) continue;
@@ -108,10 +139,13 @@ function applyAnthropicCacheControl(body: Record<string, unknown>): boolean {
         lastBlock.cache_control = { type: "ephemeral" };
         return true;
       }
+      // Already marked — only report modified if the clear phase stripped
+      // stray markers elsewhere (idempotency: avoid needless re-serialize).
+      return cleaned;
     }
-    return false;
+    return cleaned;
   }
-  return false;
+  return cleaned;
 }
 
 /**
@@ -133,9 +167,10 @@ function applyAnthropicUserId(body: Record<string, unknown>, userId: string): bo
 /**
  * start-plan: prepend ZCode gateway system blocks. The gateway rejects
  * requests without these identity blocks with 3012 "method not allowed".
- * Forwards `body.model` so `buildStartPlanSystem` can append the dynamic
- * "You are powered by the model named ${model}." block (matches bundle 3.3.6
- * `buildEnvInfoSection` behavior when `envInfo.currentModel` is set).
+ * Forwards `body.model` so `buildStartPlanSystem` can merge the dynamic
+ * "You are powered by the model named ${model}." line into the trailing
+ * Environment block (matches bundle 3.11.2 `T9o`/buildEnvInfoSection — the
+ * line lives INSIDE the Environment text, not as a separate block).
  */
 function applyStartPlanSystem(body: Record<string, unknown>): boolean {
   const model = typeof body.model === "string" ? body.model : undefined;

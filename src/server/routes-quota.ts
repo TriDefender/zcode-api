@@ -11,7 +11,7 @@
  */
 import os from "node:os";
 import { loadCredential } from "../auth/store.js";
-import { buildIdentityHeaders } from "../proxy/identity.js";
+import { buildIdentityHeaders, normalizePrintableHeaderValue } from "../proxy/identity.js";
 import { inspectJwt } from "../auth/jwt-age.js";
 import type { ProxyConfig } from "../config/types.js";
 import { errorResponse } from "../proxy/handler.js";
@@ -94,13 +94,13 @@ export async function collectQuotaSnapshot(
   delete idHeaders["X-ZCode-Agent"];
   const headers: Record<string, string> = { ...idHeaders, authorization: `Bearer ${cred.jwt}`, Accept: "application/json" };
   // Billing fingerprint is reconstructed from the observed claim-client format
-  // (`${platform}-${arch}`). Same env overrides as proxy/identity.ts X-Platform
-  // (Android seeds linux-x64 via index.ts), with empty-string overrides falling
-  // back to the real values — an empty override must not yield `-x64`/`linux-`.
+  // (`${platform}-${arch}`). Reuses identity.ts's env-override normalization
+  // (same ZCODE_IDENTITY_PLATFORM/ARCH overrides the proxy headers use —
+  // Android seeds linux-x64 via index.ts); empty or non-printable overrides
+  // fall back to the real values — an empty override must not yield
+  // `-x64`/`linux-`.
   // NOTE: ProxyIdentity has no platform/arch fields — do not read them off `identity`.
-  const platformEnv = process.env.ZCODE_IDENTITY_PLATFORM?.trim();
-  const archEnv = process.env.ZCODE_IDENTITY_ARCH?.trim();
-  const platform = `${platformEnv || process.platform}-${archEnv || os.arch()}`;
+  const platform = `${normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM) ?? process.platform}-${normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH) ?? os.arch()}`;
   const origin = config.claim.origin || "https://zcode.z.ai";
   const appVersion = identity.appVersion;
 

@@ -1,32 +1,32 @@
 /**
- * Identity header builder — emits the ZCode desktop client's companion headers
- * on every upstream request so the proxy is indistinguishable from the official
- * client at the fingerprinting layer.
+ * Identity header builders — emit the ZCode desktop client's companion
+ * headers so the proxy is indistinguishable from the official client at the
+ * fingerprinting layer.
  *
- * Mirrors `pio` (`buildProviderIdentityHeaders`) in the current ZCode bundle
- * (`_reverse/zcode.cjs` L43, refreshed 2026-08-07). Field-for-field,
- * order-for-order. The bundle's `pio` emits, in this exact sequence:
+ * TWO distinct bundle functions are mirrored (ZCode 3.11.2, `_reverse/zcode.cjs`):
  *
- *   HTTP-Referer            EP(env)                          // refererOrigin
- *   User-Agent              `ZCode/${n ?? "unknown"}`
- *   X-ZCode-App-Version     n                                // ONLY when appVersion resolves (ASCII gate)
- *   X-Title                 `Z Code@${sourceTitle}`
- *   X-Platform              `${platform}-${arch}`            // when both resolve
- *   X-Release-Channel       "production" (or "test" via ZCODE_ENV; override ZCODE_IDENTITY_RELEASE_CHANNEL)
- *   X-Client-Language       lsa() = Intl locale              // when Intl resolves
- *   X-Client-Timezone       csa() = Intl timezone            // when Intl resolves
- *   X-Os-Category           Nno(platform)                    // when platform resolves
- *   X-Os-Version            u                                // when osVersion resolves
- *   X-Device-Mid            i                                // when deviceMid resolves
+ *   1. `csn` = buildCliZCodeSourceHeaders (CLI LLM path, wrapped by `x4i`
+ *      which appends `X-ZCode-Agent: "glm"` as the LAST header) — used for
+ *      every LLM completion request → {@link buildLlmIdentityHeaders}.
+ *      Shape: HTTP-Referer, User-Agent, [X-ZCode-App-Version], X-Title,
+ *      X-Release-Channel (always), X-Client-Language (always, "unknown"
+ *      fallback), X-Client-Timezone (always, "unknown" fallback),
+ *      [X-Platform], X-Os-Category (when platform resolves), [X-Os-Version],
+ *      X-ZCode-Agent ("glm", last). NO X-Device-Mid — the CLI LLM path never
+ *      carried it.
  *
- * We additionally send `X-ZCode-Agent: "glm"` (from the bundle's `Wna` helper,
- * L3265) between X-Title and X-Platform — it has been accepted upstream since
- * v2.0 and is kept for continuity.
+ *   2. `HRt` = buildZCodeSourceHeadersFromContext (host-side control-plane
+ *      fetches: endpoint-routing configs, signing gate, claim/billing) —
+ *      used by {@link buildIdentityHeaders}. Shape keeps the historical
+ *      `pio`-derived order with conditional language/timezone and the
+ *      optional X-Device-Mid (server-required on the claim/billing plane
+ *      since the 0828 campaign). Consumers: endpoint-routing.ts,
+ *      client-signing.ts, claim/client.ts, routes-quota.ts, async bridge.
  *
- * `n = fio(...)` validates appVersion against `/^[\x20-\x7e]+$/` (printable
- * ASCII). When no version resolves, `pio` drops `X-ZCode-App-Version` entirely
- * and falls back the User-Agent to `ZCode/unknown`. We replicate both
- * behaviours exactly. The same ASCII gate applies to every runtime header value.
+ * Both gate header values through the bundle's `fio` printable-ASCII rule;
+ * `n = fio(...)` validates appVersion and, when it fails, drops
+ * X-ZCode-App-Version entirely and falls the User-Agent back to
+ * `ZCode/unknown`.
  *
  * Runtime values are read via env overrides (matching the existing
  * ZCODE_IDENTITY_PLATFORM/ARCH/RELEASE pattern) so the Android entry can emit
@@ -51,7 +51,8 @@ function resolveAppVersion(raw: string | undefined): string | undefined {
   return v.length > 0 && ASCII_PRINTABLE.test(v) ? v : undefined;
 }
 
-function normalizePrintableHeaderValue(raw: string | undefined): string | undefined {
+/** Normalize a header value: trimmed + printable ASCII, else undefined. */
+export function normalizePrintableHeaderValue(raw: string | undefined): string | undefined {
   if (typeof raw !== "string") return undefined;
   const v = raw.trim();
   return v.length > 0 && ASCII_PRINTABLE.test(v) ? v : undefined;
@@ -90,10 +91,73 @@ function resolveClientTimezone(): string | undefined {
   }
 }
 
+interface ResolvedIdentityValues {
+  n?: string;
+  platform?: string;
+  platformForCategory: NodeJS.Platform;
+  arch?: string;
+  release?: string;
+  releaseChannel: string;
+  clientLanguage?: string;
+  clientTimezone?: string;
+  deviceMid?: string;
+}
+
+/** Shared env/config resolution for both builders (values only — ordering differs per builder). */
+function resolveIdentityValues(id: ProxyIdentity): ResolvedIdentityValues {
+  // Env overrides (ZCODE_IDENTITY_PLATFORM/ARCH/RELEASE) let the Android entry
+  // emit desktop-Linux identity headers without changing this module.
+  return {
+    n: resolveAppVersion(id.appVersion),
+    platform: normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform),
+    platformForCategory: (process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform) as NodeJS.Platform,
+    arch: normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH ?? os.arch()),
+    release: normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE ?? os.release()),
+    // bundle IL(): ZCODE_ENV==="test" ? "test" : "production" — always resolves.
+    // Mirror that default; ZCODE_IDENTITY_RELEASE_CHANNEL stays an explicit override.
+    releaseChannel: normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE_CHANNEL)
+      ?? (process.env.ZCODE_ENV?.trim().toLowerCase() === "test" ? "test" : "production"),
+    clientLanguage: resolveClientLanguage(),
+    clientTimezone: resolveClientTimezone(),
+    // env (Android NodeRunner injection) wins over the config.yaml value (desktop
+    // persistence) — both are UUIDv4 generated once and reused forever.
+    deviceMid: normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_DEVICE_MID)
+      ?? normalizePrintableHeaderValue(id.deviceMid),
+  };
+}
+
 /**
- * Build the identity and runtime platform headers injected upstream, in the
- * exact order and with the exact conditional semantics of the bundle's `pio`.
+ * Identity headers for LLM completion requests — mirrors the bundle's CLI
+ * source-headers builder `csn` (buildCliZCodeSourceHeaders) + the `x4i`
+ * wrapper that appends `X-ZCode-Agent: "glm"` LAST. Differences vs the
+ * control-plane set (buildIdentityHeaders): language/timezone are ALWAYS
+ * emitted (falling back to "unknown"), X-Release-Channel sits right after
+ * X-Title, X-ZCode-Agent is the final header, and X-Device-Mid is NEVER sent.
  * Pure function.
+ */
+export function buildLlmIdentityHeaders(id: ProxyIdentity): Record<string, string> {
+  const v = resolveIdentityValues(id);
+  return {
+    "HTTP-Referer": id.refererOrigin,
+    "User-Agent": `ZCode/${v.n ?? "unknown"}`,
+    ...(v.n ? { "X-ZCode-App-Version": v.n } : {}),
+    "X-Title": `Z Code@${id.sourceTitle}`,
+    "X-Release-Channel": v.releaseChannel,
+    "X-Client-Language": v.clientLanguage ?? "unknown",
+    "X-Client-Timezone": v.clientTimezone ?? "unknown",
+    ...(v.platform && v.arch ? { "X-Platform": `${v.platform}-${v.arch}` } : {}),
+    ...(v.platform ? { "X-Os-Category": normalizeOsCategory(v.platformForCategory) } : {}),
+    ...(v.release ? { "X-Os-Version": v.release } : {}),
+    "X-ZCode-Agent": "glm",
+  };
+}
+
+/**
+ * Control-plane identity headers — mirrors the host-side bundle builder
+ * `HRt` (buildZCodeSourceHeadersFromContext), reached us via the historical
+ * `pio` shape. Used by endpoint-routing, client-signing gate, claim/billing
+ * and the async bridge — NOT for LLM completion requests (use
+ * {@link buildLlmIdentityHeaders} there).
  *
  * Order (with X-ZCode-Agent kept between X-Title and X-Platform):
  *   HTTP-Referer, User-Agent, [X-ZCode-App-Version], X-Title, X-ZCode-Agent,
@@ -101,40 +165,31 @@ function resolveClientTimezone(): string | undefined {
  *   [X-Os-Category], [X-Os-Version], [X-Device-Mid]
  *
  * Returns `Record<string, string>` rather than a fixed interface because
- * several headers are conditionally omitted (matching `pio`).
+ * several headers are conditionally omitted.
  */
 export function buildIdentityHeaders(id: ProxyIdentity): Record<string, string> {
-  // Env overrides (ZCODE_IDENTITY_PLATFORM/ARCH/RELEASE) let the Android entry
-  // emit desktop-Linux identity headers without changing this module.
-  const n = resolveAppVersion(id.appVersion);
-  const platform = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform);
-  const arch = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_ARCH ?? os.arch());
-  const release = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE ?? os.release());
-  const platformForCategory = (process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform) as NodeJS.Platform;
-  // bundle IL(): ZCODE_ENV==="test" ? "test" : "production" — always resolves.
-  // Mirror that default; ZCODE_IDENTITY_RELEASE_CHANNEL stays an explicit override.
-  const releaseChannel = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_RELEASE_CHANNEL)
-    ?? (process.env.ZCODE_ENV?.trim().toLowerCase() === "test" ? "test" : "production");
-  const clientLanguage = resolveClientLanguage();
-  const clientTimezone = resolveClientTimezone();
-  // env (Android NodeRunner injection) wins over the config.yaml value (desktop
-  // persistence) — both are UUIDv4 generated once and reused forever.
-  const deviceMid = normalizePrintableHeaderValue(process.env.ZCODE_IDENTITY_DEVICE_MID)
-    ?? normalizePrintableHeaderValue(id.deviceMid);
-
-  const headers: Record<string, string> = {
+  const v = resolveIdentityValues(id);
+  return {
     "HTTP-Referer": id.refererOrigin,
-    "User-Agent": `ZCode/${n ?? "unknown"}`,
-    ...(n ? { "X-ZCode-App-Version": n } : {}),
+    "User-Agent": `ZCode/${v.n ?? "unknown"}`,
+    ...(v.n ? { "X-ZCode-App-Version": v.n } : {}),
     "X-Title": `Z Code@${id.sourceTitle}`,
     "X-ZCode-Agent": "glm",
-    ...(platform && arch ? { "X-Platform": `${platform}-${arch}` } : {}),
-    ...(releaseChannel ? { "X-Release-Channel": releaseChannel } : {}),
-    ...(clientLanguage ? { "X-Client-Language": clientLanguage } : {}),
-    ...(clientTimezone ? { "X-Client-Timezone": clientTimezone } : {}),
-    ...(platform ? { "X-Os-Category": normalizeOsCategory(platformForCategory) } : {}),
-    ...(release ? { "X-Os-Version": release } : {}),
-    ...(deviceMid ? { "X-Device-Mid": deviceMid } : {}),
+    ...(v.platform && v.arch ? { "X-Platform": `${v.platform}-${v.arch}` } : {}),
+    ...(v.releaseChannel ? { "X-Release-Channel": v.releaseChannel } : {}),
+    ...(v.clientLanguage ? { "X-Client-Language": v.clientLanguage } : {}),
+    ...(v.clientTimezone ? { "X-Client-Timezone": v.clientTimezone } : {}),
+    ...(v.platform ? { "X-Os-Category": normalizeOsCategory(v.platformForCategory) } : {}),
+    ...(v.release ? { "X-Os-Version": v.release } : {}),
+    ...(v.deviceMid ? { "X-Device-Mid": v.deviceMid } : {}),
   };
-  return headers;
+}
+
+/**
+ * Cache key for process-wide singletons that embed a `ProxyIdentity`
+ * (endpoint routing, client signing): two configs producing the same key can
+ * share the same service instance.
+ */
+export function identityCacheKey(identity: ProxyIdentity): string {
+  return JSON.stringify([identity.appVersion, identity.sourceTitle, identity.refererOrigin, identity.deviceMid ?? ""]);
 }

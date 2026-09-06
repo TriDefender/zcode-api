@@ -108,13 +108,14 @@ describe("createClaimClient — getPreviews", () => {
 
 describe("createClaimClient — identity header set", () => {
   it("preview and claim carry X-Device-Mid (server-required) and full identity minus X-ZCode-Agent", async () => {
-    const seen: Array<{ path: string; deviceMid: string | null; agent: string | null; version: string | null }> = [];
+    const seen: Array<{ path: string; deviceMid: string | null; agent: string | null; version: string | null; ua: string | null }> = [];
     const fetchImpl = makeMockFetch((req) => {
       seen.push({
         path: new URL(req.url).pathname,
         deviceMid: req.headers.get("x-device-mid"),
         agent: req.headers.get("x-zcode-agent"),
         version: req.headers.get("x-zcode-app-version"),
+        ua: req.headers.get("user-agent"),
       });
       return Promise.resolve(jsonResp(PREVIEW_BODY));
     });
@@ -135,6 +136,9 @@ describe("createClaimClient — identity header set", () => {
       expect(r.deviceMid).toBe("d4ad5b5e-1234-4abc-9def-aabbccddeeff");
       expect(r.agent).toBeNull();
       expect(r.version).toBe("3.11.2");
+      // CL-26: control-plane fetches keep the BARE ZCode UA — the
+      // `ai-sdk/anthropic/...` suffix is LLM-path only.
+      expect(r.ua).toBe("ZCode/3.11.2");
     }
     expect(seen[0].path).toBe("/api/v1/zcode-plan/billing/preview");
     expect(seen[1].path).toBe("/api/v1/zcode-plan/billing/claim");

@@ -17,6 +17,26 @@ function okConfigFetch(...bodies: string[]): typeof fetch {
 }
 
 describe("EndpointRoutingService", () => {
+  it("config fetch carries the control-plane identity set with a BARE User-Agent (no SDK suffix)", async () => {
+    // CL-26/CL-27: only the LLM request path carries the
+    // `ai-sdk/anthropic/...` UA suffix and the csn header set — control-plane
+    // fetches (endpoint routing) keep the HRt identity shape and bare UA.
+    let seenUserAgent = "";
+    const svc = new EndpointRoutingService({
+      identity,
+      fetchImpl: (async (_url: unknown, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        seenUserAgent = headers.get("User-Agent") ?? "";
+        return new Response(JSON.stringify({
+          code: 0,
+          data: { proxyEndpoint: { mapping: [{ from: ZAI_ANTHROPIC, to: ZAI_ULTRA }] } },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as unknown as typeof fetch,
+    });
+    await svc.resolve(ZAI_ANTHROPIC);
+    expect(seenUserAgent).toBe("ZCode/3.8.1");
+  });
+
   it("rewrites a mapped URL and preserves the query string", async () => {
     const svc = new EndpointRoutingService({
       identity,

@@ -98,7 +98,7 @@ describe("transformRequestBody — cache_control (Anthropic)", () => {
     expect(parsed.messages[0].content[0].cache_control).toEqual({ type: "ephemeral" });
   });
 
-  it("does NOT overwrite existing cache_control on last block", () => {
+  it("clears a non-canonical existing cache_control and re-marks with the canonical ephemeral shape (zsi+Fsi)", () => {
     const existing = { type: "ephemeral", ttl: "1h" };
     const body = JSON.stringify({
       messages: [
@@ -107,7 +107,32 @@ describe("transformRequestBody — cache_control (Anthropic)", () => {
     });
     const out = transformRequestBody(body, { format: "anthropic" });
     const parsed = JSON.parse(out as string);
-    expect(parsed.messages[0].content[0].cache_control).toEqual(existing);
+    expect(parsed.messages[0].content[0].cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("strips client cache_control on earlier non-system messages, keeps only the last-message marker", () => {
+    const body = JSON.stringify({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "early", cache_control: { type: "ephemeral" } }] },
+        { role: "assistant", content: [{ type: "text", text: "reply" }] },
+      ],
+    });
+    const out = transformRequestBody(body, { format: "anthropic" });
+    const parsed = JSON.parse(out as string);
+    expect(parsed.messages[0].content[0].cache_control).toBeUndefined();
+    expect(parsed.messages[1].content[0].cache_control).toEqual({ type: "ephemeral" });
+  });
+
+  it("is idempotent: an already-marked body is returned without modification", () => {
+    const body = JSON.stringify({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "early" }] },
+        { role: "assistant", content: [{ type: "text", text: "reply", cache_control: { type: "ephemeral" } }] },
+      ],
+    });
+    const out = transformRequestBody(body, { format: "anthropic" });
+    // Already our target shape → the original string comes back untouched
+    expect(out).toBe(body);
   });
 
   it("skips system messages — finds last non-system", () => {
@@ -164,7 +189,7 @@ describe("transformRequestBody — combined behavior", () => {
 });
 
 describe("transformRequestBody — start-plan system (Anthropic)", () => {
-  it("prepends current ZCode system messages as three cacheable blocks plus currentModel block", () => {
+  it("prepends three official blocks with the currentModel line merged into the Environment block (T9o)", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       max_tokens: 1024,
@@ -174,7 +199,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     const out = transformRequestBody(body, { format: "anthropic", startPlan: true });
     const parsed = JSON.parse(out as string);
 
-    expect(parsed.system).toHaveLength(4);
+    expect(parsed.system).toHaveLength(3);
     expect(parsed.system[0]).toEqual({
       type: "text",
       text: "You are ZCode, an interactive coding agent",
@@ -186,12 +211,10 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     expect(parsed.system[2].text).toContain("You have been invoked in the following environment:");
     expect(parsed.system[2].text).toContain("- Is a git repository: no");
     expect(parsed.system[2].text).not.toContain("- Is a git repository: unknown");
+    // The powered-by line lives INSIDE the Environment text as its last line,
+    // not as a separate 4th block (bundle 3.11.2 T9o shape).
+    expect(parsed.system[2].text.endsWith("\n- You are powered by the model named glm-5.2.")).toBe(true);
     expect(parsed.system[2].cache_control).toEqual({ type: "ephemeral" });
-    expect(parsed.system[3]).toEqual({
-      type: "text",
-      text: "- You are powered by the model named glm-5.2.",
-      cache_control: { type: "ephemeral" },
-    });
   });
 
   it("omits the currentModel block when body.model is missing", () => {
@@ -241,13 +264,13 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     const out = transformRequestBody(body, { format: "anthropic", startPlan: true });
     const parsed = JSON.parse(out as string);
 
-    expect(parsed.system).toHaveLength(5);
-    expect(parsed.system[4]).toEqual({ type: "text", text: "User rule" });
+    expect(parsed.system).toHaveLength(4);
+    expect(parsed.system[3]).toEqual({ type: "text", text: "User rule" });
   });
 });
 
 describe("transformRequestBody — start-plan system (OpenAI)", () => {
-  it("prepends current ZCode system messages (incl. currentModel) before OpenAI chat messages", () => {
+  it("prepends current ZCode system messages (currentModel line inside the Environment message) before OpenAI chat messages", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       messages: [{ role: "user", content: "hi" }],
@@ -265,11 +288,8 @@ describe("transformRequestBody — start-plan system (OpenAI)", () => {
     expect(parsed.messages[2].role).toBe("system");
     expect(parsed.messages[2].content).toContain("You have been invoked in the following environment:");
     expect(parsed.messages[2].content).toContain("- Is a git repository: no");
-    expect(parsed.messages[3]).toEqual({
-      role: "system",
-      content: "- You are powered by the model named glm-5.2.",
-    });
-    expect(parsed.messages[4]).toEqual({ role: "user", content: "hi" });
+    expect(parsed.messages[2].content).toContain("- You are powered by the model named glm-5.2.");
+    expect(parsed.messages[3]).toEqual({ role: "user", content: "hi" });
   });
 
   it("omits the currentModel system message when body.model is missing (OpenAI)", () => {

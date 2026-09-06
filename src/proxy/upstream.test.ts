@@ -159,6 +159,19 @@ describe("buildAuthHeaders", () => {
     expect(h["authorization"]).toBe("Bearer testkey.testsecret");
   });
 
+  it("coding-plan anthropic: dual auth headers (x-api-key AND Authorization, same value — bundle ebo, CL-25)", () => {
+    const h = buildAuthHeaders("anthropic", ZAI_CRED, IDENTITY, "coding-plan");
+    expect(h["x-api-key"]).toBe("testkey.testsecret");
+    expect(h["authorization"]).toBe("Bearer testkey.testsecret");
+  });
+
+  it("start-plan anthropic: only Authorization Bearer jwt, no x-api-key", () => {
+    const h = buildAuthHeaders("anthropic", { ...ZAI_CRED, jwt: "jwt-token" }, IDENTITY, "start-plan");
+    expect(h["authorization"]).toBe("Bearer jwt-token");
+    expect(h["x-api-key"]).toBeUndefined();
+    expect(h["anthropic-version"]).toBe("2023-06-01");
+  });
+
   it("uses apiKey only (no secret) for Bigmodel Anthropic", () => {
     const h = buildAuthHeaders("anthropic", BIGMODEL_CRED, IDENTITY);
     expect(h["x-api-key"]).toBe("bmkey");
@@ -170,9 +183,10 @@ describe("buildAuthHeaders", () => {
     expect(h["authorization"]).toBe("Bearer bmkey");
   });
 
-  it("injects ZCode identity headers (User-Agent + companions)", () => {
+  it("injects ZCode identity headers (User-Agent + companions + SDK suffix)", () => {
     const h = buildAuthHeaders("anthropic", ZAI_CRED, IDENTITY);
-    expect(h["User-Agent"]).toBe("ZCode/test-1.0.0");
+    // CL-26: bundle Cm/k0o merges the anthropic SDK identity into the UA.
+    expect(h["User-Agent"]).toBe("ZCode/test-1.0.0 ai-sdk/anthropic/3.0.81");
     expect(h["X-ZCode-App-Version"]).toBe("test-1.0.0");
     expect(h["X-Title"]).toBe("Z Code@cli");
     expect(h["X-ZCode-Agent"]).toBe("glm");
@@ -219,24 +233,29 @@ describe("buildAuthHeaders", () => {
     };
     const h = buildAuthHeaders("anthropic", ZAI_CRED, IDENTITY, "coding-plan", session);
 
+    // Identity part mirrors the bundle's CLI LLM builder `csn` (CL-27):
+    // language/timezone always present, X-Release-Channel right after
+    // X-Title, X-ZCode-Agent LAST, no X-Device-Mid. Then trace headers, then
+    // auth (dual x-api-key + Authorization for coding-plan, CL-25).
     expect(Object.keys(h)).toEqual([
       "HTTP-Referer",
       "User-Agent",
       "X-ZCode-App-Version",
       "X-Title",
-      "X-ZCode-Agent",
-      "X-Platform",
       "X-Release-Channel",
       "X-Client-Language",
       "X-Client-Timezone",
+      "X-Platform",
       "X-Os-Category",
       "X-Os-Version",
+      "X-ZCode-Agent",
       "x-request-id",
       "x-zcode-session-type",
       "x-zcode-trace-id",
       "x-query-id",
       "x-session-id",
       "x-api-key",
+      "authorization",
       "anthropic-version",
     ]);
     expect(h["x-request-id"]).toBe("req_1");
@@ -363,9 +382,10 @@ describe("buildUpstreamRequest", () => {
     expect(upstream.url).toBe("https://api.z.ai/api/anthropic/v1/messages");
     expect(upstream.method).toBe("POST");
     expect(upstream.headers.get("x-api-key")).toBe("testkey.testsecret");
+    expect(upstream.headers.get("authorization")).toBe("Bearer testkey.testsecret");
     expect(upstream.headers.get("anthropic-version")).toBe("2023-06-01");
     expect(upstream.headers.get("content-type")).toBe("application/json");
-    expect(upstream.headers.get("user-agent")).toBe("ZCode/test-1.0.0");
+    expect(upstream.headers.get("user-agent")).toBe("ZCode/test-1.0.0 ai-sdk/anthropic/3.0.81");
 
     const body = await upstream.text();
     expect(body).toBe('{"model":"glm-4.6","messages":[]}');
@@ -389,9 +409,12 @@ describe("buildUpstreamRequest", () => {
   it("strips client Authorization header (prevents credential leak)", () => {
     const clientReq = makeClientReq("{}", { authorization: "Bearer client-token" });
     const upstream = buildUpstreamRequest(clientReq, "anthropic", ZAI_PROVIDER, ZAI_CRED, "{}", IDENTITY);
-    // Auth should be the injected credential, NOT the client's
+    // Auth must be the injected credential, NOT the client's. Coding-plan
+    // anthropic requests carry BOTH x-api-key and Authorization with the
+    // same injected value (bundle ebo, CL-25).
     expect(upstream.headers.get("x-api-key")).toBe("testkey.testsecret");
-    expect(upstream.headers.get("authorization")).toBeNull();
+    expect(upstream.headers.get("authorization")).toBe("Bearer testkey.testsecret");
+    expect(upstream.headers.get("authorization")).not.toContain("client-token");
   });
 
   it("strips client x-api-key header", () => {

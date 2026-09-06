@@ -5,14 +5,15 @@
  * blocks in the `system` field, it rejects with 3012 "method not allowed".
  *
  * Static blocks (CLI Prefix, Agent Identity w/ Harness, Environment Info) live
- * in zcode_system.json. The dynamic `currentModel` block is appended at runtime
- * when a model name is available — mirrors bundle 3.3.6 `buildEnvInfoSection`
- * which emits `- You are powered by the model named ${currentModel}.` as the
- * trailing line when `envInfo.currentModel` is set.
+ * in zcode_system.json. When a model name is available, the dynamic
+ * `- You are powered by the model named ${currentModel}.` line is appended
+ * INSIDE the trailing Environment block's text (mirrors bundle 3.11.2 `T9o`
+ * / buildEnvInfoSection, which emits it as the block's last line — NOT as a
+ * separate 4th block).
  *
  * Source: extracted from ZCode Electron app's `buildCliPrefixSection`,
- * `buildIdentitySection`, and `buildEnvInfoSection` (bundle offsets ~661815,
- * ~663472, ~665165). See PROMPT.md for the full prompt structure.
+ * `buildIdentitySection`, and `buildEnvInfoSection`. See PROMPT.md for the
+ * full prompt structure.
  *
  * @see zcode_system.json
  * @see PROMPT.md
@@ -35,19 +36,17 @@ const ZCODE_SYSTEM_BLOCKS = blocks as SystemBlock[];
  * Prepend official ZCode gateway blocks to the request's `system` field.
  * Client system blocks (if any) are preserved after the official blocks.
  *
- * When `currentModel` is a non-empty string, an additional block
- * `- You are powered by the model named ${currentModel}.` is appended after
- * the static official blocks (mirrors ZCode client behavior for
- * `envInfo.currentModel`).
+ * When `currentModel` is a non-empty string, the powered-by line is merged
+ * into the LAST static block (Environment) as its trailing text line — the
+ * block's cache_control (if any) stays as-is, no extra breakpoint is created.
  */
 export function buildStartPlanSystem(existingSystem: unknown, currentModel?: string): unknown[] {
   const official = ZCODE_SYSTEM_BLOCKS.map((b) => structuredClone(b));
   if (currentModel && currentModel.trim().length > 0) {
-    official.push({
-      type: "text",
-      text: `- You are powered by the model named ${currentModel}.`,
-      cache_control: { type: "ephemeral" },
-    });
+    const env = official[official.length - 1];
+    if (env && typeof env === "object") {
+      env.text = `${env.text}\n- You are powered by the model named ${currentModel}.`;
+    }
   }
   const userBlocks = normalizeUserSystem(existingSystem);
   return [...official, ...userBlocks];

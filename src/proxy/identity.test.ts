@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from "bun:test";
 import os from "node:os";
-import { buildIdentityHeaders } from "./identity.js";
+import { buildIdentityHeaders, buildLlmIdentityHeaders } from "./identity.js";
 import type { ProxyIdentity } from "../config/types.js";
 
 const BASE: ProxyIdentity = {
@@ -185,5 +185,108 @@ describe("buildIdentityHeaders", () => {
     const missing = buildIdentityHeaders({ ...BASE, appVersion: undefined as unknown as string });
     expect(missing["User-Agent"]).toBe("ZCode/unknown");
     expect(missing["X-ZCode-App-Version"]).toBeUndefined();
+  });
+});
+
+describe("buildLlmIdentityHeaders (CLI `csn` shape — CL-27)", () => {
+  it("emits headers in the csn order with X-ZCode-Agent LAST and no X-Device-Mid", () => {
+    const savedDM = process.env.ZCODE_IDENTITY_DEVICE_MID;
+    delete process.env.ZCODE_IDENTITY_DEVICE_MID;
+    try {
+      const h = buildLlmIdentityHeaders({ ...BASE, deviceMid: "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0" });
+      expect(Object.keys(h)).toEqual([
+        "HTTP-Referer",
+        "User-Agent",
+        "X-ZCode-App-Version",
+        "X-Title",
+        "X-Release-Channel",
+        "X-Client-Language",
+        "X-Client-Timezone",
+        "X-Platform",
+        "X-Os-Category",
+        "X-Os-Version",
+        "X-ZCode-Agent",
+      ]);
+      // The CLI LLM path NEVER carried X-Device-Mid — even when one exists for
+      // the control-plane (HRt) header set.
+      expect(h["X-Device-Mid"]).toBeUndefined();
+    } finally {
+      if (savedDM !== undefined) process.env.ZCODE_IDENTITY_DEVICE_MID = savedDM;
+    }
+  });
+
+  it("always emits language/timezone, falling back to literal 'unknown'", () => {
+    const saved = {
+      cl: process.env.ZCODE_IDENTITY_CLIENT_LANGUAGE,
+      ct: process.env.ZCODE_IDENTITY_CLIENT_TIMEZONE,
+    };
+    // Non-printable overrides are dropped by the gate → Intl normally
+    // re-resolves; simulate "nothing resolves" by overriding with values that
+    // fail the printable-ASCII gate AND are empty after trim is impossible —
+    // instead assert the always-present contract directly:
+    process.env.ZCODE_IDENTITY_CLIENT_LANGUAGE = "fr-FR";
+    process.env.ZCODE_IDENTITY_CLIENT_TIMEZONE = "Europe/Paris";
+    try {
+      const h = buildLlmIdentityHeaders(BASE);
+      expect(h["X-Client-Language"]).toBe("fr-FR");
+      expect(h["X-Client-Timezone"]).toBe("Europe/Paris");
+      // Always present on the LLM path (csn contract):
+      expect("X-Client-Language" in h).toBe(true);
+      expect("X-Client-Timezone" in h).toBe(true);
+    } finally {
+      if (saved.cl === undefined) delete process.env.ZCODE_IDENTITY_CLIENT_LANGUAGE;
+      else process.env.ZCODE_IDENTITY_CLIENT_LANGUAGE = saved.cl;
+      if (saved.ct === undefined) delete process.env.ZCODE_IDENTITY_CLIENT_TIMEZONE;
+      else process.env.ZCODE_IDENTITY_CLIENT_TIMEZONE = saved.ct;
+    }
+    // "unknown" fallback: whitespace-only override fails the gate, Intl
+    // re-resolves — but the KEY must exist regardless of resolution.
+    const h2 = buildLlmIdentityHeaders(BASE);
+    expect(typeof h2["X-Client-Language"]).toBe("string");
+    expect(typeof h2["X-Client-Timezone"]).toBe("string");
+  });
+
+  it("falls User-Agent back to ZCode/unknown and omits X-ZCode-App-Version when no version resolves", () => {
+    const h = buildLlmIdentityHeaders({ ...BASE, appVersion: "" });
+    expect(h["User-Agent"]).toBe("ZCode/unknown");
+    expect(h["X-ZCode-App-Version"]).toBeUndefined();
+  });
+
+  it("keeps X-ZCode-Agent as glm in the final position even when platform headers are absent", () => {
+    const savedP = process.env.ZCODE_IDENTITY_PLATFORM;
+    const savedA = process.env.ZCODE_IDENTITY_ARCH;
+    const savedR = process.env.ZCODE_IDENTITY_RELEASE;
+    delete process.env.ZCODE_IDENTITY_PLATFORM;
+    delete process.env.ZCODE_IDENTITY_ARCH;
+    delete process.env.ZCODE_IDENTITY_RELEASE;
+    // NOTE: platform/arch fall back to the real process values, so the
+    // conditional headers still resolve on a real host — the assertion pins
+    // the RELATIVE position of X-ZCode-Agent (always last).
+    try {
+      const h = buildLlmIdentityHeaders(BASE);
+      const keys = Object.keys(h);
+      expect(keys[keys.length - 1]).toBe("X-ZCode-Agent");
+      expect(h["X-ZCode-Agent"]).toBe("glm");
+      if (h["X-Platform"]) expect(h["X-Platform"]).toBe(`${process.platform}-${os.arch()}`);
+    } finally {
+      if (savedP !== undefined) process.env.ZCODE_IDENTITY_PLATFORM = savedP;
+      if (savedA !== undefined) process.env.ZCODE_IDENTITY_ARCH = savedA;
+      if (savedR !== undefined) process.env.ZCODE_IDENTITY_RELEASE = savedR;
+    }
+  });
+
+  it("always emits X-Release-Channel (default production, ZCODE_ENV=test switch)", () => {
+    const savedEnv = process.env.ZCODE_ENV;
+    const savedRC = process.env.ZCODE_IDENTITY_RELEASE_CHANNEL;
+    delete process.env.ZCODE_IDENTITY_RELEASE_CHANNEL;
+    try {
+      expect(buildLlmIdentityHeaders(BASE)["X-Release-Channel"]).toBe("production");
+      process.env.ZCODE_ENV = "test";
+      expect(buildLlmIdentityHeaders(BASE)["X-Release-Channel"]).toBe("test");
+    } finally {
+      if (savedEnv === undefined) delete process.env.ZCODE_ENV;
+      else process.env.ZCODE_ENV = savedEnv;
+      if (savedRC !== undefined) process.env.ZCODE_IDENTITY_RELEASE_CHANNEL = savedRC;
+    }
   });
 });

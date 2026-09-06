@@ -15,7 +15,7 @@ import type { ProviderDef } from "../provider/types.js";
 import type { Credential } from "../auth/types.js";
 import type { ProxyIdentity } from "../config/types.js";
 import { credentialString } from "../auth/types.js";
-import { buildIdentityHeaders } from "./identity.js";
+import { buildLlmIdentityHeaders } from "./identity.js";
 import { buildZcodeTraceHeaders } from "./trace-headers.js";
 import { sessionIdForHeader, shouldUseExactTraceHeaders } from "./session-context.js";
 
@@ -32,6 +32,14 @@ export interface UpstreamClientSession {
 export type UpstreamHeaderPair = [string, string];
 
 const ANTHROPIC_VERSION = "2023-06-01";
+
+/**
+ * SDK UA suffix the real client appends to its User-Agent on LLM calls
+ * (bundle `Cm` merges `ai-sdk/anthropic/${k0o}` into the UA; k0o = "3.0.81").
+ * Only the LLM request path carries it — control-plane fetches (endpoint
+ * routing, signing gate, claim/billing) keep the bare `ZCode/…` UA.
+ */
+const ANTHROPIC_SDK_UA = "ai-sdk/anthropic/3.0.81";
 
 const STARTPLAN_ANTHROPIC_BASE = "https://zcode.z.ai/api/v1/zcode-plan";
 
@@ -85,12 +93,17 @@ export function buildUpstreamURL(format: Format, provider: ProviderDef, plan: "c
 }
 
 /**
- * Build auth + identity + trace headers for the upstream request.
+ * Build auth + identity + trace headers for the upstream LLM request.
  *
  * The `format` parameter is the *upstream* format — selects auth scheme:
- * - Anthropic upstream, coding-plan → `x-api-key: {cred}` + `anthropic-version`
- * - OpenAI upstream, coding-plan    → `Authorization: Bearer {cred}`
- * - OpenAI upstream, start-plan     → `Authorization: Bearer {jwt}`
+ * - Anthropic upstream, coding-plan → `x-api-key: {cred}` AND
+ *   `Authorization: Bearer {cred}` (dual headers, bundle `ebo`) +
+ *   `anthropic-version`
+ * - Anthropic upstream, start-plan  → `Authorization: Bearer {jwt}` + `anthropic-version`
+ * - OpenAI upstream (any plan)      → `Authorization: Bearer {cred|jwt}`
+ *
+ * Identity headers come from `buildLlmIdentityHeaders` (bundle `csn` shape);
+ * the User-Agent carries the `ai-sdk/anthropic` SDK suffix (bundle `Cm`/`k0o`).
  *
  * Trace/attribution headers mirror the bundle's `Bdt`
  * ("createModelRequestAttributionHeaders") when an explicit/enforced trace
@@ -106,15 +119,26 @@ export function buildAuthHeaders(
 ): Record<string, string> {
   const credStr = plan === "start-plan" && cred.jwt ? cred.jwt : credentialString(cred);
   const base: Record<string, string> = {
-    ...buildIdentityHeaders(identity),
+    // LLM requests mirror the bundle's CLI source-headers builder (`csn` +
+    // x4i wrapper) — language/timezone always sent with "unknown" fallback,
+    // X-Release-Channel right after X-Title, X-ZCode-Agent LAST, no
+    // X-Device-Mid. Control-plane fetches use buildIdentityHeaders (`HRt`).
+    ...buildLlmIdentityHeaders(identity),
     ...buildTraceHeaders(plan, clientSession),
   };
+  // Bundle `Cm`/`k0o`: the anthropic SDK merges its identity into the UA —
+  // real LLM requests arrive as `ZCode/{ver} ai-sdk/anthropic/3.0.81`.
+  base["User-Agent"] = `${base["User-Agent"]} ${ANTHROPIC_SDK_UA}`;
 
   if (format === "anthropic") {
     if (plan === "start-plan" && cred.jwt) {
       base["authorization"] = `Bearer ${cred.jwt}`;
     } else {
+      // Bundle `ebo` (coding-plan, anthropic): x-api-key from the SDK config
+      // AND `Authorization: Bearer {credential}` from the custom-header merge
+      // — both headers, same value.
       base["x-api-key"] = credStr;
+      base["authorization"] = `Bearer ${credStr}`;
     }
     base["anthropic-version"] = ANTHROPIC_VERSION;
   } else {
