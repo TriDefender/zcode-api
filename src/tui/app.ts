@@ -23,6 +23,7 @@ import { ZaiOAuthClient, BigmodelOAuthClient, LOGIN_TIMEOUT_MS, parsePastedCallb
 import { KeyResolver } from "../auth/resolver.js";
 import { openBrowser } from "../runtime/open-browser.js";
 import { pasteLoginInstructions, readPastedLine, boldIfTTY } from "../runtime/paste-login.js";
+import { isGuestOriginError, describeGuestError } from "../runtime/guest-error.js";
 import { ensureDeviceMidInConfig, VERSION, type ServeArgs } from "../index.js";
 import { writeFileSync, existsSync, appendFileSync } from "node:fs";
 import type { ProxyConfig } from "../config/types.js";
@@ -636,7 +637,18 @@ export async function runTui(args: ServeArgs): Promise<void> {
   process.on("SIGTERM", quit);
   process.on("exit", restore);
   stdout.on("resize", scheduleRender);
+  // Guest captcha-SDK errors must NOT kill the TUI. Under Bun the Aliyun/
+  // FeiLin bundles run in the HOST realm, so an error escaping one of their
+  // stray callbacks arrives here exactly like an internal fault. `serve` mode
+  // already logs-and-continues (captcha-happy.ts); the TUI used to exit(1) for
+  // everything, turning a retryable solve failure into a dead proxy (field
+  // report: "tui crashed: ReferenceError: moveBy is not defined" from
+  // feilin008.js). The pool retries the solve; the proxy keeps serving.
   process.on("uncaughtException", (err: Error) => {
+    if (isGuestOriginError(err)) {
+      emit(`[warn] captcha SDK error (ignored): ${describeGuestError(err)}`, "warn");
+      return;
+    }
     cleanup();
     origError(`zcode-proxy: tui crashed: ${err.stack ?? String(err)}`);
     process.exit(1);
