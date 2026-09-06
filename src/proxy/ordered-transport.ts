@@ -9,6 +9,8 @@ export interface OrderedUpstreamRequest {
   headers: OrderedHeaderPair[];
   body?: string | Uint8Array;
   decompress?: boolean;
+  /** Client abort signal — destroys the socket the moment the client aborts. */
+  signal?: AbortSignal;
 }
 
 type WireSocket = Socket | TLSSocket;
@@ -48,9 +50,43 @@ export async function sendOrderedUpstreamRequest(req: OrderedUpstreamRequest): P
         // Flag it so the connect-retry loop in handler.ts skips this error.
         try { (err as { postWrite?: boolean }).postWrite = true; } catch {}
       }
-      if (responseStarted) bodyController?.error(err);
-      else reject(err);
+      if (responseStarted) {
+        // Safe by spec: error() on an already-closed/errored ReadableStream
+        // controller is a NO-OP under WHATWG Streams semantics (only close()
+        // and enqueue() throw on a closed controller) — verified against both
+        // Bun and Node. The unguarded call below is intentional; do not wrap
+        // it (audit CL-01: triple-verified non-issue, closed).
+        bodyController?.error(err);
+      } else {
+        reject(err);
+      }
       socket.destroy();
+    }
+
+    // Abort propagation (CL-04): destroy the socket the moment the client
+    // aborts. Without this the upstream LLM call kept running (consuming
+    // quota for the whole generation) after the client disappeared during a
+    // long-TTFB reasoning request. `fail()` both rejects this promise (a bare
+    // destroy() emits "close", not "error"/"end", and would leave it pending
+    // forever) and errors the consumer-side body stream when the response has
+    // already started. The resulting error carries `postWrite` (the request
+    // is fully on the wire by then), so handler's connect-retry ladder skips
+    // it — combined with the `clientReq.signal.aborted` pre-check there,
+    // client aborts never enter the retry loop.
+    if (req.signal) {
+      const signal = req.signal;
+      const onAbort = (): void => {
+        fail(new Error("client aborted during ordered upstream request"));
+      };
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener("abort", onAbort, { once: true });
+      // De-register when the socket settles so a signal that outlives this
+      // request (the handler reuses the client signal across connect
+      // attempts) does not accumulate listeners.
+      socket.once("close", () => signal.removeEventListener("abort", onAbort));
     }
 
     function finish(): void {

@@ -437,6 +437,7 @@ async function sendUpstreamRequest(
       headers: headerPairs,
       body,
       decompress: translateMode,
+      signal: abortSignal,
     });
   }
   const fetchOpts: RequestInit & { decompress?: boolean } = translateMode ? {} : { decompress: false };
