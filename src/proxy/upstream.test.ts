@@ -170,6 +170,8 @@ describe("buildAuthHeaders", () => {
     expect(h["authorization"]).toBe("Bearer jwt-token");
     expect(h["x-api-key"]).toBeUndefined();
     expect(h["anthropic-version"]).toBe("2023-06-01");
+    // CL-26: the SDK UA suffix applies to BOTH plans' LLM path (bundle `Cm`).
+    expect(h["User-Agent"]).toBe("ZCode/test-1.0.0 ai-sdk/anthropic/3.0.81");
   });
 
   it("uses apiKey only (no secret) for Bigmodel Anthropic", () => {

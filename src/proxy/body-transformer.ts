@@ -101,9 +101,11 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
  * second-to-last message instead) is NOT implemented — this proxy always
  * writes cache.
  *
- * Idempotent: when the body already has our target shape (no stray markers,
- * last block already `{type:"ephemeral"}`), nothing is reported as modified
- * so the caller skips re-serialization.
+ * Output-stable: applying this to an already-canonical body yields the same
+ * bytes (no duplicate markers, target block unchanged). Note the function
+ * still reports `modified` in that case — the clear phase strips the target
+ * block's own marker before phase 2 re-adds the identical one — so callers
+ * re-serialize once more; harmless (byte-identical output), just not free.
  */
 function applyAnthropicCacheControl(body: Record<string, unknown>): boolean {
   const messages = body.messages;

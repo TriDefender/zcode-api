@@ -289,8 +289,12 @@ describe("handleResponses captcha (start-plan)", () => {
       return new Response(anthropicMsg("ok"), { status: 200, headers: { "content-type": "application/json" } });
     }) as unknown as typeof fetch;
 
+    // Inject a fake captcha module — without it the start-plan pre-mint path
+    // lazy-imports the REAL solver and fires a network solve, timing out
+    // single-file runs and leaking solver state into later tests.
+    const startPlanCaptcha = fakeCaptcha();
     await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), { config: CONFIG, auth, fetchImpl: codingFetch });
-    await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), { config: START_PLAN, auth, fetchImpl: startFetch });
+    await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), { config: START_PLAN, auth, fetchImpl: startFetch, captcha: startPlanCaptcha.module });
 
     expect(JSON.parse(codingBody).metadata?.user_id).toBe("u1");
     expect(JSON.parse(startBody).metadata?.user_id).toBeUndefined();
