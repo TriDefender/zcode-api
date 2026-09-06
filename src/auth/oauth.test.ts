@@ -9,7 +9,7 @@
  * @see _reverse/NOTEPAD.md "Method 1: OAuth Flow"
  */
 import { describe, it, expect } from "bun:test";
-import { ZaiOAuthClient, BigmodelOAuthClient } from "./oauth.js";
+import { ZaiOAuthClient, BigmodelOAuthClient, parsePastedCallbackUrl } from "./oauth.js";
 
 /** Wrap data in the zcode.z.ai `{code, data, msg}` envelope as a JSON Response. */
 function envelopeResponse(data: Record<string, unknown>, status = 200): Response {
@@ -238,5 +238,80 @@ describe("BigmodelOAuthClient (auth-code flow)", () => {
     expect(result.provider).toBe("bigmodel");
     expect(result.userId).toBe("user_42");
     expect(result.jwt).toBe("jwt_full");
+  });
+});
+
+describe("parsePastedCallbackUrl (headless paste login)", () => {
+  const state = "a".repeat(64);
+
+  it("extracts authCode from a full callback URL", () => {
+    const pasted = `http://127.0.0.1:49152/oauth/callback/bigmodel?authCode=code_1&state=${state}`;
+    expect(parsePastedCallbackUrl(pasted, state)).toBe("code_1");
+  });
+
+  it("accepts the `code` param name as well", () => {
+    expect(parsePastedCallbackUrl(`http://127.0.0.1/cb?code=code_2&state=${state}`, state)).toBe("code_2");
+  });
+
+  it("only inspects the query — pathname/host are not validated", () => {
+    const pasted = `https://anything.example/whatever/path?code=c&state=${state}`;
+    expect(parsePastedCallbackUrl(pasted, state)).toBe("c");
+  });
+
+  it("throws on a CSRF state mismatch", () => {
+    const pasted = `http://127.0.0.1/?code=x&state=${"b".repeat(64)}`;
+    expect(() => parsePastedCallbackUrl(pasted, state)).toThrow(/state mismatch/i);
+  });
+
+  it("throws when the state param is absent", () => {
+    expect(() => parsePastedCallbackUrl("http://127.0.0.1/?code=x", state)).toThrow(/state mismatch/i);
+  });
+
+  it("throws when the code is missing", () => {
+    const pasted = `http://127.0.0.1/?state=${state}`;
+    expect(() => parsePastedCallbackUrl(pasted, state)).toThrow(/authorization code/i);
+  });
+
+  it("unescapes &amp; entities from a copy out of a rendered page", () => {
+    const pasted = `http://127.0.0.1/cb?authCode=amp_code&amp;state=${state}`;
+    expect(parsePastedCallbackUrl(pasted, state)).toBe("amp_code");
+  });
+
+  it("trims whitespace and wrapping quotes/brackets", () => {
+    expect(parsePastedCallbackUrl(`  "http://127.0.0.1/?code=q&state=${state}"\n`, state)).toBe("q");
+    expect(parsePastedCallbackUrl(`(<http://127.0.0.1/?code=p&state=${state}>)`, state)).toBe("p");
+  });
+
+  it("surfaces the provider error param when authorization was denied", () => {
+    const pasted = `http://127.0.0.1/?error=access_denied&state=${state}`;
+    expect(() => parsePastedCallbackUrl(pasted, state)).toThrow(/access_denied/);
+  });
+
+  it("paste round-trip: the exchange redirect_uri equals the authorize redirect param", async () => {
+    const { impl, calls } = scriptedFetch([
+      () => envelopeResponse({
+        token: "jwt_paste",
+        bigmodel: { access_token: "bm_paste" },
+        user: { user_id: "u9" },
+      }),
+    ]);
+    const client = new BigmodelOAuthClient(impl);
+    const started = await client.start();
+    try {
+      // The browser appends the code to the authorize URL's exact `redirect`;
+      // the user pastes that unreachable URL back.
+      const redirect = new URL(started.authorizeUrl).searchParams.get("redirect") ?? "";
+      expect(started.callbackUrl).toBe(redirect);
+      const pasted = `${redirect}?authCode=paste_code&state=${started.state}`;
+      const code = parsePastedCallbackUrl(pasted, started.state);
+      await client.exchangeCode(code, started.callbackUrl, started.state);
+
+      const exchange = JSON.parse(String(calls[0].init.body));
+      expect(exchange.redirect_uri).toBe(redirect);
+      expect(exchange.code).toBe("paste_code");
+      expect(exchange.state).toBe(started.state);
+    } finally {
+      await client.close();
+    }
   });
 });
