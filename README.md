@@ -147,7 +147,7 @@ claimed first-come-first-served and activate at a future time. The proxy can
 grab them for you automatically — it polls the preview endpoint every 5 minutes
 and claims the highest-priority plan the moment the campaign endpoint goes live
 (a 404 before launch is the expected pre-campaign state). Requires a logged-in
-credential and `identity.appVersion >= 3.10.0`.
+credential and `identity.appVersion >= 3.11.2`.
 
 ```yaml
 claim:
