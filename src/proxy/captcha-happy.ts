@@ -618,17 +618,22 @@ function makeScopedFunction(w) {
 /**
  * Wrap guest source so bare timer identifiers resolve to `w`'s registry.
  *
- * The completion value MUST survive: happy-dom's JavaScriptCompiler hands
- * `evaluateScript` a `(function anonymous($happy_dom){…})` expression and calls
- * the returned function. A bare `with (…) { … }` statement evaluates to
- * undefined, so the compiled script was silently never executed — every solve
- * then timed out waiting for `initAliyunCaptcha`. Wrapping in an arrow-bodied
- * IIFE that RETURNS the inner expression keeps both properties: the value flows
- * out, and guest code still sits lexically inside the `with` scope.
+ * A bare `with (…) { … }` statement, not a function wrapper, and that choice
+ * carries both of the properties this needs:
  *
- * Top-level `var`/`function` declarations keep their global-object semantics
- * because `with` (unlike a function wrapper) introduces no variable
- * environment of its own.
+ * - **Top-level declarations keep escaping.** `with` introduces an object
+ *   environment, not a variable one, so guest `var`/`function` declarations
+ *   still land on the global object. A function wrapper swallows them and
+ *   `initAliyunCaptcha` never appears — every solve then timed out waiting
+ *   for it (measured: ok=0 fail=3).
+ *
+ * - **The completion value still flows out.** happy-dom's JavaScriptCompiler
+ *   hands `evaluateScript` a `(function anonymous($happy_dom){…})` expression
+ *   and calls whatever comes back. `eval` yields a statement's completion
+ *   value, and a block completes with its last expression statement, so the
+ *   compiler's function expression is returned through the `with` unchanged.
+ *   (Declarations produce no completion value, so a script ending in one is
+ *   also fine — the preceding expression's value stands.)
  */
 function wrapGuestSource(code, filename, scopeId) {
   const sourceUrl = filename && /^https?:/.test(String(filename)) ? `\n//# sourceURL=${filename}` : "";
@@ -1962,12 +1967,6 @@ const EXTRA_WINDOW_PROPS = [
   "open", "close", "stop", "focus", "blur", "print", "alert", "confirm",
   "prompt", "getSelection", "find",
 ];
-// Subset of the above that a real browser implements as no-op-ish window
-// methods. When the tombstone expires these become harmless stubs instead of
-// being deleted, so a straggling guest callback that still calls `moveBy()`
-// completes silently rather than raising a fatal ReferenceError.
-const INERT_WINDOW_METHODS = new Set(EXTRA_WINDOW_PROPS);
-
 // Subset of the above that a real browser implements as no-op-ish window
 // methods. When the tombstone expires these become harmless stubs instead of
 // being deleted, so a straggling guest callback that still calls `moveBy()`
