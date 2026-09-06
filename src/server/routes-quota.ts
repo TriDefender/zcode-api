@@ -67,9 +67,19 @@ async function fetchBilling(
   }
 }
 
-/** Build the billing snapshot. Exported for tests. */
-export async function collectQuotaSnapshot(config: ProxyConfig, fetchImpl: typeof fetch = fetch): Promise<QuotaSnapshot> {
-  const cred = await loadCredential();
+/** Coerce an upstream value to a finite number, or undefined (never NaN — JSON.stringify would emit null). */
+function toFiniteNumber(v: unknown): number | undefined {
+  const n = typeof v === "number" ? v : typeof v === "string" && v.trim() !== "" ? Number(v) : NaN;
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/** Build the billing snapshot. Exported for tests. `loadCredentialImpl` is injectable for tests. */
+export async function collectQuotaSnapshot(
+  config: ProxyConfig,
+  fetchImpl: typeof fetch = fetch,
+  loadCredentialImpl: typeof loadCredential = loadCredential,
+): Promise<QuotaSnapshot> {
+  const cred = await loadCredentialImpl();
   if (!cred?.jwt) {
     throw new Error("not logged in — no JWT credential (run: zcode-proxy auth login)");
   }
@@ -83,11 +93,14 @@ export async function collectQuotaSnapshot(config: ProxyConfig, fetchImpl: typeo
   // the billing gateway follows the same precedent.
   delete idHeaders["X-ZCode-Agent"];
   const headers: Record<string, string> = { ...idHeaders, authorization: `Bearer ${cred.jwt}`, Accept: "application/json" };
-  // Billing fingerprint mirrors the claim client's TH(): `${platform}-${arch}`,
-  // with ZCODE_IDENTITY_PLATFORM/ARCH overrides (same masking pattern as
-  // proxy/identity.ts X-Platform; Android seeds linux-x64 via index.ts).
+  // Billing fingerprint is reconstructed from the observed claim-client format
+  // (`${platform}-${arch}`). Same env overrides as proxy/identity.ts X-Platform
+  // (Android seeds linux-x64 via index.ts), with empty-string overrides falling
+  // back to the real values — an empty override must not yield `-x64`/`linux-`.
   // NOTE: ProxyIdentity has no platform/arch fields — do not read them off `identity`.
-  const platform = `${process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform}-${process.env.ZCODE_IDENTITY_ARCH ?? os.arch()}`;
+  const platformEnv = process.env.ZCODE_IDENTITY_PLATFORM?.trim();
+  const archEnv = process.env.ZCODE_IDENTITY_ARCH?.trim();
+  const platform = `${platformEnv || process.platform}-${archEnv || os.arch()}`;
   const origin = config.claim.origin || "https://zcode.z.ai";
   const appVersion = identity.appVersion;
 
@@ -102,13 +115,17 @@ export async function collectQuotaSnapshot(config: ProxyConfig, fetchImpl: typeo
   const balances: QuotaBalanceEntry[] = [];
   const balanceData = (balance?.data ?? {}) as { balances?: any[]; server_time?: number };
   for (const b of Array.isArray(balanceData.balances) ? balanceData.balances : []) {
+    // unitType/expiresAt camelCase aliases observed live alongside snake_case;
+    // accept both so neither casing drops the field.
+    const expiresAt = toFiniteNumber(b.expires_at ?? b.expiresAt);
+    const unitType = b.unit_type ?? b.unitType;
     balances.push({
       showName: String(b.show_name ?? ""),
-      remainingUnits: Number(b.remaining_units ?? 0),
-      totalUnits: Number(b.total_units ?? 0),
-      usedUnits: Number(b.used_units ?? 0),
-      ...(b.unit_type ? { unitType: String(b.unit_type) } : {}),
-      ...(Number.isFinite(b.expires_at) ? { expiresAt: b.expires_at as number } : {}),
+      remainingUnits: toFiniteNumber(b.remaining_units ?? b.remainingUnits) ?? 0,
+      totalUnits: toFiniteNumber(b.total_units ?? b.totalUnits) ?? 0,
+      usedUnits: toFiniteNumber(b.used_units ?? b.usedUnits) ?? 0,
+      ...(unitType ? { unitType: String(unitType) } : {}),
+      ...(expiresAt !== undefined ? { expiresAt } : {}),
     });
   }
 
@@ -121,16 +138,18 @@ export async function collectQuotaSnapshot(config: ProxyConfig, fetchImpl: typeo
       ...(p.description ? { description: String(p.description) } : {}),
       entitlements: (Array.isArray(p.entitlements) ? p.entitlements : []).map((e: any) => ({
         showName: String(e.show_name ?? ""),
-        grantUnits: Number(e.grant_units ?? 0),
-        unitType: String(e.unit_type ?? "token"),
-        ...(Number.isFinite(e.effective_at) ? { effectiveAt: e.effective_at as number } : {}),
+        grantUnits: toFiniteNumber(e.grant_units ?? e.grantUnits) ?? 0,
+        unitType: String(e.unit_type ?? e.unitType ?? "token"),
+        ...(toFiniteNumber(e.effective_at ?? e.effectiveAt) !== undefined
+          ? { effectiveAt: toFiniteNumber(e.effective_at ?? e.effectiveAt) as number }
+          : {}),
       })),
     });
   }
 
   return {
     provider: config.provider,
-    serverTime: Number(balanceData.server_time ?? Math.floor(Date.now() / 1000)),
+    serverTime: toFiniteNumber(balanceData.server_time) ?? Math.floor(Date.now() / 1000),
     jwt,
     balances,
     claimablePlans,
@@ -138,10 +157,14 @@ export async function collectQuotaSnapshot(config: ProxyConfig, fetchImpl: typeo
   };
 }
 
-/** Handle GET /quota — JSON snapshot with the proxy error envelope on failure. */
-export async function handleQuota(config: ProxyConfig, fetchImpl: typeof fetch = fetch): Promise<Response> {
+/** Handle GET /quota — JSON snapshot with the proxy error envelope on failure. `loadCredentialImpl` is injectable for tests. */
+export async function handleQuota(
+  config: ProxyConfig,
+  fetchImpl: typeof fetch = fetch,
+  loadCredentialImpl: typeof loadCredential = loadCredential,
+): Promise<Response> {
   try {
-    const snapshot = await collectQuotaSnapshot(config, fetchImpl);
+    const snapshot = await collectQuotaSnapshot(config, fetchImpl, loadCredentialImpl);
     return new Response(JSON.stringify(snapshot, null, 1), {
       status: 200,
       headers: { "content-type": "application/json" },
