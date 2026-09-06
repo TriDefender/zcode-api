@@ -630,7 +630,13 @@ function installNativeToString(w) {
         try {
           const v = desc.get.call(obj);
           if (typeof v === "function") mask(v);
-        } catch (_) {}
+          // Probing a getter can hand back an already-rejected promise (WHATWG
+          // stream `closed`/`ready` reject when the receiver is the prototype
+          // rather than an instance). Nobody awaits these, so without a sink
+          // each probe surfaced as an unhandledRejection on every solve —
+          // noise that buried real diagnostics.
+          else if (v && typeof v.then === "function") v.catch(() => {});
+        } catch {}
       }
       if (depth < 3) {
         try {
@@ -1774,7 +1780,12 @@ async function createDom(region, prefix) {
 const HOST_CRITICAL_GLOBALS = new Set([
   "process", "Bun", "console", "performance", "crypto", "fetch",
   "queueMicrotask", "structuredClone", "TextEncoder", "TextDecoder",
-  "requestAnimationFrame", "cancelAnimationFrame",
+  // NOTE: requestAnimationFrame/cancelAnimationFrame were removed from this
+  // list (2026-09-06). Bun has no native rAF, so skipping the alias left a
+  // bare `requestAnimationFrame` in the FeiLin bundle unresolvable (9 call
+  // sites, only one `typeof`-guarded) — the same silent fingerprint
+  // degradation that `print` caused. Aliasing the window's implementation
+  // shadows nothing on the host.
   // NOTE: `print` was removed from this list (2026-08-29). The polyfill
   // defines a harmless no-op on the window, but the alias pass skipped it,
   // so under Bun (guest scripts run in the HOST realm) the Aliyun pe risk

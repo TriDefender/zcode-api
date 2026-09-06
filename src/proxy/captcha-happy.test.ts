@@ -251,3 +251,25 @@ describe("alias lifecycle (install/remove descriptor contract)", () => {
     expect(Object.getOwnPropertyDescriptor(g, "setTimeout")?.get).toBeUndefined();
   });
 });
+
+describe("browser globals the guest SDK dereferences bare", () => {
+  test("requestAnimationFrame/cancelAnimationFrame resolve during a solve", () => {
+    // Bun has no native rAF. While these sat in HOST_CRITICAL_GLOBALS the
+    // alias pass skipped them, so the FeiLin bundle's 9 bare
+    // `requestAnimationFrame` references (only one `typeof`-guarded) were
+    // unresolvable — the same silent fingerprint degradation `print` caused,
+    // visible only as a lower solve rate.
+    const g: Record<string, unknown> = {};
+    const w: Record<string, unknown> = {
+      requestAnimationFrame: (cb: () => void) => 1,
+      cancelAnimationFrame: () => {},
+    };
+    installGlobalWindowAlias(g, w, 15);
+    try {
+      expect(typeof g.requestAnimationFrame).toBe("function");
+      expect(typeof g.cancelAnimationFrame).toBe("function");
+    } finally {
+      removeGlobalWindowAlias(g, w);
+    }
+  });
+});
