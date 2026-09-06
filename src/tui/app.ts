@@ -19,9 +19,10 @@ import { AuthManager } from "../auth/manager.js";
 import { startServer, type ProxyServer } from "../server/server.js";
 import { buildServerOptions } from "../server/server-options.js";
 import { loadCredential, saveCredential, clearCredential } from "../auth/store.js";
-import { ZaiOAuthClient, BigmodelOAuthClient, type OAuthFlowClient } from "../auth/oauth.js";
+import { ZaiOAuthClient, BigmodelOAuthClient, LOGIN_TIMEOUT_MS, parsePastedCallbackUrl, type OAuthFlowClient, type OAuthFlowStart, type OAuthFlowTokens } from "../auth/oauth.js";
 import { KeyResolver } from "../auth/resolver.js";
 import { openBrowser } from "../runtime/open-browser.js";
+import { pasteLoginInstructions, readPastedLine, boldIfTTY } from "../runtime/paste-login.js";
 import { ensureDeviceMidInConfig, VERSION, type ServeArgs } from "../index.js";
 import { writeFileSync, existsSync, appendFileSync } from "node:fs";
 import type { ProxyConfig } from "../config/types.js";
@@ -93,7 +94,10 @@ export async function runTui(args: ServeArgs): Promise<void> {
     process.exit(1);
   }
   // Alt screen + hide cursor + SGR mouse tracking (buttons clickable, wheel scrolls).
-  realStdoutWrite("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[2J");
+  const enterAltScreen = (): void => {
+    realStdoutWrite("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[2J");
+  };
+  enterAltScreen();
 
   const restore = (): void => {
     try { realStdoutWrite("\x1b[0m\x1b[?1006l\x1b[?1000l\x1b[?25h\x1b[?1049l"); } catch { /* terminal gone */ }
@@ -162,7 +166,12 @@ export async function runTui(args: ServeArgs): Promise<void> {
   let renderTimer: ReturnType<typeof setTimeout> | null = null;
   let lastRenderAt = 0;
   let activeRegions: ClickRegion[] = [];
+  // Paste login (L key) hands the terminal back for a moment: renders and
+  // key handling are frozen while the real screen shows the paste prompt.
+  let rendersSuspended = false;
+  let inputSuspended = false;
   function renderNow(): void {
+    if (rendersSuspended) return; // paste prompt owns the terminal
     if (renderTimer) clearTimeout(renderTimer); // watchdog may fire mid-cycle
     renderTimer = null;
     lastRenderAt = Date.now();
@@ -332,14 +341,52 @@ export async function runTui(args: ServeArgs): Promise<void> {
 
   // --- login / logout (mirrors the control-listener startOAuth/logout) -----
   let activeOauth: { client: OAuthFlowClient; provider: ProviderId } | null = null;
+  /** Set while a bigmodel login waits on the browser callback; `L` invokes it to switch to paste mode. */
+  let pasteSwitchBigmodel: (() => void) | null = null;
 
-  async function startLogin(): Promise<void> {
+  async function startLogin(opts: { paste?: boolean } = {}): Promise<void> {
     if (state.loginInFlight) {
       setToast("login already in progress", "info");
       return;
     }
     const provider = state.provider;
-    const client: OAuthFlowClient = provider === "bigmodel" ? new BigmodelOAuthClient() : new ZaiOAuthClient();
+    if (opts.paste && provider !== "bigmodel") {
+      setToast("paste login is bigmodel-only — zai login already works headless (press l)", "info");
+      return;
+    }
+
+    if (provider === "bigmodel") {
+      const client = new BigmodelOAuthClient();
+      let started: Awaited<ReturnType<BigmodelOAuthClient["start"]>>;
+      try {
+        started = await client.start();
+      } catch (err) {
+        void client.close().catch(() => {});
+        setToast(`login failed: ${(err as Error).message}`, "err");
+        return;
+      }
+      activeOauth = { client, provider };
+      state.loginInFlight = true;
+      console.log(`OAuth: opening ${started.authorizeUrl}`);
+      console.log("If the browser did not open, copy the URL above into a browser.");
+      openBrowser(started.authorizeUrl);
+      if (opts.paste) {
+        state.loginHint = "paste the callback URL in the terminal…";
+        scheduleRender();
+        settleLogin(runPasteLoginInTui(client, started), client, provider);
+      } else {
+        console.log(
+          "▸ HEADLESS (Docker/VPS)? The callback page will NOT load here — " +
+          "PRESS L to paste the redirected URL instead.",
+        );
+        state.loginHint = "waiting for callback · HEADLESS? PRESS L to paste URL";
+        scheduleRender();
+        settleLogin(waitForCallbackOrPaste(client, started), client, provider);
+      }
+      return;
+    }
+
+    const client: OAuthFlowClient = new ZaiOAuthClient();
     let started: Awaited<ReturnType<OAuthFlowClient["start"]>>;
     try {
       started = await client.start();
@@ -356,7 +403,57 @@ export async function runTui(args: ServeArgs): Promise<void> {
     openBrowser(started.authorizeUrl);
     scheduleRender();
 
-    client.complete(started).then(async (tokens) => {
+    settleLogin(client.complete(started), client, provider);
+  }
+
+  /** Sentinel the `L` key resolves to switch a pending login over to paste mode. */
+  const PASTE_MODE = Symbol("paste-mode");
+
+  /**
+   * Wait for the browser callback — but let `L` switch a pending login to
+   * paste mode (a headless machine never receives the callback). Exactly one
+   * branch wins; the loser's eventual timeout rejection is swallowed by the
+   * race, and the client is closed exactly once in settleLogin.
+   */
+  async function waitForCallbackOrPaste(
+    client: BigmodelOAuthClient,
+    started: OAuthFlowStart,
+  ): Promise<OAuthFlowTokens> {
+    let requestPaste: () => void = () => {};
+    const pasteRequested = new Promise<typeof PASTE_MODE>((resolve) => {
+      requestPaste = () => resolve(PASTE_MODE);
+    });
+    pasteSwitchBigmodel = () => {
+      state.loginHint = "paste the callback URL in the terminal…";
+      scheduleRender();
+      requestPaste();
+    };
+    try {
+      const winner = await Promise.race([client.waitForCallback(), pasteRequested]);
+      if (winner === PASTE_MODE) return await runPasteLoginInTui(client, started);
+      return await client.exchangeCode(winner, started.callbackUrl, started.state);
+    } finally {
+      pasteSwitchBigmodel = null;
+    }
+  }
+
+  /** `L` key: switch a pending bigmodel login to paste mode (or start one). */
+  function requestPasteLogin(): void {
+    if (state.provider !== "bigmodel") {
+      setToast("paste login is bigmodel-only — zai login already works headless", "info");
+      return;
+    }
+    if (state.loginInFlight) {
+      if (pasteSwitchBigmodel) pasteSwitchBigmodel();
+      else setToast("already pasting — finish in the terminal", "info");
+      return;
+    }
+    void startLogin({ paste: true });
+  }
+
+  /** Shared completion tail: resolve key, save, and ALWAYS close the client. */
+  function settleLogin(pending: Promise<OAuthFlowTokens>, client: OAuthFlowClient, provider: ProviderId): void {
+    pending.then(async (tokens) => {
       const resolver = new KeyResolver();
       const cred = await resolver.resolveCodingPlanCredential(tokens.accessToken, provider, tokens.userId);
       if (tokens.jwt) cred.jwt = tokens.jwt;
@@ -377,6 +474,38 @@ export async function runTui(args: ServeArgs): Promise<void> {
       state.loginHint = "";
       void refreshAuth();
     });
+  }
+
+  /**
+   * Paste login for the TUI: briefly hands the terminal back (leaves the alt
+   * screen, drops raw mode) so the user can paste the redirected callback
+   * URL, then re-enters the TUI and exchanges the code. The callback server
+   * stays bound — it only defines the redirect port; the browser cannot
+   * reach it from another machine anyway.
+   */
+  async function runPasteLoginInTui(
+    client: BigmodelOAuthClient,
+    started: OAuthFlowStart,
+  ): Promise<OAuthFlowTokens> {
+    let pasted: string;
+    try {
+      rendersSuspended = true;
+      inputSuspended = true;
+      try { (stdin as { setRawMode(m: boolean): void }).setRawMode(false); } catch { /* not raw-able */ }
+      restore(); // leave the alt screen: the real terminal takes over
+      realStdoutWrite("\n" + pasteLoginInstructions(started.authorizeUrl, started.callbackUrl, LOGIN_TIMEOUT_MS) + "\n\n");
+      realStdoutWrite(boldIfTTY("Paste the FULL redirected URL here, then press Enter:") + "\n> ");
+      pasted = await readPastedLine(LOGIN_TIMEOUT_MS);
+    } finally {
+      enterAltScreen();
+      try { (stdin as { setRawMode(m: boolean): void }).setRawMode(true); } catch { /* ignore */ }
+      inputSuspended = false;
+      rendersSuspended = false;
+      renderNow();
+    }
+    const code = parsePastedCallbackUrl(pasted, started.state);
+    realStdoutWrite("Exchanging authorization code…\n");
+    return client.exchangeCode(code, started.callbackUrl, started.state);
   }
 
   async function logout(): Promise<void> {
@@ -406,6 +535,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
   (stdin as { setRawMode(m: boolean): void }).setRawMode(true);
   stdin.resume();
   stdin.on("data", (chunk: string) => {
+    if (inputSuspended) return; // paste-login readline owns the terminal
     for (const action of parser.feed(chunk)) handleKey(action);
   });
 
@@ -435,6 +565,8 @@ export async function runTui(args: ServeArgs): Promise<void> {
         scrollDown(3);
         return;
       case "char": {
+        // Uppercase L must not collapse into "l" below: paste fallback (headless).
+        if (action.key === "L") { requestPasteLogin(); return; }
         switch (action.key.toLowerCase()) {
           case "q": quit(); return;
           case "s": toggleProxy(); return;
