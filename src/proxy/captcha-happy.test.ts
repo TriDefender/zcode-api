@@ -225,6 +225,25 @@ describe("alias lifecycle (install/remove descriptor contract)", () => {
     expect(g.navigator).toBe(hostNavigator);
   });
 
+  test("an expired tombstone leaves callable stubs, never a ReferenceError", async () => {
+    // The grace period ends, but guest stragglers can still be running: the
+    // FeiLin heartbeat `tE` re-arms itself every 2s and dereferences `moveBy`
+    // (feilin008.js:169658). A hard `delete` turned that read into an
+    // uncaught ReferenceError — fatal in the host realm, and the field crash
+    // this guards. The name must stay resolvable and callable.
+    const { g, w } = makeSandbox();
+    (w as Record<string, unknown>).moveBy = () => {};
+    installGlobalWindowAlias(g, w, 15);
+    removeGlobalWindowAlias(g, w);
+    // Real elapsed time is the mechanism under test: the tombstone is a
+    // wall-clock grace period armed on the pristine host setTimeout.
+    await Bun.sleep(70);
+    expect(typeof g.moveBy).toBe("function");
+    expect(() => (g.moveBy as () => void)()).not.toThrow();
+    // The stub must not keep the closed window reachable from globalThis.
+    expect(g.moveBy).not.toBe((w as Record<string, unknown>).moveBy);
+  });
+
   test("a new install cancels the pending tombstone", async () => {
     const { g, w } = makeSandbox();
     const w2: Record<string, unknown> = {

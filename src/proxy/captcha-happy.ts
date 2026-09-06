@@ -1807,6 +1807,12 @@ const EXTRA_WINDOW_PROPS = [
   "prompt", "getSelection", "find",
 ];
 
+// Subset of the above that a real browser implements as no-op-ish window
+// methods. When the tombstone expires these become harmless stubs instead of
+// being deleted, so a straggling guest callback that still calls `moveBy()`
+// completes silently rather than raising a fatal ReferenceError.
+const INERT_WINDOW_METHODS = new Set(EXTRA_WINDOW_PROPS);
+
 // Ref-count: the pool solves in parallel waves; each window must keep the
 // aliases alive until the LAST concurrent window is destroyed, otherwise one
 // destroyDom() pulls `window` out from under a sibling mid-solve.
@@ -2124,7 +2130,19 @@ export function removeGlobalWindowAlias(g, w) {
       if (generation !== _aliasGeneration || _aliasRefCount > 0) return;
       for (const name of names) {
         try {
-          if (Object.getOwnPropertyDescriptor(g, name)?.get) delete g[name];
+          if (!Object.getOwnPropertyDescriptor(g, name)?.get) continue;
+          // Do NOT `delete`: a straggler still reading the name would get a
+          // ReferenceError, which is fatal in the host realm. Leave an inert
+          // value instead — the reference resolves, the call is a no-op, and
+          // nothing keeps the closed window alive. The window methods guest
+          // fingerprint code probes (moveBy/scrollTo/...) are no-ops in a real
+          // browser anyway, so `undefined` is a faithful stand-in for the rest.
+          const stub = INERT_WINDOW_METHODS.has(name) ? () => {} : undefined;
+          Object.defineProperty(g, name, {
+            value: stub,
+            configurable: true,
+            writable: true,
+          });
         } catch (_) {}
       }
     }, _tombstoneMs);
