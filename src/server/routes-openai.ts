@@ -31,6 +31,8 @@ export function handleListModels(req: Request): Response {
         context_window: m.contextWindow,
         max_context_window: m.contextWindow,
         ...(m.maxOutputTokens === undefined ? {} : { max_tokens: m.maxOutputTokens }),
+        // Heuristic: vision-capable ZCode models embed "v" in their id (e.g. glm-4.6v).
+        // Revisit if upstream introduces non-vision ids that merely contain "v".
         input_modalities: m.id.includes("v") ? ["text", "image"] : ["text"],
         supported_reasoning_levels: m.reasoning
           ? [{ effort: "low" }, { effort: "medium" }, { effort: "high" }, { effort: "xhigh" }]

@@ -9,6 +9,7 @@
  * @see scripts in vibe-coding-labs/zcode-reverse-engineer (header shape) and
  *      zcode.z.ai desktop bundle `pio()` (identity header semantics).
  */
+import os from "node:os";
 import { loadCredential } from "../auth/store.js";
 import { buildIdentityHeaders } from "../proxy/identity.js";
 import { inspectJwt } from "../auth/jwt-age.js";
@@ -82,7 +83,11 @@ export async function collectQuotaSnapshot(config: ProxyConfig, fetchImpl: typeo
   // the billing gateway follows the same precedent.
   delete idHeaders["X-ZCode-Agent"];
   const headers: Record<string, string> = { ...idHeaders, authorization: `Bearer ${cred.jwt}`, Accept: "application/json" };
-  const platform = `${identity.platform}-${identity.arch}`;
+  // Billing fingerprint mirrors the claim client's TH(): `${platform}-${arch}`,
+  // with ZCODE_IDENTITY_PLATFORM/ARCH overrides (same masking pattern as
+  // proxy/identity.ts X-Platform; Android seeds linux-x64 via index.ts).
+  // NOTE: ProxyIdentity has no platform/arch fields — do not read them off `identity`.
+  const platform = `${process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform}-${process.env.ZCODE_IDENTITY_ARCH ?? os.arch()}`;
   const origin = config.claim.origin || "https://zcode.z.ai";
   const appVersion = identity.appVersion;
 
