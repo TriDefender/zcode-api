@@ -16,6 +16,7 @@ import { handleChatCompletions, handleListModels } from "./routes-openai.js";
 import { handleMessages } from "./routes-anthropic.js";
 import { handleResponsesRoute } from "./routes-responses.js";
 import { handleAsyncMessagesRoute, handleAsyncChatRoute, handleAsyncHealthRoute } from "./routes-async.js";
+import { handleQuota } from "./routes-quota.js";
 import { errorResponse } from "../proxy/handler.js";
 import type { ResponseStore } from "../responses/store.js";
 
@@ -91,7 +92,11 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
       return handleResponsesRoute(req, responsesOpts);
     }
     if (path === "/v1/models" && method === "GET") {
-      return handleListModels();
+      return handleListModels(req);
+    }
+
+    if (path === "/quota" && method === "GET") {
+      return handleQuota(config, opts.fetchImpl);
     }
 
     if (path === "/v1/messages" && method === "POST") {

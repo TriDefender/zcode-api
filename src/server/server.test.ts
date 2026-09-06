@@ -301,8 +301,39 @@ describe("web UI", () => {
 
 describe("route handler exports", () => {
   it("handleListModels returns model list", () => {
-    const resp = handleListModels();
+    const resp = handleListModels(new Request("http://localhost/v1/models"));
     expect(resp.status).toBe(200);
+  });
+
+  it("handleListModels rich catalog on client_version=pi", async () => {
+    const resp = handleListModels(new Request("http://localhost/v1/models?client_version=pi"));
+    expect(resp.status).toBe(200);
+    const body = (await resp.json()) as {
+      models: Array<{
+        slug: string;
+        context_window: number;
+        max_tokens?: number;
+        supported_reasoning_levels: Array<{ effort: string }>;
+        visibility: string;
+      }>;
+      data?: unknown;
+    };
+    // Rich shape: top-level models[], no data[].
+    expect(Array.isArray(body.models)).toBe(true);
+    expect(body.data).toBeUndefined();
+    const flash = body.models.find((m) => m.slug === "glm-5.3-flash");
+    expect(flash).toBeDefined();
+    expect(flash!.context_window).toBe(1_000_000);
+    expect(flash!.max_tokens).toBe(128_000);
+    expect(flash!.visibility).toBe("list");
+    // Reasoning model advertises the Codex-style effort levels the DSH
+    // better-basicfun bridge maps onto its selector levels.
+    const efforts = flash!.supported_reasoning_levels.map((l) => l.effort);
+    expect(efforts).toEqual(["low", "medium", "high", "xhigh"]);
+    // Vision variants advertise image input; non-reasoning ones have no levels.
+    const vModel = body.models.find((m) => m.slug === "glm-4.6v");
+    expect(vModel).toBeDefined();
+    expect(vModel!.supported_reasoning_levels).toEqual([]);
   });
 
   it("handleMessages is a function", () => {
