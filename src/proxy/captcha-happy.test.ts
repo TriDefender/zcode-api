@@ -1,112 +1,140 @@
 import { describe, expect, test } from "bun:test";
+import { GlobalWindow } from "happy-dom";
 import {
+  createDom,
+  destroyDom,
   installGlobalWindowAlias,
-  makeDualConsole,
-  makeDualTimers,
   removeGlobalWindowAlias,
 } from "./captcha-happy.js";
 
-describe("dual console (guest spam guard)", () => {
-  test("drops every console method's call while the guest predicate holds", () => {
-    const seen: string[] = [];
-    const recorder: Record<string, unknown> = {};
-    for (const m of ["log", "debug", "info", "dir", "table", "group", "warn", "error"]) {
-      recorder[m] = (...a: unknown[]) => { seen.push(m + ": " + a.join(" ")); };
+// The guest-timer contract, stated behaviourally: a timer armed by guest code
+// MUST stop firing once its window is destroyed, and the host's own timers
+// MUST keep the Node ref/unref contract throughout. Both were violated by the
+// stack-sniffing dispatcher this replaced — in opposite directions.
+describe("guest timer ownership (lexical scope)", () => {
+  const EVALUATE_SCRIPT = "Symbol(evaluateScript)";
+  const GUEST_URL = "https://g.alicdn.com/captcha-frontend/FeiLin/1.5.1/feilin008.js";
+
+  function evaluateScriptSymbol(w: object): symbol | undefined {
+    for (const target of [w, Object.getPrototypeOf(w)]) {
+      const found = Object.getOwnPropertySymbols(target ?? {}).find(
+        (s) => String(s) === EVALUATE_SCRIPT,
+      );
+      if (found) return found;
     }
-    const orig = console as unknown as Record<string, unknown>;
-    const saved = Object.fromEntries(
-      Object.keys(recorder).map((k) => [k, orig[k]]),
-    );
-    Object.assign(orig, recorder);
-
-    try {
-      // Build the dual console against the recorder and route calls through
-      // it with the guest predicate forced on — the FeiLin spam condition.
-      const dual = makeDualConsole(() => true) as Record<string, (...a: unknown[]) => void>;
-      dual.log!("%c%d", "font-size:0;color:transparent", "Error");
-      dual.debug!("anything");
-      dual.dir!({ an: "object" });
-      dual.table!([1, 2]);
-      expect(seen).toEqual([]);
-
-      // Host condition — identical calls must forward untouched.
-      const forward = makeDualConsole(() => false) as Record<string, (...a: unknown[]) => void>;
-      forward.log!("hello", 42);
-      forward.error!("[real] failure");
-      expect(seen).toEqual(["log: hello 42", "error: [real] failure"]);
-    } finally {
-      Object.assign(orig, saved);
-    }
-  });
-});
-
-describe("dual timers (host unref contract vs guest window registry)", () => {
-  type Fn = (...args: unknown[]) => unknown;
-
-  function makeFixture() {
-    const hostCalls: string[] = [];
-    const winCalls: string[] = [];
-    const hostTimer = { unref() {}, ref() {} };
-    const host: Record<string, Fn> = {
-      setTimeout: (...a: unknown[]) => { hostCalls.push("setTimeout:" + a[1]); return hostTimer; },
-      setInterval: (...a: unknown[]) => { hostCalls.push("setInterval:" + a[1]); return hostTimer; },
-      clearTimeout: (...a: unknown[]) => { hostCalls.push("clearTimeout"); },
-      clearInterval: (...a: unknown[]) => { hostCalls.push("clearInterval"); },
-    };
-    const win: Record<string, unknown> = {
-      setTimeout: (...a: unknown[]) => { winCalls.push("setTimeout:" + a[1]); return 0; },
-      setInterval: (...a: unknown[]) => { winCalls.push("setInterval:" + a[1]); return 0; },
-      clearTimeout: (...a: unknown[]) => { winCalls.push("clearTimeout"); },
-      clearInterval: (...a: unknown[]) => { winCalls.push("clearInterval"); },
-    };
-    return { host, win, hostCalls, winCalls, hostTimer };
+    return undefined;
   }
 
-  test("host-stack calls keep the host timer objects (the .unref() contract)", () => {
-    const { host, win, hostCalls, winCalls, hostTimer } = makeFixture();
-    const dual = makeDualTimers(win, host, () => false);
-    const t = dual.setTimeout(() => {}, 500) as { unref(): void };
-    expect(hostCalls).toEqual(["setTimeout:500"]);
-    expect(winCalls).toEqual([]);
-    expect(t).toBe(hostTimer);
-    expect(typeof t.unref).toBe("function");
-    dual.clearTimeout(t);
-    expect(hostCalls).toEqual(["setTimeout:500", "clearTimeout"]);
-  });
+  /**
+   * Arm a repeating timer from guest source, destroy the window, and report
+   * how many times the callback fired before and after. `after > 0` means the
+   * timer escaped onto the host lane and is now immortal.
+   *
+   * Real timers are the subject under test, not incidental latency: the whole
+   * question is whether happy-dom's registry cancels these handles at
+   * `close()`. Faking the clock would replace the very mechanism being
+   * verified. Waits are condition-driven (first tick / quiet period) rather
+   * than fixed guesses.
+   */
+  async function ticksAcrossTeardown(guestSource: string): Promise<{ before: number; after: number }> {
+    const dom = await createDom("sgp", "no8xfe");
+    const w = dom.window as unknown as Record<string | symbol, unknown>;
+    let ticks = 0;
+    (globalThis as Record<string, unknown>).__capTestTick = () => { ticks++; };
+    try {
+      const sym = evaluateScriptSymbol(w);
+      if (!sym) throw new Error("happy-dom build exposes no evaluateScript symbol");
+      (w[sym] as (code: string, options: unknown) => unknown)(guestSource, { filename: GUEST_URL });
+      // Wait for the heartbeat to prove it is live, not for a fixed duration.
+      const deadline = Date.now() + 5_000;
+      while (ticks === 0 && Date.now() < deadline) await Bun.sleep(10);
+      const before = ticks;
+      destroyDom(w);
+      // A cancelled interval produces no further ticks; give it several
+      // periods of the 40ms heartbeat to prove silence.
+      await Bun.sleep(300);
+      return { before, after: ticks - before };
+    } finally {
+      try { clearInterval((globalThis as Record<string, unknown>).__capTestArmed as never); } catch {}
+      delete (globalThis as Record<string, unknown>).__capTestTick;
+      delete (globalThis as Record<string, unknown>).__capTestArmed;
+    }
+  }
 
-  test("guest-stack calls land on the window registry, reading it live", () => {
-    const { host, win, hostCalls, winCalls } = makeFixture();
-    const dual = makeDualTimers(win, host, () => true);
-    expect(dual.setTimeout(() => {}, 16)).toBe(0);
-    // Guest hooks of window.setTimeout apply to guest callers (pe-VM
-    // scheduler behavior), including hooks installed AFTER the dual was
-    // built — the window function is resolved per call.
-    win.setTimeout = () => 42;
-    expect(dual.setTimeout(() => {}, 1)).toBe(42);
-    expect(hostCalls).toEqual([]);
-    expect(winCalls).toEqual(["setTimeout:16"]);
-  });
+  const ARM = "globalThis.__capTestArmed =";
+  const TICK = "globalThis.__capTestTick";
 
-  test("the crash shape: a window timer without unref never reaches host callers", () => {
-    const { host, win } = makeFixture();
-    // Simulate the v4.5.2 field crash preconditions: the pe-VM hooks the
-    // window's setTimeout into a wrapper that loses the handle, and Bun's
-    // node:_http_server finishes a response and arms its keep-alive timer
-    // through the aliased global setTimeout, then calls .unref() on the
-    // result.
-    win.setTimeout = (() => 0) as unknown;
-    const dual = makeDualTimers(win, host, () => false);
-    const timer = dual.setTimeout(() => {}, 5000) as { unref?: () => void };
-    expect(typeof timer?.unref).toBe("function");
-    expect(() => timer.unref!()).not.toThrow();
-  });
+  // Each row is a distinct way guest code reaches `setInterval`. The
+  // `new Function` rows are the ones a stack-based router cannot see: the
+  // generated frame carries no CDN source URL, so its heartbeat used to be
+  // armed on the immortal host lane and outlived the window — the field
+  // crash "ReferenceError: moveBy is not defined" from feilin008.js's `tE`.
+  const GUEST_ENTRY_POINTS: Record<string, string> = {
+    "direct call": `${ARM} setInterval(${TICK}, 40);`,
+    "generated by new Function": `${ARM} (new Function("t","return setInterval(t,40);"))(${TICK});`,
+    "generated without new": `${ARM} Function("t","return setInterval(t,40);")(${TICK});`,
+    "generated two levels deep": `${ARM} (new Function("t","return (new Function('u','return setInterval(u,40);'))(t);"))(${TICK});`,
+    "returned from eval": `${ARM} eval("(function(t){ return setInterval(t,40); })")(${TICK});`,
+  };
 
-  test("dispatchers look native to guest toString sweeps", () => {
-    const { host, win } = makeFixture();
-    const dual = makeDualTimers(win, host, () => false);
-    expect(dual.setTimeout.name).toBe("setTimeout");
-    expect(String(dual.setTimeout)).toBe("function setTimeout() { [native code] }");
-    expect(String(dual.clearInterval)).toBe("function clearInterval() { [native code] }");
+  for (const [label, source] of Object.entries(GUEST_ENTRY_POINTS)) {
+    test(`a heartbeat armed via ${label} dies with the window`, async () => {
+      const { before, after } = await ticksAcrossTeardown(source);
+      expect(before).toBeGreaterThan(0); // the timer really was running
+      expect(after).toBe(0);
+    }, 20_000);
+  }
+
+  test("guest top-level declarations still reach the global object", async () => {
+    // The scope is applied with `with`, not an IIFE, precisely so that guest
+    // `var`/`function` declarations keep escaping. Wrapping in a function
+    // swallowed them and `initAliyunCaptcha` never appeared — every solve
+    // then timed out waiting for it.
+    const dom = await createDom("sgp", "no8xfe");
+    const w = dom.window as unknown as Record<string | symbol, unknown>;
+    try {
+      const sym = evaluateScriptSymbol(w)!;
+      (w[sym] as (code: string, options: unknown) => unknown)(
+        "function __capTestTopLevel(){ return 'visible'; } var __capTestVar = 7;",
+        { filename: GUEST_URL },
+      );
+      const g = globalThis as Record<string, unknown>;
+      expect(typeof g.__capTestTopLevel).toBe("function");
+      expect(g.__capTestVar).toBe(7);
+    } finally {
+      destroyDom(w);
+      delete (globalThis as Record<string, unknown>).__capTestTopLevel;
+      delete (globalThis as Record<string, unknown>).__capTestVar;
+    }
+  }, 20_000);
+});
+
+describe("host timer contract during a solve", () => {
+  test("globalThis timers stay pristine while a window is aliased", async () => {
+    // Bun internals (node:_http_server keep-alive, undici, AbortSignal.timeout)
+    // arm timers through the bare global and call `.unref()` on the result.
+    // The previous dispatcher handed them a window timer whenever a guest frame
+    // happened to sit on the stack, producing
+    // "TypeError: setTimeout(...).unref is not a function" — a proxy-wide crash.
+    const pristine = globalThis.setTimeout;
+    const w = new GlobalWindow({
+      url: "https://zcode.z.ai/",
+      settings: { suppressInsecureJavaScriptEnvironmentWarning: true },
+    });
+    installGlobalWindowAlias(globalThis, w, 20);
+    try {
+      expect(globalThis.setTimeout).toBe(pristine);
+      const handle = setTimeout(() => {}, 0);
+      expect(typeof handle.unref).toBe("function");
+      handle.unref();
+      clearTimeout(handle);
+      const signal = AbortSignal.timeout(50);
+      expect(signal.aborted).toBe(false);
+    } finally {
+      await w.happyDOM.close();
+      removeGlobalWindowAlias(globalThis, w);
+      await Bun.sleep(60);
+    }
   });
 });
 
@@ -114,16 +142,12 @@ describe("alias lifecycle (install/remove descriptor contract)", () => {
   const TIMER_PROPS = ["setTimeout", "setInterval", "clearTimeout", "clearInterval"];
 
   function makeSandbox() {
-    // Sentinel the pristine host fns return — the dual's host lane must
-    // surface it untouched even when the window's timers are hostile.
-    const pristine = { marker: "pristine-host-timer" };
     const g: Record<string, unknown> = {};
-    for (const p of TIMER_PROPS) {
-      g[p] = () => pristine;
-    }
-    // Host-existing globals beyond the timers — atob/btoa are what
-    // client-signing.ts uses (JWT base64); the window also exposes them, so
-    // the generic alias loop overwrites the host versions.
+    const pristine = { marker: "pristine-host-timer" };
+    for (const p of TIMER_PROPS) g[p] = () => pristine;
+    // Host-existing globals the window also exposes: the generic alias loop
+    // overwrites these, so teardown must put the host versions back.
+    // client-signing.ts:100/:115 calls bare `atob`/`btoa` between solves.
     const hostAtob = (s: string) => `host-atob(${s})`;
     g.atob = hostAtob;
     g.btoa = (s: string) => `host-btoa(${s})`;
@@ -131,13 +155,7 @@ describe("alias lifecycle (install/remove descriptor contract)", () => {
     // tombstone must never grace-delete it after the restore, even though a
     // restored getter passes the `d?.get` re-check.
     const hostNavigator = { userAgent: "host" };
-    Object.defineProperty(g, "navigator", {
-      get: () => hostNavigator,
-      configurable: true,
-    });
-    // Window stub whose timers are hooked/lossy (pe-VM scheduler shape) and
-    // which carries the DOM interface guest stragglers probe (Text — the
-    // v4.5.2 "Text is not defined" field report from feilin005.js).
+    Object.defineProperty(g, "navigator", { get: () => hostNavigator, configurable: true });
     const w: Record<string, unknown> = {
       setTimeout: () => 0,
       setInterval: () => 0,
@@ -151,75 +169,63 @@ describe("alias lifecycle (install/remove descriptor contract)", () => {
     return { g, w, pristine, hostNavigator };
   }
 
-  test("host lane serves the PRISTINE timers, not the generic-alias getters (capture-order regression)", () => {
+  test("the alias never touches the host timers", () => {
     const { g, w, pristine } = makeSandbox();
-    installGlobalWindowAlias(g, w);
-    // A host-stack call (this test's stack has no guest CDN frames) through
-    // the aliased global must return the pristine fn's return value. Under
-    // the capture-order bug the host lane fell back to g[prop], which the
-    // generic props loop had already turned into a window-forwarding
-    // accessor — this would read 0 from the hooked window stub instead.
-    const hostLane = g.setTimeout as (...a: unknown[]) => unknown;
-    expect(hostLane(() => {}, 1)).toBe(pristine);
-    removeGlobalWindowAlias(g, w);
-  });
-
-  test("remove restores the pre-install descriptors byte-identically", () => {
-    const { g, w } = makeSandbox();
     const before = Object.fromEntries(
       TIMER_PROPS.map((p) => [p, Object.getOwnPropertyDescriptor(g, p)]),
     );
     installGlobalWindowAlias(g, w);
-    expect(Object.getOwnPropertyDescriptor(g, "setTimeout")?.get).toBeDefined();
-    removeGlobalWindowAlias(g, w);
-    for (const p of TIMER_PROPS) {
-      expect(Object.getOwnPropertyDescriptor(g, p)).toEqual(before[p]);
-      expect(g[p]).toBe(before[p]!.value);
+    try {
+      // Bun's runtime resolves these by bare identifier and unrefs the result.
+      // Aliasing them onto the window is what produced
+      // "setTimeout(...).unref is not a function" in the field.
+      for (const p of TIMER_PROPS) {
+        expect(Object.getOwnPropertyDescriptor(g, p)).toEqual(before[p]);
+      }
+      expect((g.setTimeout as () => unknown)()).toBe(pristine);
+    } finally {
+      removeGlobalWindowAlias(g, w);
     }
   });
 
-  test("concurrent installs restore exactly once, on the last remove", () => {
-    const { g } = makeSandbox();
-    const w1: Record<string, unknown> = { setTimeout: () => 1, setInterval: () => 1, clearTimeout: () => {}, clearInterval: () => {} };
-    const w2: Record<string, unknown> = { setTimeout: () => 2, setInterval: () => 2, clearTimeout: () => {}, clearInterval: () => {} };
-    const orig = g.setTimeout;
-    installGlobalWindowAlias(g, w1);
-    installGlobalWindowAlias(g, w2);
-    removeGlobalWindowAlias(g, w1); // refcount 2→1: no restore yet
-    expect(typeof Object.getOwnPropertyDescriptor(g, "setTimeout")?.get).toBe("function");
-    expect(g.setTimeout).not.toBe(orig);
-    removeGlobalWindowAlias(g, w2); // refcount 1→0: restore
-    expect(g.setTimeout).toBe(orig);
-  });
-
-  test("host-existing globals beyond the timers (atob/btoa) survive a solve wave — client-signing contract", () => {
+  test("host-existing globals are served from the window during a solve and restored after", () => {
     const { g, w } = makeSandbox();
     installGlobalWindowAlias(g, w);
-    // During the solve the alias serves the window's versions (guest gets
-    // the happy-dom base64, writes to them stay on the window).
-    const inSolve = (g.atob as (s: string) => string)("x");
-    expect(inSolve).toBe("win-atob(x)");
+    expect((g.atob as (s: string) => string)("x")).toBe("win-atob(x)");
     removeGlobalWindowAlias(g, w);
-    // After teardown the PRISTINE host functions are back — the
-    // field-reported failure mode was a hard delete leaving client-signing's
-    // bare `btoa`/`atob` (client-signing.ts:100/:115) as ReferenceErrors.
+    // A hard delete here left client-signing's bare `btoa`/`atob` as
+    // ReferenceErrors — the field-reported failure this restore prevents.
     expect(Object.getOwnPropertyDescriptor(g, "atob")?.get).toBeUndefined();
     expect((g.atob as (s: string) => string)("y")).toBe("host-atob(y)");
     expect((g.btoa as (s: string) => string)("y")).toBe("host-btoa(y)");
   });
 
-  test("window-sourced globals stay resolvable through the post-teardown grace period (Text straggler fix)", async () => {
+  test("concurrent installs restore exactly once, on the last remove", () => {
+    const { g } = makeSandbox();
+    const w1: Record<string, unknown> = { atob: (s: string) => `w1(${s})` };
+    const w2: Record<string, unknown> = { atob: (s: string) => `w2(${s})` };
+    const orig = g.atob;
+    installGlobalWindowAlias(g, w1);
+    installGlobalWindowAlias(g, w2);
+    removeGlobalWindowAlias(g, w1); // refcount 2→1: no restore yet
+    expect(g.atob).not.toBe(orig);
+    removeGlobalWindowAlias(g, w2); // refcount 1→0: restore
+    expect(g.atob).toBe(orig);
+  });
+
+  test("window-sourced globals stay resolvable through the post-teardown grace period", async () => {
     const { g, w, hostNavigator } = makeSandbox();
     installGlobalWindowAlias(g, w, 15);
     removeGlobalWindowAlias(g, w);
-    // Timers/console are restored immediately; Text (window-sourced) is
-    // tombstoned — still resolvable, still the (closed) window's value.
-    expect(Object.getOwnPropertyDescriptor(g, "setTimeout")?.get).toBeUndefined();
+    // Host globals are back at once; window-sourced ones (Text) linger so a
+    // straggling guest continuation resolves them instead of throwing
+    // "Text is not defined" (v4.5.2 field report from feilin005.js).
+    expect(Object.getOwnPropertyDescriptor(g, "atob")?.get).toBeUndefined();
     expect(Object.getOwnPropertyDescriptor(g, "Text")?.get).toBeDefined();
     expect(g.Text).toBe(w.Text);
-    await new Promise((r) => setTimeout(r, 70));
-    // Grace expired: the real deletion ran — but the restored HOST getter
-    // (navigator) survived it.
+    // Real elapsed time is the mechanism under test: the tombstone is a
+    // wall-clock grace period scheduled on the pristine host setTimeout.
+    await Bun.sleep(70);
     expect(g.Text).toBeUndefined();
     expect(Object.getOwnPropertyDescriptor(g, "Text")?.get).toBeUndefined();
     expect(g.navigator).toBe(hostNavigator);
@@ -247,40 +253,49 @@ describe("alias lifecycle (install/remove descriptor contract)", () => {
   test("a new install cancels the pending tombstone", async () => {
     const { g, w } = makeSandbox();
     const w2: Record<string, unknown> = {
-      setTimeout: () => 2, setInterval: () => 2, clearTimeout: () => {}, clearInterval: () => {},
       Text: class FakeText2 {},
       atob: (s: string) => `win2-atob(${s})`,
-      btoa: (s: string) => `win2-btoa(${s})`,
       navigator: { userAgent: "window2" },
     };
     installGlobalWindowAlias(g, w, 15);
     removeGlobalWindowAlias(g, w);
-    installGlobalWindowAlias(g, w2, 15); // new wave before the grace expires
-    await new Promise((r) => setTimeout(r, 70));
-    // Still aliased to the second window — the first tombstone aborted.
-    expect(Object.getOwnPropertyDescriptor(g, "setTimeout")?.get).toBeDefined();
-    expect(g.Text).toBe(w2.Text);
+    installGlobalWindowAlias(g, w2, 15); // new wave inside the grace period
+    await Bun.sleep(70);
+    expect(g.Text).toBe(w2.Text); // first tombstone aborted
     removeGlobalWindowAlias(g, w2);
-    // The SECOND wave's tombstone must own the cleanup: the overlapping-wave
-    // sequence is exactly where the stale-accessor laundering pinned the
-    // first closed window on the globals forever (review finding 2026-08-31).
-    await new Promise((r) => setTimeout(r, 70));
+    // The SECOND wave's tombstone owns the cleanup: this overlap is where
+    // stale-accessor laundering used to pin the first closed window forever.
+    await Bun.sleep(70);
     expect(g.Text).toBeUndefined();
     expect(g.window).toBeUndefined();
-    expect(Object.getOwnPropertyDescriptor(g, "setTimeout")?.get).toBeUndefined();
   });
-});
 
-describe("browser globals the guest SDK dereferences bare", () => {
+  test("an expired tombstone leaves callable stubs, never a ReferenceError", async () => {
+    // The grace period ends, but guest stragglers can still be running: the
+    // FeiLin heartbeat `tE` re-arms itself every 2s and dereferences `moveBy`
+    // (feilin008.js:169658). A hard `delete` turned that read into an uncaught
+    // ReferenceError — fatal in the host realm, and the field crash this
+    // guards. The name must stay resolvable and callable.
+    const { g, w } = makeSandbox();
+    (w as Record<string, unknown>).moveBy = () => {};
+    installGlobalWindowAlias(g, w, 15);
+    removeGlobalWindowAlias(g, w);
+    await Bun.sleep(70);
+    expect(typeof g.moveBy).toBe("function");
+    expect(() => (g.moveBy as () => void)()).not.toThrow();
+    // The stub must not keep the closed window reachable from globalThis.
+    expect(g.moveBy).not.toBe((w as Record<string, unknown>).moveBy);
+  });
+
   test("requestAnimationFrame/cancelAnimationFrame resolve during a solve", () => {
     // Bun has no native rAF. While these sat in HOST_CRITICAL_GLOBALS the
     // alias pass skipped them, so the FeiLin bundle's 9 bare
     // `requestAnimationFrame` references (only one `typeof`-guarded) were
-    // unresolvable — the same silent fingerprint degradation `print` caused,
-    // visible only as a lower solve rate.
+    // unresolvable — silent fingerprint degradation, visible only as a lower
+    // solve rate.
     const g: Record<string, unknown> = {};
     const w: Record<string, unknown> = {
-      requestAnimationFrame: (cb: () => void) => 1,
+      requestAnimationFrame: () => 1,
       cancelAnimationFrame: () => {},
     };
     installGlobalWindowAlias(g, w, 15);

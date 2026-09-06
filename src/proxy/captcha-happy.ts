@@ -515,6 +515,129 @@ function makeInterceptor(bypassPeCache = false) {
   };
 }
 
+// ── Lexical guest scope: timer OWNERSHIP, not caller guessing ──────────────
+// Under Bun, guest scripts execute in the HOST realm, so a bare `setTimeout`
+// inside SDK code resolves to the host's. Host timers outlive the window:
+// a stray FeiLin callback that re-arms its 2s heartbeat (feilin008.js:
+// `tV = setInterval(tE, 2e3)`) after destroyDom keeps firing forever and
+// eventually dereferences a torn-down global — the field-reported
+// "ReferenceError: moveBy is not defined" that killed the TUI.
+//
+// Guest timers must therefore land on the WINDOW registry, which happy-dom
+// clears in happyDOM.close(). The previous approach decided this at CALL time
+// by sniffing `new Error().stack` for a CDN frame, but a stack describes the
+// call chain, not ownership, and it misjudges BOTH ways:
+//   • false negative — guest code built via `new Function` carries no CDN
+//     frame, so its heartbeat escaped onto the immortal host lane;
+//   • false positive — host runtime code invoked beneath a guest frame was
+//     handed a window timer with no `.unref()`, the v4.5.2 crash shape.
+// Ownership is a property of where CODE COMES FROM, so we bind it lexically.
+// Each guest script is evaluated inside `with (scope) { … }`, where `scope`
+// carries this window's timer methods. Identifier resolution is settled by the
+// scope chain at parse time; no stack is ever consulted, so neither misjudgement
+// is expressible. `with` (not an IIFE wrapper) because guest top-level `var` and
+// `function` declarations must keep escaping to the global object — an IIFE
+// swallows them and `initAliyunCaptcha` never appears (measured: every solve
+// timed out). The FeiLin/pe bundles have no top-level "use strict" (their
+// `"use strict"` directives sit inside module functions, which is fine), so
+// `with` parses; a script that did carry one would throw at parse time and take
+// the unwrapped fallback path in installEvalInstrumentation.
+const GUEST_TIMER_PROPS = ["setTimeout", "setInterval", "clearTimeout", "clearInterval"];
+
+// Guest scopes are keyed per window so concurrent solves never share timers:
+// the wrapper reads `globalThis[GUEST_SCOPE_ROOT][id]` at RUN time, and each
+// window gets its own id. A plain object (not a Map) because the wrapper text
+// indexes it directly from guest source.
+const GUEST_SCOPE_ROOT = "__capGuestScopes";
+let _guestScopeSeq = 0;
+
+/**
+ * Create this window's guest scope and return the id the wrapper embeds.
+ *
+ * Holds the window's own timer methods (bound to the window), a `Function`
+ * stand-in (see makeScopedFunction), and the window's console. The console
+ * matters as much as the timers: the FeiLin SDK probes for devtools by
+ * printing invisible `%c%d` format strings across every console method, ~1/sec
+ * while solving. Resolved lexically it lands on the window's silent console;
+ * left to the host it garbles the TUI's alternate screen with bare "NaN" rows.
+ */
+function installGuestScope(w) {
+  const root = (globalThis[GUEST_SCOPE_ROOT] ??= Object.create(null));
+  const id = `w${++_guestScopeSeq}`;
+  const scope = Object.create(null);
+  for (const name of GUEST_TIMER_PROPS) {
+    const fn = w[name];
+    scope[name] = typeof fn === "function" ? fn.bind(w) : fn;
+  }
+  scope.Function = makeScopedFunction(w);
+  if (!_DEBUG && w.console) scope.console = w.console;
+  root[id] = scope;
+  w.__capScopeId = id;
+  return id;
+}
+
+/** Drop the scope when the window dies, so it cannot pin a closed window. */
+function removeGuestScope(w) {
+  try {
+    const id = w && w.__capScopeId;
+    const root = globalThis[GUEST_SCOPE_ROOT];
+    if (id && root) delete root[id];
+  } catch {}
+}
+
+/**
+ * A `Function` stand-in for guest scope. `new Function(body)` compiles in the
+ * GLOBAL scope, so a generated function would see the host timers again and
+ * re-open the escape hatch (measured: its heartbeat outlived window close).
+ * This variant re-wraps the generated body in the same `with` scope, so code
+ * the pe bytecode VM generates at runtime inherits the window's timers too.
+ * `eval` needs no equivalent: it inherits the caller's scope chain already.
+ */
+function makeScopedFunction(w) {
+  const Scoped = function (...args) {
+    const body = args.length ? String(args[args.length - 1]) : "";
+    const params = args.slice(0, -1).map(String).join(",");
+    const id = w.__capScopeId;
+    const source =
+      `return function(${params}){with(globalThis.${GUEST_SCOPE_ROOT}[${JSON.stringify(id)}]){\n${body}\n}}`;
+    return Function(source)();
+  };
+  // Guest fingerprint code sweeps name/toString over platform builtins.
+  Scoped.prototype = Function.prototype;
+  try {
+    Object.defineProperty(Scoped, "name", { value: "Function", configurable: true });
+    Object.defineProperty(Scoped, "toString", {
+      value: () => "function Function() { [native code] }",
+      configurable: true,
+      writable: true,
+    });
+  } catch {}
+  return Scoped;
+}
+
+/**
+ * Wrap guest source so bare timer identifiers resolve to `w`'s registry.
+ *
+ * The completion value MUST survive: happy-dom's JavaScriptCompiler hands
+ * `evaluateScript` a `(function anonymous($happy_dom){…})` expression and calls
+ * the returned function. A bare `with (…) { … }` statement evaluates to
+ * undefined, so the compiled script was silently never executed — every solve
+ * then timed out waiting for `initAliyunCaptcha`. Wrapping in an arrow-bodied
+ * IIFE that RETURNS the inner expression keeps both properties: the value flows
+ * out, and guest code still sits lexically inside the `with` scope.
+ *
+ * Top-level `var`/`function` declarations keep their global-object semantics
+ * because `with` (unlike a function wrapper) introduces no variable
+ * environment of its own.
+ */
+function wrapGuestSource(code, filename, scopeId) {
+  const sourceUrl = filename && /^https?:/.test(String(filename)) ? `\n//# sourceURL=${filename}` : "";
+  const scopeRef = `globalThis.${GUEST_SCOPE_ROOT}[${JSON.stringify(scopeId)}]`;
+  // The leading newline keeps guest line numbers aligned with the CDN
+  // original; the trailing one guards a source ending in a line comment.
+  return `with(${scopeRef}){\n${code}\n}${sourceUrl}`;
+}
+
 // ── Parse-fail instrumentation (host side) ─────────────────────────────────
 // Wraps happy-dom's VM eval funnel (window[PropertySymbol.evaluateScript]).
 // Every script tag / compiled module / dynamic chunk that happy-dom parses
@@ -529,7 +652,25 @@ function installEvalInstrumentation(w) {
   }
   const orig = w[sym];
   w[sym] = function (code, options) {
+    const scopeId = w.__capScopeId;
     try {
+      // Guest scripts run inside this window's `with` scope (wrapGuestSource):
+      // this funnel is the single entry point for every script tag, compiled
+      // module and dynamic pe/FeiLin chunk, so wrapping here covers them all.
+      // Our own GUEST_EVAL_PATCH goes through w.eval() and is unaffected.
+      if (scopeId) {
+        try {
+          return orig.call(this, wrapGuestSource(String(code ?? ""), options && options.filename, scopeId), options);
+        } catch (scopeErr) {
+          // Only a wrapper-induced parse failure (e.g. a top-level "use
+          // strict" making `with` illegal) falls back — a genuine error from
+          // the guest body must propagate to the diagnostics path below.
+          if (!(scopeErr instanceof SyntaxError)) throw scopeErr;
+          process.stderr.write(
+            `[instr] guest scope rejected (${scopeErr.message.slice(0, 80)}), evaluating unwrapped\n`,
+          );
+        }
+      }
       return orig.call(this, code, options);
     } catch (err) {
       try {
@@ -630,11 +771,11 @@ function installNativeToString(w) {
         try {
           const v = desc.get.call(obj);
           if (typeof v === "function") mask(v);
-          // Probing a getter can hand back an already-rejected promise (WHATWG
-          // stream `closed`/`ready` reject when the receiver is the prototype
-          // rather than an instance). Nobody awaits these, so without a sink
-          // each probe surfaced as an unhandledRejection on every solve —
-          // noise that buried real diagnostics.
+          // Probing a getter can hand back a promise that is already rejected
+          // (WHATWG stream `closed`/`ready` reject when the receiver is the
+          // prototype, not an instance). Nobody awaits these, so without a
+          // sink each probe surfaced as an unhandledRejection during every
+          // solve — noise that buried real diagnostics.
           else if (v && typeof v.then === "function") v.catch(() => {});
         } catch {}
       }
@@ -1715,6 +1856,8 @@ async function createDom(region, prefix) {
   // destroyed, so concurrent solves with window reuse stay consistent.
   applyPolyfills(w);
   installNativeToString(w);
+  // Guest timer scope must exist BEFORE the eval hook wraps any script.
+  installGuestScope(w);
   installEvalInstrumentation(w);
   // Bun alias pass runs AFTER polyfills so polyfilled props (Option, Video,
   // alert, ...) are visible to guest scripts via globalThis too.
@@ -1770,7 +1913,6 @@ async function createDom(region, prefix) {
 }
 
 // Bun-only: alias the active window on globalThis (script tags run in the
-// Bun-only: alias the active window on globalThis (script tags run in the
 // host realm under Bun). Every own enumerable window property is exposed as a
 // getter so guest scripts resolving bare identifiers (window, document,
 // XMLHttpRequest, Range, HTMLElement, ...) find them, exactly as Node's VM
@@ -1780,6 +1922,9 @@ async function createDom(region, prefix) {
 const HOST_CRITICAL_GLOBALS = new Set([
   "process", "Bun", "console", "performance", "crypto", "fetch",
   "queueMicrotask", "structuredClone", "TextEncoder", "TextDecoder",
+  // Timers stay pristine on globalThis so Bun internals keep real Node timer
+  // objects (`.unref()`); guest code gets the window's registry lexically.
+  "setTimeout", "setInterval", "clearTimeout", "clearInterval",
   // NOTE: requestAnimationFrame/cancelAnimationFrame were removed from this
   // list (2026-09-06). Bun has no native rAF, so skipping the alias left a
   // bare `requestAnimationFrame` in the FeiLin bundle unresolvable (9 call
@@ -1817,6 +1962,11 @@ const EXTRA_WINDOW_PROPS = [
   "open", "close", "stop", "focus", "blur", "print", "alert", "confirm",
   "prompt", "getSelection", "find",
 ];
+// Subset of the above that a real browser implements as no-op-ish window
+// methods. When the tombstone expires these become harmless stubs instead of
+// being deleted, so a straggling guest callback that still calls `moveBy()`
+// completes silently rather than raising a fatal ReferenceError.
+const INERT_WINDOW_METHODS = new Set(EXTRA_WINDOW_PROPS);
 
 // Subset of the above that a real browser implements as no-op-ish window
 // methods. When the tombstone expires these become harmless stubs instead of
@@ -1853,142 +2003,41 @@ const _hostSetTimeout = globalThis.setTimeout;
 // this set and always flow to the restore path.
 const _aliasGetters = new WeakSet<object>();
 
-// Under Bun, guest scripts run in the HOST realm — a bare `console` inside
-// SDK code resolves to the HOST console (that is the FeiLin spam channel:
-// invisible devtools-format lines probed across every console method, ~1/sec
-// while solving). While the aliases are installed, `console` on globalThis is
-// replaced with a DUAL console: calls whose stack originates from guest SDK
-// script URLs are dropped, everything else forwards to the console that was
-// live at install time (the TUI's interception or the serve terminal — so
-// host logging keeps working untouched). Restored on the last destroyDom.
-// Skipped under CAPTCHA_DEBUG so guest logs stay inspectable.
-let _savedConsoleDescriptor: PropertyDescriptor | undefined;
-let _dualConsole: Record<string, unknown> | null = null;
-
-// Same save/restore contract as the console descriptor, generalized to every
-// HOST-EXISTING global the alias pass overwrites (see installGlobalWindowAlias
-// for the full list rationale). Captured on the FIRST install of a wave
-// (globals are pristine then), restored on the last remove.
+// Same save/restore contract for every HOST-EXISTING global the alias pass
+// overwrites (see installGlobalWindowAlias for the rationale). Captured on the
+// FIRST install of a wave (globals are pristine then), restored on the last
+// remove.
 let _savedHostGlobalDescriptors: Record<string, PropertyDescriptor> | undefined;
 
-const TIMER_PROPS = ["setTimeout", "setInterval", "clearTimeout", "clearInterval"];
-
-// Guest-stack detector shared by the dual console and dual timers: guest
-// script frames carry their CDN source URL (o/g.alicdn.com, aliyuncs APIs).
-function isGuestConsoleCall(): boolean {
-  const stack = new Error().stack ?? "";
-  return /alicdn\.com|aliyuncs\.com/i.test(stack);
-}
-
-/** Build a console facade that drops calls while `isGuest()` holds (test seam). */
-export function makeDualConsole(isGuest: () => boolean = isGuestConsoleCall): Record<string, unknown> {
-  // Capture the console OBJECT at build time — methods must keep their
-  // original receiver (looking up `console` again inside the closure would
-  // resolve to the dual getter itself and recurse).
-  const host = console as unknown as Record<string, unknown>;
-  const dual: Record<string, unknown> = {};
-  for (const key of Object.keys(host)) {
-    const fn = host[key];
-    if (typeof fn !== "function") {
-      dual[key] = fn;
-      continue;
-    }
-    dual[key] = (...args: unknown[]) => {
-      if (isGuest()) return;
-      return (fn as (...a: unknown[]) => void).apply(host, args);
-    };
-  }
-  return dual;
-}
-
-function isGuestTimerCall(): boolean {
-  // Same evidence as the dual console — one shared predicate shape.
-  return isGuestConsoleCall();
-}
-
-/**
- * Build dual setTimeout/setInterval/clearTimeout/clearInterval bound to one
- * solve's window (test seam): calls whose stack originates from guest script
- * URLs land on the window's timer registry (die with the window, so pe-VM
- * callbacks can't outlive destroyDom), everything else — Bun internals like
- * node:_http_server's keep-alive arming, our own modules — keeps the real
- * host timer objects and their ref/unref contract. The window's function is
- * read LIVE at call time so guest-side hooks of window.setTimeout still apply
- * to guest callers; the host functions are captured once, immune to hooks.
- */
-export function makeDualTimers(
-  win: Record<string, unknown>,
-  host: Record<string, (...args: unknown[]) => unknown>,
-  isGuest: () => boolean = isGuestTimerCall,
-): Record<string, (...args: unknown[]) => unknown> {
-  const dual: Record<string, (...args: unknown[]) => unknown> = {};
-  for (const prop of TIMER_PROPS) {
-    const fn = function (...args: unknown[]) {
-      let guest = false;
-      try {
-        guest = isGuest();
-      } catch (_) {}
-      if (guest) {
-        const wfn = win[prop];
-        return typeof wfn === "function" ? wfn.apply(win, args) : undefined;
-      }
-      return host[prop]?.apply(undefined, args);
-    };
-    // Look native to guest toString sweeps (same masking technique as
-    // installNativeToString): real browsers expose these as native code.
-    try {
-      Object.defineProperty(fn, "name", { value: prop, configurable: true });
-      const nativeStr = `function ${prop}() { [native code] }`;
-      Object.defineProperty(fn, "toString", {
-        value: () => nativeStr,
-        configurable: true,
-        writable: true,
-      });
-    } catch (_) {}
-    dual[prop] = fn;
-  }
-  return dual;
-}
+// Guest timer/console routing is LEXICAL (see the guest scope section above):
+// bare `setTimeout`/`console` inside guest source resolve through the `with`
+// scope to this window's own objects. No stack sniffing — the previous
+// `/alicdn/.test(new Error().stack)` predicate answered "who is calling?" when
+// the question is "who owns this?", and got both directions wrong (immortal
+// guest heartbeats; host timers stripped of `.unref`).
+//
+// So globalThis keeps the PRISTINE host timers at all times, and Bun internals
+// (node:_http_server keep-alive, undici, AbortSignal.timeout) always get real
+// Node timer objects with an intact ref/unref contract.
 
 // Both take (g, w) explicitly so tests can drive the lifecycle against a
-// sandbox global (same test-seam pattern as makeDualConsole/makeDualTimers).
-// `tombstoneMs` (tests only) shortens the post-teardown grace period.
+// sandbox global. `tombstoneMs` (tests only) shortens the grace period.
 export function installGlobalWindowAlias(g, w, tombstoneMs?) {
-  // Clamp a negative refcount (an unbalanced remove would otherwise land the
-  // NEXT install at 0 instead of 1: the snapshot is skipped and the dual
-  // timers' host lane falls back to just-installed window accessors — the
-  // v4.5.2 unref crash shape).
+  // Clamp a negative refcount: an unbalanced remove would otherwise land the
+  // NEXT install at 0 instead of 1 and skip the host-global snapshot, so
+  // teardown could never restore what it overwrote.
   if (_aliasRefCount < 0) _aliasRefCount = 0;
   _aliasRefCount += 1;
   _aliasGeneration += 1; // cancels any pending tombstone from a prior wave
   _tombstoneMs = typeof tombstoneMs === "number" ? tombstoneMs : ALIAS_TOMBSTONE_MS;
-  if (_aliasRefCount === 1 && !process.env.CAPTCHA_DEBUG) {
-    _dualConsole = makeDualConsole();    _savedConsoleDescriptor = Object.getOwnPropertyDescriptor(g, "console");
-    try {
-      const consoleGetter = function () {
-        return _dualConsole;
-      };
-      _aliasGetters.add(consoleGetter);
-      Object.defineProperty(g, "console", {
-        get: consoleGetter,
-        set(v) {
-          try { w.console = v; } catch (_) {}
-        },
-        configurable: true,
-      });
-    } catch (_) {}
-  }
   // Build the alias name set FIRST, then snapshot every HOST-EXISTING global
   // in it BEFORE anything is aliased. The generic props loop below overwrites
   // them with window-forwarding accessors (GlobalWindow own props outside
-  // HOST_CRITICAL_GLOBALS) — a capture taken after it would save those
-  // accessors, the dual-timer host lane would dispatch into the window,
-  // happyDOM.close() would cancel host-lane timers mid-solve, and the
-  // post-remove restore would reinstate accessors to a closed window (the
-  // v4.5.2 unref crash reborn). The snapshot covers far more than the four
-  // timers: atob/btoa (client-signing's base64 — field-reported
-  // ReferenceError), WebSocket, MessageEvent, CustomEvent, navigator, self,
-  // ... — every host global the window happens to expose (~25 today).
+  // HOST_CRITICAL_GLOBALS); a capture taken after it would save those
+  // accessors and the post-remove restore would reinstate accessors onto a
+  // closed window. The snapshot covers atob/btoa (client-signing's base64 —
+  // field-reported ReferenceError), WebSocket, MessageEvent, CustomEvent,
+  // navigator, self, ... — every host global the window happens to expose.
   const props = new Set(Object.getOwnPropertyNames(w));
   for (const name of EXTRA_WINDOW_PROPS) props.add(name);
   // also walk the prototype chain one level (BrowserWindow getters like
@@ -2046,40 +2095,11 @@ export function installGlobalWindowAlias(g, w, tombstoneMs?) {
       Object.defineProperty(g, prop, { get: getter, configurable: true });
     } catch (_) {}
   }
-  // Guest timers must live on the window's timer registry (destroyed with
-  // the window). The host's setTimeout would let pe-VM callbacks fire after
-  // destroyDom, when the `window` alias is gone ("window is not defined").
-  // BUT a bare getter onto w's timers hijacks the HOST's global timers for
-  // the whole solve: Bun ≥1.4 arms its node:_http_server keep-alive socket
-  // timer through the bare global setTimeout and calls .unref() on the
-  // result, and a guest-side hook of window.setTimeout (pe-VM scheduler) or
-  // the post-close window stub returns a value without .unref — an uncaught
-  // TypeError that kills the whole proxy (v4.5.2 field crash, Bun v1.4.0
-  // binaries). So the four globals become DUAL dispatchers instead: calls
-  // whose stack originates from guest script URLs land on the window
-  // registry (same evidence base as the dual console), everything else
-  // keeps the real host timer objects and their ref/unref contract.
-  // (Descriptors were captured at the TOP of this function — see there.)
-  const hostTimers: Record<string, (...args: unknown[]) => unknown> = {};
-  for (const prop of TIMER_PROPS) {
-    hostTimers[prop] = _savedHostGlobalDescriptors?.[prop]?.value ?? g[prop];
-  }
-  const dualTimers = makeDualTimers(w, hostTimers);
-  for (const prop of TIMER_PROPS) {
-    try {
-      const getter = function () { return dualTimers[prop]; };
-      _aliasGetters.add(getter);
-      Object.defineProperty(g, prop, {
-        get: getter,
-        // Writes through the alias (`setTimeout = x`, guest or host alike)
-        // land on the window like a real browser — they must NOT clobber
-        // the dispatcher itself; host callers always get the captured
-        // pristine functions regardless.
-        set(v) { try { w[prop] = v; } catch (_) {} },
-        configurable: true,
-      });
-    } catch (_) {}
-  }
+  // Timers are deliberately NOT aliased: globalThis keeps Bun's pristine
+  // functions so node:_http_server keep-alive, undici and AbortSignal.timeout
+  // always receive real Node timer objects with an intact `.unref()`. Guest
+  // code reaches the window's registry through the lexical `with` scope
+  // instead, so its callbacks still die in happyDOM.close().
   // Dynamic catch-all: guest code occasionally references window methods that
   // only exist on the prototype (moveBy, scrollTo, ...) or lands mid-solve on
   // new props. Proxy fallback for any still-missing global property.
@@ -2095,18 +2115,10 @@ export function installGlobalWindowAlias(g, w, tombstoneMs?) {
 export function removeGlobalWindowAlias(g, w) {
   _aliasRefCount -= 1;
   if (_aliasRefCount > 0) return;
-  // Host-contract globals come back IMMEDIATELY: the console (host logging
-  // between solves) and every HOST-EXISTING global the wave overwrote — the
-  // four timers (Bun internals call them by bare identifier and unref the
-  // result), atob/btoa (client-signing's JWT base64 — the field-reported
-  // ReferenceError), WebSocket/MessageEvent/navigator/self/...
-  if (_savedConsoleDescriptor) {
-    try {
-      Object.defineProperty(g, "console", _savedConsoleDescriptor);
-    } catch (_) {}
-    _savedConsoleDescriptor = undefined;
-    _dualConsole = null;
-  }
+  // Host-contract globals come back IMMEDIATELY: every HOST-EXISTING global
+  // the wave overwrote — atob/btoa (client-signing's JWT base64 — the
+  // field-reported ReferenceError), WebSocket/MessageEvent/navigator/self/...
+  // The timers and console were never aliased, so nothing to restore there.
   const restored = new Set<string>();
   if (_savedHostGlobalDescriptors) {
     for (const [name, desc] of Object.entries(_savedHostGlobalDescriptors)) {
@@ -2176,6 +2188,10 @@ function destroyDom(win) {
   try {
     if (typeof Bun !== "undefined") removeGlobalWindowAlias(globalThis, win);
   } catch (_) {}
+  // The scope holds window-bound timer functions; dropping it releases the
+  // closed window and makes any straggler's `new Function` fall back to the
+  // host constructor (harmless: the window registry is already cleared).
+  removeGuestScope(win);
   try { shutdownSyncFetchWorker(); } catch (_) {}
 }
 
