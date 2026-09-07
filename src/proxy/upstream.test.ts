@@ -688,7 +688,9 @@ describe("proxyRequest — OpenAI translation mode (coding-plan → Anthropic up
   it("uses x-api-key + anthropic-version on the Anthropic upstream request", async () => {
     const fetchMock = mock(async (req: Request): Promise<Response> => {
       expect(req.headers.get("x-api-key")).toBe("testkey.testsecret");
-      expect(req.headers.get("authorization")).toBeNull();
+      // CL-25: the real client sends BOTH headers with the same credential
+      // (bundle `ebo` injects Authorization alongside the SDK's x-api-key).
+      expect(req.headers.get("authorization")).toBe("Bearer testkey.testsecret");
       expect(req.headers.get("anthropic-version")).toBe("2023-06-01");
       return new Response(ANTHROPIC_RESPONSE, { status: 200, headers: { "content-type": "application/json" } });
     });
