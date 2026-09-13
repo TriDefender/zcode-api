@@ -77,14 +77,19 @@ class CertifyIdRegistry {
   }
 }
 
-const DEFAULT_POOL_MIN = Number(process.env.CAPTCHA_POOL_MIN || 40);
-const DEFAULT_POOL_MAX = Number(process.env.CAPTCHA_POOL_MAX || 120);
+// Sized for start-plan's 5-concurrent ceiling (~10 instantaneous takes with
+// challenge retries, 8-24 tokens circulating per 95s TTL) — see captcha.ts.
+// These are pre-configure fallbacks; startCaptchaPool() passes explicit sizes.
+const DEFAULT_POOL_MIN = Number(process.env.CAPTCHA_POOL_MIN || 15);
+const DEFAULT_POOL_MAX = Number(process.env.CAPTCHA_POOL_MAX || 60);
 const DEFAULT_TOKEN_TTL_MS = Number(process.env.CAPTCHA_CACHE_TTL_MS || 95_000);
 const DEFAULT_REFILL_INTERVAL_MS = Number(process.env.CAPTCHA_REFILL_INTERVAL_MS || 1_000);
 const DEFAULT_STAGGER_MS = Number(process.env.CAPTCHA_SOLVE_STAGGER_MS || 0);
+// 3 lanes ≈ 4-6 mints/s — an order of magnitude above the 5-concurrency
+// start-plan demand (≤0.5/s). ZCODE_CAPTCHA_LOW_CPU=0 restores 8 lanes.
 const DEFAULT_SOLVE_CONCURRENCY = Number(
 	process.env.CAPTCHA_SOLVE_CONCURRENCY ||
-		(process.env.ZCODE_CAPTCHA_LOW_CPU === "1" ? 3 : 8),
+		(process.env.ZCODE_CAPTCHA_LOW_CPU === "0" ? 8 : 3),
 );
 const DEFAULT_SCALE_DOWN_IDLE_MS = Number(process.env.CAPTCHA_POOL_SCALE_DOWN_IDLE_MS || 120_000);
 const DEFAULT_IDLE_FLOOR = Number(process.env.CAPTCHA_POOL_IDLE_FLOOR || 1);

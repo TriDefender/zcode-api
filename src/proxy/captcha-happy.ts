@@ -2244,8 +2244,9 @@ function handleCaptchaResult(result) {
 
 // ── Window reuse pool ──────────────────────────────────────────────────────
 // Reusing one happy-dom window across solves cuts CPU ~48% (measured: 426ms vs
-// 815ms per solve) by amortizing the DOM boot + SDK script load. Enabled via
-// CAPTCHA_WINDOW_REUSE=1 (or solveTraceless({reuseWindow:true})). The window
+// 815ms per solve) by amortizing the DOM boot + SDK script load. On by
+// default; opt out with CAPTCHA_WINDOW_REUSE=0 (or per-call
+// solveTraceless({reuseWindow:false})). The window
 // is discarded after `maxSolves` (memory growth), after any stall/failure
 // (fresh InitCaptchaV3 rolls a new pe version), or after `maxIdleMs` idle.
 const _reusePool = { window: null, browserFrame: null, solves: 0, lastUsedAt: 0 };
@@ -2308,7 +2309,7 @@ async function solveTraceless(opts) {
   const prefix = opts.prefix || "no8xfe";
   const timeoutMs = opts.timeoutMs ?? 30_000;
 
-  const wantReuse = opts.reuseWindow ?? process.env.CAPTCHA_WINDOW_REUSE === "1";
+  const wantReuse = opts.reuseWindow ?? process.env.CAPTCHA_WINDOW_REUSE !== "0";
   let dom;
   let reused = false;
   if (wantReuse) {

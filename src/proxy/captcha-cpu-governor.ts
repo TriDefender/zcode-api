@@ -174,16 +174,16 @@ export function resolveCpuGovernorConfig(opts: {
   cpuLimitPercent?: number;
   cpuGovernorIntervalSec?: number;
 }): CpuGovernorConfig {
-  const poolSizeMin = opts.poolSizeMin ?? Number(process.env.CAPTCHA_POOL_MIN || 40);
+  const poolSizeMin = opts.poolSizeMin ?? Number(process.env.CAPTCHA_POOL_MIN || 15);
   const poolSizeMax = Math.max(
     poolSizeMin,
-    opts.poolSizeMax ?? Number(process.env.CAPTCHA_POOL_MAX || 120),
+    opts.poolSizeMax ?? Number(process.env.CAPTCHA_POOL_MAX || 60),
   );
   const maxSolveConcurrency =
     opts.solveConcurrency ??
     Number(
       process.env.CAPTCHA_SOLVE_CONCURRENCY ||
-        (process.env.ZCODE_CAPTCHA_LOW_CPU === "1" ? 3 : 6),
+        (process.env.ZCODE_CAPTCHA_LOW_CPU === "0" ? 6 : 3),
     );
 
   const cpuLimitPercent =

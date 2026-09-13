@@ -77,9 +77,14 @@ export async function startCaptchaPool(appVersion: string): Promise<void> {
   if (!cfg || !cfg.enabled) return;
   // Size the pool before prefill: the module-level pool defers sizing to the
   // first configure() so a cold boot doesn't mint a storm of soon-expired
-  // tokens. CAPTCHA_POOL_MIN/CAPTCHA_POOL_MAX env vars override the defaults.
-  const min = Number(process.env.CAPTCHA_POOL_MIN || 20);
-  const max = Number(process.env.CAPTCHA_POOL_MAX || Math.max(min * 6, 120));
+  // tokens. Defaults are sized for start-plan's 5-concurrent-request ceiling:
+  // worst case ~10 instantaneous takes (5 requests + challenge retries), with
+  // ~8-24 tokens circulating per 95s TTL — 15 covers that plus F008/expiry
+  // discards and bridges a pe-storm mint outage (~30-45s). Mint capacity
+  // (~4-6/s at concurrency 3) stays an order of magnitude above demand.
+  // CAPTCHA_POOL_MIN/CAPTCHA_POOL_MAX env vars override the defaults.
+  const min = Number(process.env.CAPTCHA_POOL_MIN || 15);
+  const max = Number(process.env.CAPTCHA_POOL_MAX || Math.max(min * 4, 60));
   configureCaptchaPool({ poolSizeMin: min, poolSizeMax: max });
   startCaptchaPoolRefill(cfg as CaptchaConfig);
   await prefillCaptchaPool(cfg as CaptchaConfig, min);
