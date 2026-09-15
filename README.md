@@ -37,7 +37,7 @@
 
 面板分三块：**登录与设置**（服务商 / 套餐 / 登录）、**代理服务**（启动停止 / 当前配置）、**日志**（每个请求一行，实时滚动）。按 <kbd>s</kbd> 启动代理，看到 `Status: running` 就绪了。
 
-> 用不惯键盘快捷键？面板上的按钮支持**鼠标点击**。想让它在后台静默运行？`bun run zcode-proxy --cli serve`。
+> 用不惯键盘快捷键？面板上的按钮支持**鼠标点击**。想让它在后台静默运行？`zcode-proxy.exe --cli serve`。
 
 ### 面板快捷键
 
@@ -136,7 +136,7 @@ App 与电脑版功能对应：一键启动代理、扫码级简单配置、实�
 <summary><b>Docker 部署</b></summary>
 
 ```bash
-# 在宿主机上用固定加密种子登录（容器内无法弹浏览器时，加 --paste 粘贴登录）
+# 在宿主机上用固定加密种子登录（zai 登录免本机回调，链接在任何设备打开即可；bigmodel 无浏览器时加 --paste 粘贴登录）
 ZCODE_PROXY_CREDENTIAL_SECRET="一串只有你知道的口令" \
   bun run src/index.ts auth login zai
 
@@ -216,7 +216,7 @@ services:
 环境变量换一个：`ZCODE_PROXY_PORT=8081 bun run src/index.ts`，或改 `config.yaml` 的 `server.port`。
 
 **工具一直连不上 / 401？**
-如果你设置过 `ZCODE_PROXY_API_KEY`，工具里必须填同一个值；不设置则免密。注意密钥开启后**所有路由**（包括 `/health`）都要带密钥。
+如果你设置过 `ZCODE_PROXY_API_KEY`，工具里必须填同一个值；不设置则免密。注意密钥开启后除 `/webui` 外**所有路由**（包括 `/health`）都要带密钥。
 
 **换电脑 / 重装系统后要重新登录吗？**
 要。凭据加密时绑定了本机信息。跨机器迁移可以两边都设 `ZCODE_PROXY_CREDENTIAL_SECRET` 为同一个值再登录/拷贝 `~/.zcode-proxy/credentials.json`。
@@ -235,7 +235,7 @@ bun x tsc --noEmit  # 类型检查
 bun run dev         # 开发模式启动面板
 ```
 
-架构与实现细节见 [`AGENTS.md`](AGENTS.md) 与各子目录的知识库文档。
+架构与实现细节见 [`src/`](src/) 下各源码文件内的注释。
 
 ## License
 
