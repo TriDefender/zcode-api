@@ -26,6 +26,10 @@ const ENV = {
   CLIENT_SIGNING_ENABLED: "ZCODE_CLIENT_SIGNING",
 } as const;
 
+/** Mirrors the ZCode desktop release (`_reverse/NOTEPAD.md`); bump per client
+ *  release or User-Agent/X-ZCode-App-Version become distinguishable. */
+export const DEFAULT_APP_VERSION = "3.12.3";
+
 const DEFAULTS = {
   PORT: 8080,
   HOST: "0.0.0.0",
@@ -37,7 +41,7 @@ const DEFAULTS = {
   ZAI_OPENAI_BASE: "https://api.z.ai/api/coding/paas/v4",
   BIGMODEL_ANTHROPIC_BASE: "https://open.bigmodel.cn/api/anthropic",
   BIGMODEL_OPENAI_BASE: "https://open.bigmodel.cn/api/coding/paas/v4",
-  APP_VERSION: "3.11.2",
+  APP_VERSION: DEFAULT_APP_VERSION,
   SOURCE_TITLE: "cli",
   REFERER_ORIGIN: "https://zcode.z.ai",
   CLIENT_IDENTITY_MODE: "observe" as const,

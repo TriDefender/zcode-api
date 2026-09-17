@@ -66,20 +66,21 @@ cd Android-APP
 ## OAuth flow
 
 1. App taps "Login with {provider}" → `ControlClient.startOAuth(provider)`.
-2. Node starts the OAuth flow and returns the authorize URL:
-   - **zai** — server-mediated CLI flow (`/oauth/cli/init` +
-     `/oauth/cli/poll/{flow_id}` at zcode.z.ai); no localhost callback.
-   - **bigmodel** — auth-code flow; Node also starts the localhost callback
-     server (port `ZCODE_OAUTH_CALLBACK_PORT`).
+2. Node starts the OAuth flow and returns the authorize URL. **Both
+   providers** use the server-mediated CLI poll flow (ZCode 3.12.3 parity):
+   `/oauth/cli/init` + `/oauth/cli/poll/{flow_id}` at zcode.z.ai; the
+   authorize URL carries the `/app/oauth/login` interstitial param. No
+   localhost callback is involved.
 3. App opens the URL with `CustomTabsIntent.launchUrl()` — the system browser
    handles login (OAuth providers block embedded WebViews).
-4. User authenticates in the browser:
-   - **zai**: Node polls the server until authorization completes.
-   - **bigmodel**: the provider redirects to
-     `http://127.0.0.1:<port>/oauth/callback/...`, which Node's callback
-     server receives directly (no Kotlin-side interception).
-5. Node exchanges the code / resolves the coding-plan API key and persists the
-   encrypted credential; the app reflects login state via `status`.
+4. User authenticates in the browser; after authorization the browser lands
+   on the interstitial (which records the code server-side) and then tries to
+   bounce to `zcode://`. That deep link only matters to the official desktop
+   app — the browser's "cannot open link" notice is expected and can be
+   ignored; the login has already completed server-side.
+5. Node's background poll flips to `ready`, resolves the coding-plan API key
+   and persists the encrypted credential; the app's 1.5s status polling
+   reflects the logged-in state automatically.
 
 ## Known limitations (v1)
 

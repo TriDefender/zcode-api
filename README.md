@@ -45,7 +45,7 @@
 |------|------|
 | <kbd>s</kbd> | 启动 / 停止代理 |
 | <kbd>l</kbd> | 登录当前服务商（打开浏览器授权） |
-| <kbd>L</kbd> | 无头服务器专用：把登录切换成"粘贴链接"模式 |
+| <kbd>L</kbd> | bigmodel 粘贴登录（回退模式；`l` 登录本身就免回调，无头可用） |
 | <kbd>o</kbd> | 退出登录 |
 | <kbd>p</kbd> / <kbd>t</kbd> | 切换服务商（Z.AI ↔ 智谱）/ 套餐（coding-plan ↔ start-plan） |
 | <kbd>↑</kbd><kbd>↓</kbd> / <kbd>PgUp</kbd> / <kbd>g</kbd> | 滚动日志 / 回到底部 |
@@ -136,7 +136,7 @@ App 与电脑版功能对应：一键启动代理、扫码级简单配置、实�
 <summary><b>Docker 部署</b></summary>
 
 ```bash
-# 在宿主机上用固定加密种子登录（zai 登录免本机回调，链接在任何设备打开即可；bigmodel 无浏览器时加 --paste 粘贴登录）
+# 在宿主机上用固定加密种子登录（两种服务商都免本机回调：链接在任何设备打开即可，登录自动完成）
 ZCODE_PROXY_CREDENTIAL_SECRET="一串只有你知道的口令" \
   bun run src/index.ts auth login zai
 
@@ -222,7 +222,7 @@ services:
 要。凭据加密时绑定了本机信息。跨机器迁移可以两边都设 `ZCODE_PROXY_CREDENTIAL_SECRET` 为同一个值再登录/拷贝 `~/.zcode-proxy/credentials.json`。
 
 **服务器上没有浏览器怎么登录？**
-用粘贴模式：`bun run src/index.ts auth login bigmodel --paste`，把打印出来的链接在任何设备的浏览器打开，再把跳转后的完整网址粘回来即可。
+直接登录即可：`bun run src/index.ts auth login zai`（或 bigmodel）。登录链接在任何设备的浏览器打开都行，授权后本机自动完成（无需回调页面）。若想手动交换，也有粘贴模式：`auth login bigmodel --paste`，把跳转后的完整网址粘回来即可。
 
 **它在后台到底做了什么？**
 它就是一个"翻译官 + 传话员"：把你的工具发出的标准请求翻译成官方客户端的同款请求转发上去，再把回复原样翻译回来。所有流量都只在你本机和官方服务器之间，不经过任何第三方。

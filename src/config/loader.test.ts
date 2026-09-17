@@ -377,7 +377,7 @@ models:
     const path = writeYaml(`
 `);
     const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("3.11.2");
+    expect(cfg.identity.appVersion).toBe("3.12.3");
     expect(cfg.identity.sourceTitle).toBe("cli");
     expect(cfg.identity.refererOrigin).toBe("https://zcode.z.ai");
   });
@@ -411,6 +411,6 @@ identity:
   appVersion: "v3.3.3-中文"
 `);
     const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("3.11.2");
+    expect(cfg.identity.appVersion).toBe("3.12.3");
   });
 });

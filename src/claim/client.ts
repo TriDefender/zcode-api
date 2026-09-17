@@ -1,43 +1,35 @@
 /**
  * HTTP client for ZCode's manual-claim billing endpoints (weekend plans).
  *
- * Mirrors the ZCode 3.10 desktop client's `getManualClaimPlanPreviews` /
- * `claimManualPlan`:
+ * Mirrors the ZCode 3.12.3 desktop client's `getManualClaimPlanPreviews` /
+ * `claimManualPlan` EXACTLY — the claim plane carries a minimal header set,
+ * NOT the identity bundle:
+ *
  *   - `GET  {origin}/api/v1/zcode-plan/billing/preview?app_version=&platform=`
+ *     headers: `Authorization: Bearer {jwt}` only (omitted entirely when
+ *     anonymous — no Content-Type, no Accept)
  *   - `POST {origin}/api/v1/zcode-plan/billing/claim`  body `{plan_id}`
+ *     headers (bundle order): Authorization, Content-Type,
+ *     X-Aliyun-Captcha-Verify-Param, [X-Aliyun-Captcha-Verify-Region],
+ *     X-ZCode-App-Version, X-Platform
  *
- * Claim headers: `Authorization: Bearer {jwt}` (OAuth), Aliyun captcha
- * verify param/region (same token source as the start-plan gateway),
- * `X-ZCode-App-Version` and `X-Platform` (part of server-side eligibility).
+ * NOTE: an earlier revision sent the full identity set with X-Device-Mid
+ * (empirically accepted during the 0828 campaign). The 3.12.3 client sends
+ * the minimal set above — we now mirror that verbatim.
  *
- * Since the 0828 weekend campaign the gateway REJECTS preview/claim with
- * biz 3001 "parameter error" unless the request carries a UUID-format
- * `X-Device-Mid` (empirically verified 2026-08-28: only that header is
- * validated; non-UUID values still 3001). Pass `identity` so both calls
- * carry the full identity set minus `X-ZCode-Agent` — same header set the
- * endpoint-routing config fetch uses for zcode.z.ai control-plane calls.
- *
- * @see _reverse/NOTEPAD.md (billing/claim endpoints section).
+ * @see _reverse/NOTEPAD.md "claim/billing 平面"
  */
 import type { ClaimablePlan, ClaimOutcome, PlanEntitlement } from "./types.js";
 import { classifyClaimCode } from "./types.js";
-import { buildIdentityHeaders } from "../proxy/identity.js";
-import type { ProxyIdentity } from "../config/types.js";
 
 export interface ClaimClientOptions {
   origin: string;
   /** OAuth JWT (`zcodejwttoken`); preview works without it, claim does not. */
   jwt?: string;
   appVersion: string;
-  /** `${process.platform}-${process.arch}` in the real client. */
+  /** `${process.platform}-{arch}` in the real client (`u3()`). */
   platform: string;
-  /**
-   * Identity block driving the zcode.z.ai control-plane header set
-   * (incl. the server-required `X-Device-Mid`). When omitted the client
-   * falls back to the minimal legacy set (version + platform headers only).
-   */
-  identity?: ProxyIdentity;
-  /** Per-call timeout in ms. Default `15000`. */
+  /** Per-call timeout in ms. Default `15000` (bundle `ss`). */
   timeoutMs?: number;
   /** DI seam for tests. Default `globalThis.fetch`. */
   fetchImpl?: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -89,13 +81,6 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
   const jwt = opts.jwt?.trim() || undefined;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
-  // Identity set minus X-ZCode-Agent (zcode.z.ai control-plane precedent —
-  // see endpoint-routing.ts); the no-identity fallback keeps the legacy shape.
-  const identityHeaders: Record<string, string> = opts.identity
-    ? Object.fromEntries(
-        Object.entries(buildIdentityHeaders(opts.identity)).filter(([name]) => name !== "X-ZCode-Agent"),
-      )
-    : { "X-ZCode-App-Version": opts.appVersion, "X-Platform": opts.platform };
 
   function parseEntitlement(c: RawEntitlement): PlanEntitlement | null {
     const entitlementId = c.entitlement_id?.trim() ?? "";
@@ -175,8 +160,9 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
   return {
     async getPreviews(signal?: AbortSignal): Promise<ClaimablePlan[]> {
       const url = `/api/v1/zcode-plan/billing/preview?app_version=${encodeURIComponent(opts.appVersion)}&platform=${encodeURIComponent(opts.platform)}`;
-      const headers: Record<string, string> = { ...identityHeaders };
-      if (jwt) headers.authorization = `Bearer ${jwt}`;
+      // Bundle: `Authorization: Bearer` only when a JWT exists; anonymous
+      // preview sends NO headers at all.
+      const headers: Record<string, string> = jwt ? { Authorization: `Bearer ${jwt}` } : {};
       const { status, json, text } = await request("GET", url, { headers, signal });
       if (status < 200 || status >= 300 || (json?.code !== undefined && json.code !== 0) || json?.data === undefined) {
         const { code, message } = unwrapError(json, status, text);
@@ -191,13 +177,16 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
 
     async claim(planId: string, captcha: { verifyParam: string; region?: string }, signal?: AbortSignal): Promise<ClaimOutcome> {
       if (!jwt) return { ok: false, planId, failureKind: "login_required", code: 401, message: "manual_claim_login_required" };
+      // Bundle `claimManualPlan` header order: Authorization, Content-Type,
+      // captcha param, [captcha region], X-ZCode-App-Version, X-Platform.
       const headers: Record<string, string> = {
-        ...identityHeaders,
-        authorization: `Bearer ${jwt}`,
-        "content-type": "application/json",
+        Authorization: `Bearer ${jwt}`,
+        "Content-Type": "application/json",
         "X-Aliyun-Captcha-Verify-Param": captcha.verifyParam,
       };
       if (captcha.region) headers["X-Aliyun-Captcha-Verify-Region"] = captcha.region;
+      headers["X-ZCode-App-Version"] = opts.appVersion;
+      headers["X-Platform"] = opts.platform;
       const { status, json, text } = await request("POST", "/api/v1/zcode-plan/billing/claim", { body: { plan_id: planId }, headers, signal });
 
       const data = json?.data as { plan?: RawPlan } | undefined;

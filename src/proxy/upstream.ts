@@ -102,8 +102,9 @@ export function buildUpstreamURL(format: Format, provider: ProviderDef, plan: "c
  * - Anthropic upstream, start-plan  → `Authorization: Bearer {jwt}` + `anthropic-version`
  * - OpenAI upstream (any plan)      → `Authorization: Bearer {cred|jwt}`
  *
- * Identity headers come from `buildLlmIdentityHeaders` (bundle `csn` shape);
- * the User-Agent carries the `ai-sdk/anthropic` SDK suffix (bundle `Cm`/`k0o`).
+ * Identity headers come from `buildLlmIdentityHeaders` (bundle 3.12.3 `g6n`
+ * shape); the User-Agent carries the `ai-sdk/anthropic` SDK suffix (bundle
+ * `Cm`/`k0o`).
  *
  * Trace/attribution headers mirror the bundle's `Bdt`
  * ("createModelRequestAttributionHeaders") when an explicit/enforced trace
@@ -119,10 +120,10 @@ export function buildAuthHeaders(
 ): Record<string, string> {
   const credStr = plan === "start-plan" && cred.jwt ? cred.jwt : credentialString(cred);
   const base: Record<string, string> = {
-    // LLM requests mirror the bundle's CLI source-headers builder (`csn` +
-    // x4i wrapper) — language/timezone always sent with "unknown" fallback,
-    // X-Release-Channel right after X-Title, X-ZCode-Agent LAST, no
-    // X-Device-Mid. Control-plane fetches use buildIdentityHeaders (`HRt`).
+    // LLM requests mirror the bundle's 3.12.3 source-headers builder (`g6n`,
+    // no wrapper) — language/timezone always sent with "unknown" fallback,
+    // X-ZCode-Agent inline 8th before the platform headers, no X-Device-Mid.
+    // Context/control-plane fetches use buildIdentityHeaders (`TV`).
     ...buildLlmIdentityHeaders(identity),
     ...buildTraceHeaders(plan, clientSession),
   };

@@ -16,7 +16,7 @@
  * Full protocol: `_reverse/NOTEPAD.md` "Client Request Signing V4".
  */
 import type { UpstreamHeaderPair } from "./upstream.js";
-import { buildIdentityHeaders, identityCacheKey } from "./identity.js";
+import { buildLlmIdentityHeaders, identityCacheKey } from "./identity.js";
 import type { ProxyIdentity } from "../config/types.js";
 
 const DEFAULT_ORIGIN = "https://zcode.z.ai";
@@ -447,12 +447,10 @@ export class ClientSigningManager {
   }
 
   private async fetchGate(cred: SigningCredential): Promise<"enabled" | "disabled" | "unavailable"> {
-    // sYr (bundle) builds the gate-fetch identity set WITHOUT X-ZCode-Agent and
-    // X-Device-Mid; Bxi appends x-api-key only — this fetch carries no Accept header.
-    const identityHeaders = Object.fromEntries(
-      Object.entries(buildIdentityHeaders(this.identity))
-        .filter(([name]) => name !== "X-ZCode-Agent" && name !== "X-Device-Mid"),
-    );
+    // 3.12.3: the gate fetch reuses `g6n` (the LLM source-header set, WITH
+    // X-ZCode-Agent inline and no X-Device-Mid) via `ESs`; the request adds
+    // only `x-api-key` — no Accept header.
+    const identityHeaders = buildLlmIdentityHeaders(this.identity);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), GATE_TIMEOUT_MS);
     try {

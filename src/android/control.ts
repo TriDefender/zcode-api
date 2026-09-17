@@ -20,7 +20,7 @@ import type { ProviderId } from "../provider/types.js";
 import type { Credential } from "../auth/types.js";
 import {
   ZaiOAuthClient,
-  BigmodelOAuthClient,
+  BigmodelPollOAuthClient,
   AuthCodeOAuthClient,
   type OAuthFlowClient,
 } from "../auth/oauth.js";
@@ -182,6 +182,8 @@ export interface HandlerContext {
   onSetConfig?: (changes: { provider?: ProviderId; plan?: PlanTier }) => Promise<ConfigUpdateResult>;
   onShutdown?: () => Promise<void> | void;
   logBuffer: LogBuffer;
+  /** Overrides login-client construction (tests inject offline clients). */
+  createLoginClient?: (provider: ProviderId) => OAuthFlowClient;
 }
 
 export function handleControlRequestForTest(
@@ -256,10 +258,13 @@ async function dispatch(
         await state.activeOauth.client.close().catch(() => {});
         state.activeOauth = undefined;
       }
-      // Z.AI uses the server-mediated cli login (no local callback); bigmodel
-      // keeps the classic localhost auth-code callback server.
-      const client: OAuthFlowClient =
-        cmd.provider === "bigmodel" ? new BigmodelOAuthClient() : new ZaiOAuthClient();
+      // Both providers use the server-mediated poll login (ZCode 3.12.3
+      // default) — no local callback; the flow completes server-side.
+      const client: OAuthFlowClient = ctx.createLoginClient
+        ? ctx.createLoginClient(cmd.provider)
+        : cmd.provider === "bigmodel"
+          ? new BigmodelPollOAuthClient()
+          : new ZaiOAuthClient();
       const started = await client.start();
       const callbackPort = started.callbackUrl
         ? Number(new URL(started.callbackUrl).port) || 80

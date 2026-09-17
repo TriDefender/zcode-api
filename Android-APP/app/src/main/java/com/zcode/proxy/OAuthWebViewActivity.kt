@@ -59,6 +59,22 @@ class OAuthWebViewActivity : Activity() {
         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
             val urlStr = request?.url?.toString() ?: return false
             val uri = Uri.parse(urlStr)
+
+            // The /app/oauth/login interstitial lands with authCode and then
+            // bounces to zcode://oauth/callback. The server already recorded
+            // the code when the page loaded, so the deep-link target is
+            // irrelevant here: show success and let the background poll from
+            // startOAuth finish persisting the credential.
+            if (uri.scheme == "zcode") {
+                view?.loadDataWithBaseURL(
+                    null,
+                    "<html><body><h2>Authorization received</h2><p>Returning to app…</p></body></html>",
+                    "text/html", "UTF-8", null,
+                )
+                onDone(true)
+                return true
+            }
+
             val host = uri.host ?: return false
             if (host != "127.0.0.1" && host != "localhost") return false
 

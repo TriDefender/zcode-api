@@ -18,7 +18,7 @@ import { AuthManager } from "../auth/manager.js";
 import { startServer, type ProxyServer } from "../server/server.js";
 import { buildServerOptions } from "../server/server-options.js";
 import { loadCredential, saveCredential, clearCredential } from "../auth/store.js";
-import { ZaiOAuthClient, BigmodelOAuthClient, LOGIN_TIMEOUT_MS, parsePastedCallbackUrl, type OAuthFlowClient, type OAuthFlowStart, type OAuthFlowTokens } from "../auth/oauth.js";
+import { ZaiOAuthClient, BigmodelOAuthClient, BigmodelPollOAuthClient, LOGIN_TIMEOUT_MS, parsePastedCallbackUrl, type OAuthFlowClient, type OAuthFlowStart, type OAuthFlowTokens } from "../auth/oauth.js";
 import { KeyResolver } from "../auth/resolver.js";
 import { openBrowser } from "../runtime/open-browser.js";
 import { pasteLoginInstructions, readPastedLine, boldIfTTY } from "../runtime/paste-login.js";
@@ -340,8 +340,6 @@ export async function runTui(args: ServeArgs): Promise<void> {
 
   // --- login / logout (mirrors the control-listener startOAuth/logout) -----
   let activeOauth: { client: OAuthFlowClient; provider: ProviderId } | null = null;
-  /** Set while a bigmodel login waits on the browser callback; `L` invokes it to switch to paste mode. */
-  let pasteSwitchBigmodel: (() => void) | null = null;
 
   async function startLogin(opts: { paste?: boolean } = {}): Promise<void> {
     if (state.loginInFlight) {
@@ -350,11 +348,11 @@ export async function runTui(args: ServeArgs): Promise<void> {
     }
     const provider = state.provider;
     if (opts.paste && provider !== "bigmodel") {
-      setToast("paste login is bigmodel-only — zai login already works headless (press l)", "info");
+      setToast("paste login is bigmodel-only — poll login already works headless (press l)", "info");
       return;
     }
 
-    if (provider === "bigmodel") {
+    if (provider === "bigmodel" && opts.paste) {
       const client = new BigmodelOAuthClient();
       let started: Awaited<ReturnType<BigmodelOAuthClient["start"]>>;
       try {
@@ -369,23 +367,15 @@ export async function runTui(args: ServeArgs): Promise<void> {
       console.log(`OAuth: opening ${started.authorizeUrl}`);
       console.log("If the browser did not open, copy the URL above into a browser.");
       openBrowser(started.authorizeUrl);
-      if (opts.paste) {
-        state.loginHint = "paste the callback URL in the terminal…";
-        scheduleRender();
-        settleLogin(runPasteLoginInTui(client, started), client, provider);
-      } else {
-        console.log(
-          "▸ HEADLESS (Docker/VPS)? The callback page will NOT load here — " +
-          "PRESS L to paste the redirected URL instead.",
-        );
-        state.loginHint = "waiting for callback · HEADLESS? PRESS L to paste URL";
-        scheduleRender();
-        settleLogin(waitForCallbackOrPaste(client, started), client, provider);
-      }
+      state.loginHint = "paste the callback URL in the terminal…";
+      scheduleRender();
+      settleLogin(runPasteLoginInTui(client, started), client, provider);
       return;
     }
 
-    const client: OAuthFlowClient = new ZaiOAuthClient();
+    // Both providers: server-mediated poll login (ZCode 3.12.3 default) — no
+    // local callback, works headless with the URL opened on any device.
+    const client: OAuthFlowClient = provider === "bigmodel" ? new BigmodelPollOAuthClient() : new ZaiOAuthClient();
     let started: Awaited<ReturnType<OAuthFlowClient["start"]>>;
     try {
       started = await client.start();
@@ -398,53 +388,24 @@ export async function runTui(args: ServeArgs): Promise<void> {
     state.loginInFlight = true;
     state.loginHint = "waiting for browser authorization…";
     console.log(`OAuth: opening ${started.authorizeUrl}`);
-    console.log("If the browser did not open, copy the URL above into a browser.");
+    console.log("If the browser did not open, copy the URL above into a browser (any device works).");
+    console.log(
+      "After you authorize, the browser may report it cannot open a zcode:// link — that's expected; login completes here automatically.",
+    );
     openBrowser(started.authorizeUrl);
     scheduleRender();
 
     settleLogin(client.complete(started), client, provider);
   }
 
-  /** Sentinel the `L` key resolves to switch a pending login over to paste mode. */
-  const PASTE_MODE = Symbol("paste-mode");
-
-  /**
-   * Wait for the browser callback — but let `L` switch a pending login to
-   * paste mode (a headless machine never receives the callback). Exactly one
-   * branch wins; the loser's eventual timeout rejection is swallowed by the
-   * race, and the client is closed exactly once in settleLogin.
-   */
-  async function waitForCallbackOrPaste(
-    client: BigmodelOAuthClient,
-    started: OAuthFlowStart,
-  ): Promise<OAuthFlowTokens> {
-    let requestPaste: () => void = () => {};
-    const pasteRequested = new Promise<typeof PASTE_MODE>((resolve) => {
-      requestPaste = () => resolve(PASTE_MODE);
-    });
-    pasteSwitchBigmodel = () => {
-      state.loginHint = "paste the callback URL in the terminal…";
-      scheduleRender();
-      requestPaste();
-    };
-    try {
-      const winner = await Promise.race([client.waitForCallback(), pasteRequested]);
-      if (winner === PASTE_MODE) return await runPasteLoginInTui(client, started);
-      return await client.exchangeCode(winner, started.callbackUrl, started.state);
-    } finally {
-      pasteSwitchBigmodel = null;
-    }
-  }
-
-  /** `L` key: switch a pending bigmodel login to paste mode (or start one). */
+  /** `L` key: start a classic paste login (bigmodel fallback for the poll flow). */
   function requestPasteLogin(): void {
     if (state.provider !== "bigmodel") {
-      setToast("paste login is bigmodel-only — zai login already works headless", "info");
+      setToast("paste login is bigmodel-only — poll login already works headless", "info");
       return;
     }
     if (state.loginInFlight) {
-      if (pasteSwitchBigmodel) pasteSwitchBigmodel();
-      else setToast("already pasting — finish in the terminal", "info");
+      setToast("login in progress — poll login already works headless; wait for it to finish", "info");
       return;
     }
     void startLogin({ paste: true });

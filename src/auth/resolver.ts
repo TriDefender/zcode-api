@@ -145,12 +145,15 @@ export class KeyResolver {
 
       const { orgId, projectId } = await this.resolveCustomerInfo(host, authorization);
       const { apiKey } = await this.findOrCreateApiKey(host, authorization, orgId, projectId);
-      let secret: string | undefined;
-      try {
-        secret = await this.getSecretKey(host, authorization, orgId, projectId, apiKey);
-      } catch { /* credential will be apiKey-only */ }
+      // Bundle `dJr` runs with requireSecretKey=true for zai: a missing
+      // secretKey fails the login instead of storing a credential that can
+      // never sign (3.12.3: "API key copy response is missing secretKey.").
+      const secret = await this.getSecretKey(host, authorization, orgId, projectId, apiKey);
+      if (!secret) {
+        throw new Error("zai API key copy response is missing secretKey");
+      }
 
-      return { apiKey, secret: secret || undefined, provider: "zai", userId };
+      return { apiKey, secret, provider: "zai", userId };
     }
 
     const host = "https://bigmodel.cn";

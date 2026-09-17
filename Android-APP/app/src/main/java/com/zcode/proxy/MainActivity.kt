@@ -284,6 +284,7 @@ private fun AppScreen(themeMode: ThemeMode, onThemeModeChange: (ThemeMode) -> Un
             val r = MainActivity.controlClient?.startOAuth(provider)
             if (r != null && r.optBoolean("ok", false)) {
                 openInBrowser(context, r.optString("authorizeUrl"))
+                toast = "在浏览器完成授权后回到本应用即可；若浏览器提示无法打开 zcode:// 链接，可忽略"
             } else {
                 toast = "登录失败: ${r?.optString("error") ?: "Node 未响应"}"
             }

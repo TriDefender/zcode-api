@@ -1,15 +1,21 @@
 /**
  * Tests for the OAuth login flows.
  *
- * Z.AI uses the server-mediated CLI login (init + poll at zcode.z.ai, 3.10
- * desktop parity — no local callback). Bigmodel keeps the classic auth-code
- * flow (localhost callback + token exchange). All upstream calls are mocked
- * via `fetchImpl` injection.
+ * Both providers use the server-mediated CLI login (init + poll at
+ * zcode.z.ai, 3.12.3 desktop parity — no local callback; the authorize URL
+ * carries the `/app/oauth/login` interstitial param). Bigmodel additionally
+ * keeps the classic auth-code flow for the headless `--paste` login. All
+ * upstream calls are mocked via `fetchImpl` injection.
  *
- * @see _reverse/NOTEPAD.md "Method 1: OAuth Flow"
+ * @see _reverse/NOTEPAD.md "4. OAuth 流程"
  */
 import { describe, it, expect } from "bun:test";
-import { ZaiOAuthClient, BigmodelOAuthClient, parsePastedCallbackUrl } from "./oauth.js";
+import {
+  ZaiOAuthClient,
+  BigmodelPollOAuthClient,
+  BigmodelOAuthClient,
+  parsePastedCallbackUrl,
+} from "./oauth.js";
 
 /** Wrap data in the zcode.z.ai `{code, data, msg}` envelope as a JSON Response. */
 function envelopeResponse(data: Record<string, unknown>, status = 200): Response {
@@ -155,6 +161,143 @@ describe("ZaiOAuthClient (server-mediated cli login)", () => {
     const client = new ZaiOAuthClient(impl, async () => {});
     const started = await client.start();
     expect(client.complete(started)).rejects.toThrow(/data\.zai\.access_token/);
+  });
+
+  it("start() overrides redirect_uri with the /app/oauth/login interstitial (3.12.3 `Ed`)", async () => {
+    const { impl } = scriptedFetch([
+      () => envelopeResponse(initData()),
+    ]);
+    const client = new ZaiOAuthClient(impl, async () => {});
+    const started = await client.start();
+    try {
+      const url = new URL(started.authorizeUrl);
+      const interstitial = url.searchParams.get("redirect_uri") ?? "";
+      expect(interstitial).toStartWith("https://zcode.z.ai/app/oauth/login?");
+      const inner = new URL(interstitial);
+      expect(inner.searchParams.get("redirect")).toBe("zcode://oauth/callback");
+      expect(inner.searchParams.get("app_version")).toBe("3.12.3");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("poll retries on 5xx / network errors / malformed 200s, then succeeds (3.12.3 semantics)", async () => {
+    const handlers: Array<(call: RecordedCall, n: number) => Response> = [
+      () => envelopeResponse(initData({ poll_interval_sec: 1 })),
+      () => new Response("bad gateway", { status: 502 }),
+      () => {
+        throw new Error("network down");
+      },
+      () => new Response("not json", { status: 200 }),
+      () =>
+        envelopeResponse({
+          status: "ready",
+          token: "jwt_final",
+          user: { user_id: "user_9" },
+          zai: { access_token: "zai_at" },
+        }),
+    ];
+    const { impl, calls } = scriptedFetch(handlers);
+    const client = new ZaiOAuthClient(impl, async () => {});
+    const result = await client.authorize();
+    expect(result.accessToken).toBe("zai_at");
+    expect(calls.length).toBe(5);
+  });
+
+  it("poll treats 4xx (except 408/429) as fatal", async () => {
+    const { impl, calls } = scriptedFetch([
+      () => envelopeResponse(initData()),
+      () => new Response(JSON.stringify({ code: 0 }), { status: 404 }),
+    ]);
+    const client = new ZaiOAuthClient(impl, async () => {});
+    const started = await client.start();
+    await expect(client.complete(started)).rejects.toThrow(/status=404/);
+    expect(calls.length).toBe(2);
+  });
+
+  it("poll retries on 429 and 408", async () => {
+    const { impl, calls } = scriptedFetch([
+      () => envelopeResponse(initData({ poll_interval_sec: 1 })),
+      () => new Response("rate", { status: 429 }),
+      () => new Response("timeout", { status: 408 }),
+      () => envelopeResponse({ status: "ready", token: "j", user: { user_id: "u" }, zai: { access_token: "at" } }),
+    ]);
+    const client = new ZaiOAuthClient(impl, async () => {});
+    const result = await client.authorize();
+    expect(result.accessToken).toBe("at");
+    expect(calls.length).toBe(4);
+  });
+
+  it("poll treats envelope code != 0 as fatal", async () => {
+    const { impl } = scriptedFetch([
+      () => envelopeResponse(initData()),
+      () => new Response(JSON.stringify({ code: 3002, msg: "flow_gone" }), { status: 200 }),
+    ]);
+    const client = new ZaiOAuthClient(impl, async () => {});
+    const started = await client.start();
+    await expect(client.complete(started)).rejects.toThrow(/code=3002/);
+  });
+});
+
+describe("BigmodelPollOAuthClient (server-mediated cli login)", () => {
+  it("start() inits with provider bigmodel and appends the interstitial as `redirect`", async () => {
+    const { impl, calls } = scriptedFetch([
+      () =>
+        envelopeResponse(
+          initData({ authorize_url: "https://bigmodel.cn/login?appId=zcode&state=s" }),
+        ),
+    ]);
+    const client = new BigmodelPollOAuthClient(impl, async () => {});
+    const started = await client.start();
+    try {
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ provider: "bigmodel" });
+
+      const url = new URL(started.authorizeUrl);
+      expect(url.origin + url.pathname).toBe("https://bigmodel.cn/login");
+      const interstitial = url.searchParams.get("redirect") ?? "";
+      expect(interstitial).toStartWith("https://zcode.z.ai/app/oauth/login?");
+      expect(new URL(interstitial).searchParams.get("app_version")).toBe("3.12.3");
+      expect(url.searchParams.get("redirect_uri")).toBeNull();
+      expect(started.callbackUrl).toBe("");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("authorize() maps data.bigmodel.access_token on ready", async () => {
+    const { impl } = scriptedFetch([
+      () =>
+        envelopeResponse(
+          initData({ authorize_url: "https://bigmodel.cn/login?appId=zcode&state=s" }),
+        ),
+      () => envelopeResponse({ status: "pending" }),
+      () =>
+        envelopeResponse({
+          status: "ready",
+          token: "jwt_bm",
+          user: { user_id: "bm_user" },
+          bigmodel: { access_token: "bm_at", refresh_token: "bm_rt" },
+        }),
+    ]);
+    const client = new BigmodelPollOAuthClient(impl, async () => {});
+    const result = await client.authorize();
+    expect(result.provider).toBe("bigmodel");
+    expect(result.accessToken).toBe("bm_at");
+    expect(result.jwt).toBe("jwt_bm");
+    expect(result.userId).toBe("bm_user");
+  });
+
+  it("ready response without bigmodel.access_token rejects", async () => {
+    const { impl } = scriptedFetch([
+      () =>
+        envelopeResponse(
+          initData({ authorize_url: "https://bigmodel.cn/login?appId=zcode&state=s" }),
+        ),
+      () => envelopeResponse({ status: "ready", token: "j", user: { user_id: "u" }, zai: { access_token: "wrong" } }),
+    ]);
+    const client = new BigmodelPollOAuthClient(impl, async () => {});
+    const started = await client.start();
+    await expect(client.complete(started)).rejects.toThrow(/data\.bigmodel\.access_token/);
   });
 });
 

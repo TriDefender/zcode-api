@@ -3,28 +3,31 @@
  * headers so the proxy is indistinguishable from the official client at the
  * fingerprinting layer.
  *
- * TWO distinct bundle functions are mirrored (ZCode 3.11.2, `_reverse/zcode.cjs`):
+ * TWO distinct bundle functions are mirrored (ZCode 3.12.3, `_reverse/NOTEPAD.md`):
  *
- *   1. `csn` = buildCliZCodeSourceHeaders (CLI LLM path, wrapped by `x4i`
- *      which appends `X-ZCode-Agent: "glm"` as the LAST header) — used for
- *      every LLM completion request → {@link buildLlmIdentityHeaders}.
- *      Shape: HTTP-Referer, User-Agent, [X-ZCode-App-Version], X-Title,
- *      X-Release-Channel (always), X-Client-Language (always, "unknown"
+ *   1. `g6n` = buildCliZCodeSourceHeaders — the single 3.12.3 source for the
+ *      LLM completion defaultHeaders AND the coding-plan-signature gate /
+ *      feature-gate fetches (`ESs`). Used for every LLM completion request →
+ *      {@link buildLlmIdentityHeaders} and the gate header set in
+ *      client-signing.ts. Shape: HTTP-Referer, User-Agent, [X-ZCode-App-Version],
+ *      X-Title, X-Release-Channel, X-Client-Language (always, "unknown"
  *      fallback), X-Client-Timezone (always, "unknown" fallback),
- *      [X-Platform], X-Os-Category (when platform resolves), [X-Os-Version],
- *      X-ZCode-Agent ("glm", last). NO X-Device-Mid — the CLI LLM path never
- *      carried it.
+ *      X-ZCode-Agent ("glm", 8th — inline since 3.12.3 dropped the 3.11 `x4i`
+ *      wrapper that appended it last), [X-Platform], X-Os-Category (always —
+ *      `CSs` bypasses the printable gate), [X-Os-Version]. NO X-Device-Mid.
  *
- *   2. `HRt` = buildZCodeSourceHeadersFromContext (host-side control-plane
- *      fetches: endpoint-routing configs, signing gate, claim/billing) —
- *      used by {@link buildIdentityHeaders}. Shape keeps the historical
- *      `pio`-derived order with conditional language/timezone and the
- *      optional X-Device-Mid (server-required on the claim/billing plane
- *      since the 0828 campaign). Consumers: endpoint-routing.ts,
- *      client-signing.ts, claim/client.ts, routes-quota.ts, async bridge.
+ *   2. `TV` = buildZCodeSourceHeadersFromContext (host chunk-ZH56ETHO) — the
+ *      endpoint-routing `sourceHeaders` (built by `V6n` from
+ *      `~/.zcode/v2/telemetry-state.json`'s deviceMid on the real client) —
+ *      used by {@link buildIdentityHeaders}. 3.12.3 dropped X-ZCode-Agent
+ *      entirely on this plane and made language/timezone always-present with
+ *      the "unknown" fallback. Order: HTTP-Referer, User-Agent,
+ *      [X-ZCode-App-Version], X-Title, [X-Platform], [X-Release-Channel],
+ *      X-Client-Language, X-Client-Timezone, [X-Os-Category], [X-Os-Version],
+ *      [X-Device-Mid].
  *
- * Both gate header values through the bundle's `fio` printable-ASCII rule;
- * `n = fio(...)` validates appVersion and, when it fails, drops
+ * Both gate header values through the bundle's printable-ASCII rule (`tq`/
+ * `Oe`); `n = fio(...)` validates appVersion and, when it fails, drops
  * X-ZCode-App-Version entirely and falls the User-Agent back to
  * `ZCode/unknown`.
  *
@@ -36,7 +39,7 @@
  *   - ZCODE_IDENTITY_CLIENT_TIMEZONE   (default: Intl timezone, e.g. "Asia/Shanghai")
  *   - ZCODE_IDENTITY_DEVICE_MID        (no default; omitted unless set)
  *
- * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
+ * @see _reverse/NOTEPAD.md "2. Identity Headers"
  */
 import os from "node:os";
 import { basename } from "node:path";
@@ -128,13 +131,12 @@ function resolveIdentityValues(id: ProxyIdentity): ResolvedIdentityValues {
 }
 
 /**
- * Identity headers for LLM completion requests — mirrors the bundle's CLI
- * source-headers builder `csn` (buildCliZCodeSourceHeaders) + the `x4i`
- * wrapper that appends `X-ZCode-Agent: "glm"` LAST. Differences vs the
- * control-plane set (buildIdentityHeaders): language/timezone are ALWAYS
- * emitted (falling back to "unknown"), X-Release-Channel sits right after
- * X-Title, X-ZCode-Agent is the final header, and X-Device-Mid is NEVER sent.
- * Pure function.
+ * Identity headers for LLM completion requests and the 3.12.3 feature-gate /
+ * client-signing gate fetches — mirrors the bundle's `g6n`
+ * (buildCliZCodeSourceHeaders; the `x4i` append-last wrapper is gone in
+ * 3.12.3). X-ZCode-Agent sits 8th (after timezone, before platform),
+ * X-Os-Category is unconditional (`CSs` maps the raw platform), and
+ * X-Device-Mid is NEVER sent. Pure function.
  */
 export function buildLlmIdentityHeaders(id: ProxyIdentity): Record<string, string> {
   const v = resolveIdentityValues(id);
@@ -146,23 +148,24 @@ export function buildLlmIdentityHeaders(id: ProxyIdentity): Record<string, strin
     "X-Release-Channel": v.releaseChannel,
     "X-Client-Language": v.clientLanguage ?? "unknown",
     "X-Client-Timezone": v.clientTimezone ?? "unknown",
-    ...(v.platform && v.arch ? { "X-Platform": `${v.platform}-${v.arch}` } : {}),
-    ...(v.platform ? { "X-Os-Category": normalizeOsCategory(v.platformForCategory) } : {}),
-    ...(v.release ? { "X-Os-Version": v.release } : {}),
     "X-ZCode-Agent": "glm",
+    ...(v.platform && v.arch ? { "X-Platform": `${v.platform}-${v.arch}` } : {}),
+    "X-Os-Category": normalizeOsCategory(v.platformForCategory),
+    ...(v.release ? { "X-Os-Version": v.release } : {}),
   };
 }
 
 /**
- * Control-plane identity headers — mirrors the host-side bundle builder
- * `HRt` (buildZCodeSourceHeadersFromContext), reached us via the historical
- * `pio` shape. Used by endpoint-routing, client-signing gate, claim/billing
- * and the async bridge — NOT for LLM completion requests (use
- * {@link buildLlmIdentityHeaders} there).
+ * Context-shaped identity headers — mirrors the 3.12.3 host builder `TV`
+ * (buildZCodeSourceHeadersFromContext), reached via the endpoint-routing
+ * source-headers factory (`V6n`). 3.12.3 changes vs 3.11: X-ZCode-Agent is
+ * GONE from this plane, and language/timezone are always present with the
+ * "unknown" fallback. Consumers: endpoint-routing.ts (source headers),
+ * claim/client.ts, routes-quota.ts, async bridge.
  *
- * Order (with X-ZCode-Agent kept between X-Title and X-Platform):
- *   HTTP-Referer, User-Agent, [X-ZCode-App-Version], X-Title, X-ZCode-Agent,
- *   [X-Platform], [X-Release-Channel], [X-Client-Language], [X-Client-Timezone],
+ * Order (bundle `TV`):
+ *   HTTP-Referer, User-Agent, [X-ZCode-App-Version], X-Title, [X-Platform],
+ *   [X-Release-Channel], X-Client-Language, X-Client-Timezone,
  *   [X-Os-Category], [X-Os-Version], [X-Device-Mid]
  *
  * Returns `Record<string, string>` rather than a fixed interface because
@@ -175,11 +178,10 @@ export function buildIdentityHeaders(id: ProxyIdentity): Record<string, string> 
     "User-Agent": `ZCode/${v.n ?? "unknown"}`,
     ...(v.n ? { "X-ZCode-App-Version": v.n } : {}),
     "X-Title": `Z Code@${id.sourceTitle}`,
-    "X-ZCode-Agent": "glm",
     ...(v.platform && v.arch ? { "X-Platform": `${v.platform}-${v.arch}` } : {}),
     ...(v.releaseChannel ? { "X-Release-Channel": v.releaseChannel } : {}),
-    ...(v.clientLanguage ? { "X-Client-Language": v.clientLanguage } : {}),
-    ...(v.clientTimezone ? { "X-Client-Timezone": v.clientTimezone } : {}),
+    "X-Client-Language": v.clientLanguage ?? "unknown",
+    "X-Client-Timezone": v.clientTimezone ?? "unknown",
     ...(v.platform ? { "X-Os-Category": normalizeOsCategory(v.platformForCategory) } : {}),
     ...(v.release ? { "X-Os-Version": v.release } : {}),
     ...(v.deviceMid ? { "X-Device-Mid": v.deviceMid } : {}),

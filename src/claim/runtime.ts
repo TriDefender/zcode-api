@@ -34,7 +34,6 @@ export function startAutoClaim(config: ProxyConfig, auth: AuthManager): ClaimSch
         jwt,
         appVersion: config.identity.appVersion,
         platform: claimPlatform(),
-        identity: config.identity,
       }),
     getCaptcha: async () => {
       const { verifyParam, region } = await getCaptchaToken(config.identity.appVersion);
@@ -77,7 +76,6 @@ export async function runClaimCli(config: ProxyConfig, mode: "list" | "now"): Pr
     jwt,
     appVersion: config.identity.appVersion,
     platform: claimPlatform(),
-    identity: config.identity,
   });
 
   let plans: ClaimablePlan[];

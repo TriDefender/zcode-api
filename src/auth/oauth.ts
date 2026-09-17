@@ -1,26 +1,30 @@
 /**
  * OAuth flow handlers for Z.AI and Bigmodel.
  *
- * The two providers use **different flows** (verified against the ZCode 3.10
- * desktop bundle `loginZCodeCli` / `loginBigmodelCodingPlan`, and live-probed
- * 2026-08-29):
+ * Verified against the ZCode 3.12.3 desktop bundle (`_reverse/NOTEPAD.md`
+ * "OAuth 流程"; previous live-probe of the 3.10 flow):
  *
- * - Z.AI: **server-mediated CLI login**. The client POSTs `{provider:"zai"}` to
- *   `zcode.z.ai/api/v1/oauth/cli/init` and gets back a server-generated
- *   authorize URL whose redirect_uri is zcode.z.ai's OWN callback
- *   (`/api/v1/oauth/cli/callback/zai`) — NOT localhost. After the user
- *   authorizes in the browser, the client polls `/oauth/cli/poll/{flow_id}`
- *   until the server reports `ready` with the tokens. No local callback server
- *   exists for Z.AI. Building the old 3.1.x-style direct chat.z.ai authorize
- *   URL with a localhost redirect_uri is rejected upstream with
- *   `{"detail":"Redirect URI not registered for this client"}`.
- * - Bigmodel: **classic auth-code flow** — local callback server on 127.0.0.1,
- *   authorize at `bigmodel.cn/login?appId&redirect&state`, then exchange the
- *   returned code at the shared zcode.z.ai token endpoint.
+ * - Both providers default to the **server-mediated CLI login** (bundle
+ *   `startOAuthWithPolling`): POST `{provider}` to
+ *   `zcode.z.ai/api/v1/oauth/cli/init`, open the returned `authorize_url`
+ *   (with the client-appended `/app/oauth/login` interstitial param —
+ *   `redirect_uri` for zai, `redirect` for bigmodel), then poll
+ *   `/oauth/cli/poll/{flow_id}` until the server reports `ready` with the
+ *   tokens. No local callback server exists on this path. Building a direct
+ *   chat.z.ai/bigmodel authorize URL with a localhost redirect_uri is
+ *   rejected upstream (`Redirect URI not registered for this client`).
+ * - Poll error semantics mirror the bundle: 4xx (except 408/429), envelope
+ *   `code !== 0`, or an unknown status are fatal; 5xx / network errors /
+ *   malformed 200 bodies are retried as if `pending`.
+ * - Bigmodel keeps a **classic auth-code flow** (`BigmodelOAuthClient`) for
+ *   the headless `--paste` login only — the desktop no longer uses it as the
+ *   primary path but the protocol (authorize at `bigmodel.cn/login`, exchange
+ *   at the shared zcode.z.ai token endpoint) is unchanged.
  *
- * @see _reverse/NOTEPAD.md "Method 1: OAuth Flow"
+ * @see _reverse/NOTEPAD.md "4. OAuth 流程"
  */
 import type { ProviderId } from "../provider/types.js";
+import { DEFAULT_APP_VERSION } from "../config/loader.js";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
 
@@ -29,7 +33,8 @@ import { randomBytes } from "node:crypto";
 // ---------------------------------------------------------------------------
 
 /** zcode.z.ai API base (bundle `A3o`; cli-login + token endpoints hang off it). */
-const ZCODE_API_BASE = "https://zcode.z.ai/api/v1";
+const ZCODE_API_BASE_ORIGIN = "https://zcode.z.ai";
+const ZCODE_API_BASE = `${ZCODE_API_BASE_ORIGIN}/api/v1`;
 /** Shared token-exchange endpoint (bigmodel auth-code flow). Bundle: `tokenUrl`. */
 const ZCODE_TOKEN_ENDPOINT = `${ZCODE_API_BASE}/oauth/token`;
 /** Default Bigmodel authorize host (bundle `BIGMODEL_OAUTH_AUTHORIZE_URL`). */
@@ -58,9 +63,9 @@ export type FetchFn = typeof fetch;
 /** Flow handle returned by `start()`. */
 export interface OAuthFlowStart {
   authorizeUrl: string;
-  /** Local callback URL when the flow uses one (bigmodel); `""` otherwise (zai cli flow). */
+  /** Local callback URL when the flow uses one (bigmodel paste login); `""` otherwise (cli poll flow). */
   callbackUrl: string;
-  /** CSRF state (auth-code) / server flow_id (zai cli flow) — opaque bookkeeping. */
+  /** CSRF state (auth-code) / server flow_id (cli poll flow) — opaque bookkeeping. */
   state: string;
 }
 
@@ -138,11 +143,11 @@ async function requestZcodeEnvelope(
 }
 
 // ---------------------------------------------------------------------------
-// Z.AI — server-mediated CLI login (init + poll, no local callback)
+// Server-mediated CLI login (init + poll, no local callback) — both providers
 // ---------------------------------------------------------------------------
 
-/** `data` of a successful `/oauth/cli/init` call (bundle `D3o`). */
-interface ZaiCliInitData {
+/** `data` of a successful `/oauth/cli/init` call (bundle `startOAuthWithPolling`). */
+interface CliInitData {
   flow_id: string;
   /** Server-issued poll token; informational — poll re-sends the client Bearer. */
   poll_token: string;
@@ -152,38 +157,57 @@ interface ZaiCliInitData {
   poll_interval_sec: number;
 }
 
-/** `data` of a `/oauth/cli/poll/{flow_id}` call: pending/failed, or ready (bundle `N3o`/`L3o`). */
-interface ZaiCliPollData {
+/** `data` of a `/oauth/cli/poll/{flow_id}` call: pending/failed, or ready. */
+interface CliPollData {
   status: string;
   token?: string;
   user?: { user_id?: unknown };
   zai?: { access_token?: unknown };
+  bigmodel?: { access_token?: unknown };
 }
 
 /**
- * Z.AI login client, mirroring ZCode 3.10 `loginZCodeCli`:
+ * The interstitial the 3.12.3 client appends to the server-provided
+ * authorize_url (bundle `Ed` = buildDesktopOAuthRedirectUriFromEnv): a
+ * zcode.z.ai page that records the authorization server-side (so the poll
+ * flips to `ready`) before bouncing the browser to `zcode://oauth/callback`.
+ * Param name differs per provider: `redirect_uri` (zai) / `redirect` (bigmodel).
+ */
+function buildDesktopOAuthRedirectParam(appVersion: string): string {
+  const url = new URL("/app/oauth/login", ZCODE_API_BASE_ORIGIN);
+  url.searchParams.set("redirect", "zcode://oauth/callback");
+  url.searchParams.set("app_version", appVersion);
+  return url.toString();
+}
+
+/**
+ * Server-mediated CLI login, mirroring ZCode 3.12.3 `startOAuthWithPolling`
+ * (used for BOTH zai and bigmodel):
  *
  *   1. Generate a client poll token (32 random bytes, hex) — sent as
  *      `Authorization: Bearer` on BOTH init and poll.
- *   2. `POST {ZCODE_API_BASE}/oauth/cli/init` body `{provider:"zai"}` →
+ *   2. `POST {ZCODE_API_BASE}/oauth/cli/init` body `{provider}` →
  *      `{flow_id, poll_token, authorize_url, expires_at, poll_interval_sec}`.
- *   3. Open the server-provided `authorize_url` (its redirect_uri is
- *      zcode.z.ai's own `/oauth/cli/callback/zai` — the browser never comes
- *      back to localhost).
+ *   3. Open the server-provided `authorize_url` with the interstitial param
+ *      appended — the browser never comes back to localhost; the flow
+ *      completes server-side.
  *   4. `GET {ZCODE_API_BASE}/oauth/cli/poll/{flow_id}` every
- *      `poll_interval_sec` until `status:"ready"` → `{token, user, zai}` —
- *      or `"failed"`, or the `expires_at`/timeout deadline passes.
+ *      `poll_interval_sec` until `status:"ready"` →
+ *      `{token, user, zai|bigmodel:{access_token}}` — or `"failed"`, a fatal
+ *      4xx, or the `expires_at`/timeout deadline.
  */
-export class ZaiOAuthClient extends OAuthFlowClient {
-  private flow: ZaiCliInitData | null = null;
+export class PollOAuthClient extends OAuthFlowClient {
+  private flow: CliInitData | null = null;
   private pollToken = "";
 
   constructor(
+    provider: ProviderId,
     fetchImpl: FetchFn = fetch,
     /** Injectable pause between polls (tests pass a no-op). */
     private readonly sleep: (ms: number) => Promise<void> = defaultSleep,
+    private readonly appVersion: string = DEFAULT_APP_VERSION,
   ) {
-    super("zai", fetchImpl);
+    super(provider, fetchImpl);
   }
 
   start(): Promise<OAuthFlowStart> {
@@ -198,8 +222,8 @@ export class ZaiOAuthClient extends OAuthFlowClient {
           headers: { authorization: `Bearer ${this.pollToken}`, "content-type": "application/json" },
           body: JSON.stringify({ provider: this.provider }),
         },
-        "Z.AI login init",
-      )) as Partial<ZaiCliInitData> | null;
+        `${this.provider} login init`,
+      )) as Partial<CliInitData> | null;
       if (
         !data ||
         typeof data.flow_id !== "string" ||
@@ -207,16 +231,26 @@ export class ZaiOAuthClient extends OAuthFlowClient {
         typeof data.expires_at !== "number" ||
         typeof data.poll_interval_sec !== "number"
       ) {
-        throw new Error("Z.AI login init: invalid response data");
+        throw new Error(`${this.provider} login init: invalid response data`);
       }
-      this.flow = data as ZaiCliInitData;
-      return { authorizeUrl: this.flow.authorize_url, callbackUrl: "", state: this.flow.flow_id };
+      this.flow = data as CliInitData;
+      return { authorizeUrl: this.applyInterstitial(data.authorize_url), callbackUrl: "", state: data.flow_id };
     })();
+  }
+
+  /** Append the desktop interstitial param (bundle: `redirect_uri` for zai, `redirect` for bigmodel). */
+  private applyInterstitial(authorizeUrl: string): string {
+    const url = new URL(authorizeUrl);
+    url.searchParams.set(
+      this.provider === "zai" ? "redirect_uri" : "redirect",
+      buildDesktopOAuthRedirectParam(this.appVersion),
+    );
+    return url.toString();
   }
 
   async complete(_started: OAuthFlowStart, timeoutMs: number = LOGIN_TIMEOUT_MS): Promise<OAuthFlowTokens> {
     const flow = this.flow;
-    if (!flow) throw new Error("Z.AI login not started");
+    if (!flow) throw new Error(`${this.provider} login not started`);
     const deadlineMs = Math.min(Date.now() + timeoutMs, flow.expires_at * 1000);
     const intervalMs = Math.max(1_000, flow.poll_interval_sec * 1000);
 
@@ -224,17 +258,19 @@ export class ZaiOAuthClient extends OAuthFlowClient {
       if (Date.now() >= deadlineMs) {
         throw new Error("Authorization timed out. Please retry login.");
       }
-      const data = (await requestZcodeEnvelope(
-        this.fetchImpl,
-        `${ZCODE_API_BASE}/oauth/cli/poll/${encodeURIComponent(flow.flow_id)}`,
-        { method: "GET", headers: { authorization: `Bearer ${this.pollToken}` } },
-        "Z.AI login poll",
-      )) as Partial<ZaiCliPollData> | null;
+      const outcome = await this.pollOnce(flow.flow_id);
+      if (outcome.retry) {
+        await this.sleep(Math.min(intervalMs, Math.max(0, deadlineMs - Date.now())));
+        continue;
+      }
+      const data = outcome.data;
 
       if (data?.status === "ready") {
-        const accessToken = typeof data.zai?.access_token === "string" ? data.zai.access_token.trim() : "";
+        const providerPayload = data[this.provider] as { access_token?: unknown } | undefined;
+        const accessToken =
+          typeof providerPayload?.access_token === "string" ? providerPayload.access_token.trim() : "";
         if (!accessToken) {
-          throw new Error("Z.AI login poll: response missing data.zai.access_token");
+          throw new Error(`${this.provider} login poll: response missing data.${this.provider}.access_token`);
         }
         return {
           accessToken,
@@ -246,10 +282,41 @@ export class ZaiOAuthClient extends OAuthFlowClient {
         throw new Error("Authorization failed. Please retry login.");
       }
       if (data?.status !== "pending") {
-        throw new Error(`Z.AI login poll: unexpected status ${String(data?.status ?? "(none)")}`);
+        throw new Error(`${this.provider} login poll: unexpected status ${String(data?.status ?? "(none)")}`);
       }
       await this.sleep(Math.min(intervalMs, Math.max(0, deadlineMs - Date.now())));
     }
+  }
+
+  /**
+   * One poll round with the bundle's error semantics: 4xx (except 408/429),
+   * envelope `code !== 0`, or an unknown status are fatal; network errors,
+   * 5xx/408/429, and a malformed 200 body are retried as if `pending`.
+   */
+  private async pollOnce(flowId: string): Promise<{ retry: true } | { retry: false; data: Partial<CliPollData> | null }> {
+    let resp: Response;
+    try {
+      resp = await this.fetchImpl(`${ZCODE_API_BASE}/oauth/cli/poll/${encodeURIComponent(flowId)}`, {
+        method: "GET",
+        headers: { authorization: `Bearer ${this.pollToken}` },
+      });
+    } catch {
+      return { retry: true };
+    }
+    if (resp.status >= 400 && resp.status < 500 && resp.status !== 408 && resp.status !== 429) {
+      throw new Error(`${this.provider} login poll failed: status=${resp.status}`);
+    }
+    if (!resp.ok) {
+      return { retry: true };
+    }
+    const raw = safeJsonParse(await resp.text()) as ZcodeEnvelope | null;
+    if (!raw || typeof raw.code !== "number") {
+      return { retry: true };
+    }
+    if (raw.code !== 0) {
+      throw new Error(`${this.provider} login poll failed: code=${raw.code} msg=${raw.msg ?? "(none)"}`);
+    }
+    return { retry: false, data: raw.data as Partial<CliPollData> | null };
   }
 
   async close(): Promise<void> {
@@ -257,13 +324,37 @@ export class ZaiOAuthClient extends OAuthFlowClient {
   }
 }
 
+/** Z.AI poll-flow login client (name kept for existing call sites). */
+export class ZaiOAuthClient extends PollOAuthClient {
+  constructor(
+    fetchImpl: FetchFn = fetch,
+    sleep: (ms: number) => Promise<void> = defaultSleep,
+    appVersion: string = DEFAULT_APP_VERSION,
+  ) {
+    super("zai", fetchImpl, sleep, appVersion);
+  }
+}
+
+/** Bigmodel poll-flow login client — the 3.12.3 desktop default for bigmodel. */
+export class BigmodelPollOAuthClient extends PollOAuthClient {
+  constructor(
+    fetchImpl: FetchFn = fetch,
+    sleep: (ms: number) => Promise<void> = defaultSleep,
+    appVersion: string = DEFAULT_APP_VERSION,
+  ) {
+    super("bigmodel", fetchImpl, sleep, appVersion);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Bigmodel — classic auth-code flow with a localhost callback server
+// (paste-login fallback; the primary path for both providers is the poll
+// flow above, mirroring the 3.12.3 desktop)
 // ---------------------------------------------------------------------------
 
 /**
- * Per-provider auth-code configuration (Bigmodel only since Z.AI moved to the
- * cli login flow).
+ * Per-provider auth-code configuration (Bigmodel paste login only — both
+ * providers moved to the poll flow as their primary login).
  */
 interface AuthCodeConfig {
   readonly provider: ProviderId;

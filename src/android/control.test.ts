@@ -8,6 +8,7 @@ import {
   type ControlState,
   type HandlerContext,
 } from "./control.js";
+import { BigmodelOAuthClient } from "../auth/oauth.js";
 
 function makeStubRequest(opts: {
   method?: string;
@@ -277,11 +278,16 @@ describe("android control startOAuth callback-port lifecycle", () => {
   it("releases the callback port when the flow is rejected (abandoned login)", async () => {
     const port = await freePort();
     process.env.ZCODE_OAUTH_CALLBACK_PORT = String(port);
-    // bigmodel is the provider with a local callback server (zai's cli login
-    // flow completes via server polling and binds nothing).
     const state: ControlState = { provider: "bigmodel", plan: "coding-plan", proxyPort: 0 };
+    // Inject the classic (localhost-callback) client: the port-lifecycle
+    // guarantee is a callback-flow property; the default bigmodel login is
+    // the network-bound poll flow, which binds nothing.
+    const ctx: HandlerContext = {
+      logBuffer: new LogBuffer(),
+      createLoginClient: () => new BigmodelOAuthClient(),
+    };
 
-    const started = await post({ cmd: "startOAuth", provider: "bigmodel" }, state);
+    const started = await post({ cmd: "startOAuth", provider: "bigmodel" }, state, ctx);
     expect(started.body.ok).toBe(true);
     expect(state.activeOauth).toBeDefined();
 
@@ -299,13 +305,17 @@ describe("android control startOAuth callback-port lifecycle", () => {
     const port = await freePort();
     process.env.ZCODE_OAUTH_CALLBACK_PORT = String(port);
     const state: ControlState = { provider: "bigmodel", plan: "coding-plan", proxyPort: 0 };
+    const ctx: HandlerContext = {
+      logBuffer: new LogBuffer(),
+      createLoginClient: () => new BigmodelOAuthClient(),
+    };
 
-    const first = await post({ cmd: "startOAuth", provider: "bigmodel" }, state);
+    const first = await post({ cmd: "startOAuth", provider: "bigmodel" }, state, ctx);
     expect(first.body.ok).toBe(true);
 
     // Previously this threw EADDRINUSE (500) because the first flow still
     // held the fixed callback port.
-    const second = await post({ cmd: "startOAuth", provider: "bigmodel" }, state);
+    const second = await post({ cmd: "startOAuth", provider: "bigmodel" }, state, ctx);
     expect(second.body.ok).toBe(true);
 
     // Clean up the flow started by the second command.

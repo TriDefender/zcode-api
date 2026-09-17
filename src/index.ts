@@ -7,7 +7,7 @@ import { AuthManager } from "./auth/manager.js";
 import { startServer, type ProxyServer } from "./server/server.js";
 import { startControlListener, LogBuffer, type ControlState } from "./android/control.js";
 import { loadCredential, saveCredential, clearCredential, getStorePath } from "./auth/store.js";
-import { ZaiOAuthClient, BigmodelOAuthClient, LOGIN_TIMEOUT_MS, parsePastedCallbackUrl, type OAuthResult } from "./auth/oauth.js";
+import { ZaiOAuthClient, BigmodelOAuthClient, BigmodelPollOAuthClient, LOGIN_TIMEOUT_MS, parsePastedCallbackUrl, type OAuthResult } from "./auth/oauth.js";
 import { KeyResolver } from "./auth/resolver.js";
 import type { Credential } from "./auth/types.js";
 import type { ProviderId } from "./provider/types.js";
@@ -512,27 +512,23 @@ async function authStatus(): Promise<void> {
 }
 
 async function runOAuth(provider: ProviderId, pasteMode: boolean): Promise<OAuthResult> {
-  if (provider === "bigmodel") {
+  if (provider === "bigmodel" && pasteMode) {
     const oauth = new BigmodelOAuthClient();
-    if (pasteMode) return runPasteLogin(oauth);
-    const result = await oauth.authorize((url) => {
-      console.log("Open this URL to authorize:\n");
-      console.log(`  ${url}\n`);
-      console.log("Waiting for authorization... (expires in 300s)\n");
-      console.log(
-        "Headless/Docker? The callback page will NOT load here — Ctrl-C and " +
-        "re-run with `auth login bigmodel --paste` to paste the redirected URL instead.\n",
-      );
-      openBrowser(url);
-    });
-    return result;
+    return runPasteLogin(oauth);
   }
 
-  const oauth = new ZaiOAuthClient();
+  // Both providers use the server-mediated poll login (ZCode 3.12.3 default):
+  // the browser never calls back here — open the URL on ANY device and the
+  // flow completes server-side while we poll.
+  const oauth = provider === "bigmodel" ? new BigmodelPollOAuthClient() : new ZaiOAuthClient();
   const result = await oauth.authorize((url) => {
-    console.log("Open this URL to authorize:\n");
+    console.log("Open this URL to authorize (any device/browser works):\n");
     console.log(`  ${url}\n`);
     console.log("Waiting for authorization... (expires in 300s)\n");
+    console.log(
+      "After you authorize, the browser may report it cannot open a zcode:// link —\n" +
+        "that is expected and safe to ignore; the login completes here automatically.\n",
+    );
     openBrowser(url);
   });
   return result;

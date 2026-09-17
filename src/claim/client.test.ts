@@ -106,42 +106,59 @@ describe("createClaimClient — getPreviews", () => {
   });
 });
 
-describe("createClaimClient — identity header set", () => {
-  it("preview and claim carry X-Device-Mid (server-required) and full identity minus X-ZCode-Agent", async () => {
-    const seen: Array<{ path: string; deviceMid: string | null; agent: string | null; version: string | null; ua: string | null }> = [];
+describe("createClaimClient — minimal claim-plane header set (3.12.3 verbatim)", () => {
+  it("preview sends Authorization ONLY — no identity bundle, no UA, no version/platform headers", async () => {
+    const seen: Array<{ path: string; auth: string | null; ua: string | null; version: string | null; platform: string | null }> = [];
     const fetchImpl = makeMockFetch((req) => {
       seen.push({
         path: new URL(req.url).pathname,
-        deviceMid: req.headers.get("x-device-mid"),
-        agent: req.headers.get("x-zcode-agent"),
-        version: req.headers.get("x-zcode-app-version"),
+        auth: req.headers.get("authorization"),
         ua: req.headers.get("user-agent"),
+        version: req.headers.get("x-zcode-app-version"),
+        platform: req.headers.get("x-platform"),
       });
       return Promise.resolve(jsonResp(PREVIEW_BODY));
     });
     const client = createClaimClient({
       origin: "https://zcode.z.ai",
       jwt: "jwt-1",
-      appVersion: "3.11.2",
+      appVersion: "3.12.3",
       platform: "win32-x64",
-      identity: { appVersion: "3.11.2", refererOrigin: "https://zcode.z.ai", sourceTitle: "cli", deviceMid: "d4ad5b5e-1234-4abc-9def-aabbccddeeff" },
       fetchImpl,
     });
 
     await client.getPreviews();
-    await client.claim("weekend-free-1024", { verifyParam: "t" });
 
-    expect(seen).toHaveLength(2);
-    for (const r of seen) {
-      expect(r.deviceMid).toBe("d4ad5b5e-1234-4abc-9def-aabbccddeeff");
-      expect(r.agent).toBeNull();
-      expect(r.version).toBe("3.11.2");
-      // CL-26: control-plane fetches keep the BARE ZCode UA — the
-      // `ai-sdk/anthropic/...` suffix is LLM-path only.
-      expect(r.ua).toBe("ZCode/3.11.2");
-    }
+    expect(seen).toHaveLength(1);
     expect(seen[0].path).toBe("/api/v1/zcode-plan/billing/preview");
-    expect(seen[1].path).toBe("/api/v1/zcode-plan/billing/claim");
+    expect(seen[0].auth).toBe("Bearer jwt-1");
+    expect(seen[0].ua).toBeNull();
+    expect(seen[0].version).toBeNull();
+    expect(seen[0].platform).toBeNull();
+  });
+
+  it("claim sends exactly the bundle's 6 headers (Authorization, Content-Type, captcha param, [region], version, platform)", async () => {
+    let req: Request | undefined;
+    const fetchImpl = makeMockFetch((r) => {
+      req = r;
+      return Promise.resolve(jsonResp({ code: 0, data: { plan: { plan_id: "weekend-free-1024", starts_at: 1, ends_at: 2 } } }));
+    });
+    const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "jwt-1", appVersion: "3.12.3", platform: "win32-x64", fetchImpl });
+
+    await client.claim("weekend-free-1024", { verifyParam: "cap-param", region: "cn-hangzhou" });
+
+    expect(new URL(req!.url).pathname).toBe("/api/v1/zcode-plan/billing/claim");
+    expect(req!.headers.get("authorization")).toBe("Bearer jwt-1");
+    expect(req!.headers.get("content-type")).toBe("application/json");
+    expect(req!.headers.get("x-aliyun-captcha-verify-param")).toBe("cap-param");
+    expect(req!.headers.get("x-aliyun-captcha-verify-region")).toBe("cn-hangzhou");
+    expect(req!.headers.get("x-zcode-app-version")).toBe("3.12.3");
+    expect(req!.headers.get("x-platform")).toBe("win32-x64");
+    // Nothing else rides along — no UA, no referer, no identity bundle.
+    expect(req!.headers.get("user-agent")).toBeNull();
+    expect(req!.headers.get("http-referer")).toBeNull();
+    expect(req!.headers.get("x-device-mid")).toBeNull();
+    expect(req!.headers.get("x-zcode-agent")).toBeNull();
   });
 });
 

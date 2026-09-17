@@ -1,7 +1,7 @@
 /**
- * Tests for identity header builder.
- * Mirrors `pio` in the current ZCode bundle (`_reverse/zcode.cjs`).
- * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
+ * Tests for identity header builders — mirror the ZCode 3.12.3 bundle's
+ * `g6n` (LLM/gate path) and `TV` (context/endpoint-routing path).
+ * @see _reverse/NOTEPAD.md "2. Identity Headers"
  */
 import { describe, it, expect } from "bun:test";
 import os from "node:os";
@@ -31,9 +31,9 @@ describe("buildIdentityHeaders", () => {
     expect(h["X-Title"]).toBe("Z Code@electron");
   });
 
-  it("hard-codes X-ZCode-Agent to glm", () => {
+  it("no longer emits X-ZCode-Agent (3.12.3 `TV` dropped it from this plane)", () => {
     const h = buildIdentityHeaders(BASE);
-    expect(h["X-ZCode-Agent"]).toBe("glm");
+    expect(h["X-ZCode-Agent"]).toBeUndefined();
   });
 
   it("emits runtime platform headers matching the current ZCode bundle", () => {
@@ -146,23 +146,20 @@ describe("buildIdentityHeaders", () => {
 
   // --- New behaviour matching `pio` in the current ZCode bundle ---
 
-  it("emits headers in the exact `pio` order", () => {
+  it("emits headers in the exact `TV` order", () => {
     // Clear env-gated headers so the order assertion is deterministic;
-    // X-Client-Language/X-Client-Timezone are always present via Intl.
+    // X-Client-Language/X-Client-Timezone are always present (unknown fallback).
     const savedRC = process.env.ZCODE_IDENTITY_RELEASE_CHANNEL;
     const savedDM = process.env.ZCODE_IDENTITY_DEVICE_MID;
     delete process.env.ZCODE_IDENTITY_RELEASE_CHANNEL;
     delete process.env.ZCODE_IDENTITY_DEVICE_MID;
     try {
       const h = buildIdentityHeaders(BASE);
-      // Mirrors the bundle's `pio` (L43): identity headers, then runtime
-      // platform + env headers in bundle order.
       expect(Object.keys(h)).toEqual([
         "HTTP-Referer",
         "User-Agent",
         "X-ZCode-App-Version",
         "X-Title",
-        "X-ZCode-Agent",
         "X-Platform",
         "X-Release-Channel",
         "X-Client-Language",
@@ -188,8 +185,8 @@ describe("buildIdentityHeaders", () => {
   });
 });
 
-describe("buildLlmIdentityHeaders (CLI `csn` shape — CL-27)", () => {
-  it("emits headers in the csn order with X-ZCode-Agent LAST and no X-Device-Mid", () => {
+describe("buildLlmIdentityHeaders (3.12.3 `g6n` shape — CL-27)", () => {
+  it("emits headers in the g6n order: X-ZCode-Agent 8th, no X-Device-Mid", () => {
     const savedDM = process.env.ZCODE_IDENTITY_DEVICE_MID;
     delete process.env.ZCODE_IDENTITY_DEVICE_MID;
     try {
@@ -202,13 +199,13 @@ describe("buildLlmIdentityHeaders (CLI `csn` shape — CL-27)", () => {
         "X-Release-Channel",
         "X-Client-Language",
         "X-Client-Timezone",
+        "X-ZCode-Agent",
         "X-Platform",
         "X-Os-Category",
         "X-Os-Version",
-        "X-ZCode-Agent",
       ]);
-      // The CLI LLM path NEVER carried X-Device-Mid — even when one exists for
-      // the control-plane (HRt) header set.
+      // The g6n path NEVER carries X-Device-Mid — even when one exists for
+      // the context (TV) header set.
       expect(h["X-Device-Mid"]).toBeUndefined();
     } finally {
       if (savedDM !== undefined) process.env.ZCODE_IDENTITY_DEVICE_MID = savedDM;
@@ -252,20 +249,18 @@ describe("buildLlmIdentityHeaders (CLI `csn` shape — CL-27)", () => {
     expect(h["X-ZCode-App-Version"]).toBeUndefined();
   });
 
-  it("keeps X-ZCode-Agent as glm in the final position even when platform headers are absent", () => {
+  it("keeps X-ZCode-Agent as glm before the platform headers (g6n inline position)", () => {
     const savedP = process.env.ZCODE_IDENTITY_PLATFORM;
     const savedA = process.env.ZCODE_IDENTITY_ARCH;
     const savedR = process.env.ZCODE_IDENTITY_RELEASE;
     delete process.env.ZCODE_IDENTITY_PLATFORM;
     delete process.env.ZCODE_IDENTITY_ARCH;
     delete process.env.ZCODE_IDENTITY_RELEASE;
-    // NOTE: platform/arch fall back to the real process values, so the
-    // conditional headers still resolve on a real host — the assertion pins
-    // the RELATIVE position of X-ZCode-Agent (always last).
     try {
       const h = buildLlmIdentityHeaders(BASE);
       const keys = Object.keys(h);
-      expect(keys[keys.length - 1]).toBe("X-ZCode-Agent");
+      expect(keys.indexOf("X-ZCode-Agent")).toBe(7);
+      expect(keys.indexOf("X-ZCode-Agent")).toBeLessThan(keys.indexOf("X-Platform"));
       expect(h["X-ZCode-Agent"]).toBe("glm");
       if (h["X-Platform"]) expect(h["X-Platform"]).toBe(`${process.platform}-${os.arch()}`);
     } finally {

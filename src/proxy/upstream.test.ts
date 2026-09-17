@@ -235,10 +235,11 @@ describe("buildAuthHeaders", () => {
     };
     const h = buildAuthHeaders("anthropic", ZAI_CRED, IDENTITY, "coding-plan", session);
 
-    // Identity part mirrors the bundle's CLI LLM builder `csn` (CL-27):
+    // Identity part mirrors the bundle's 3.12.3 LLM builder `g6n` (CL-27):
     // language/timezone always present, X-Release-Channel right after
-    // X-Title, X-ZCode-Agent LAST, no X-Device-Mid. Then trace headers, then
-    // auth (dual x-api-key + Authorization for coding-plan, CL-25).
+    // X-Title, X-ZCode-Agent inline 8th (before platform headers), no
+    // X-Device-Mid. Then trace headers, then auth (dual x-api-key +
+    // Authorization for coding-plan, CL-25).
     expect(Object.keys(h)).toEqual([
       "HTTP-Referer",
       "User-Agent",
@@ -247,10 +248,10 @@ describe("buildAuthHeaders", () => {
       "X-Release-Channel",
       "X-Client-Language",
       "X-Client-Timezone",
+      "X-ZCode-Agent",
       "X-Platform",
       "X-Os-Category",
       "X-Os-Version",
-      "X-ZCode-Agent",
       "x-request-id",
       "x-zcode-session-type",
       "x-zcode-trace-id",

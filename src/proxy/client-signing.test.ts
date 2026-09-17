@@ -136,7 +136,7 @@ describe("ClientSigningManager.sign", () => {
     expect(powDigest[0]).toBe(0);
   });
 
-  it("attaches the sYr gate header set (no X-ZCode-Agent, no X-Device-Mid, no Accept) on the gate fetch", async () => {
+  it("attaches the g6n gate header set (X-ZCode-Agent inline, no X-Device-Mid, no Accept) on the gate fetch", async () => {
     const fixture = await buildHandshakeFixture();
     let gateHeaders: Headers | undefined;
     const manager = new ClientSigningManager({
@@ -156,7 +156,9 @@ describe("ClientSigningManager.sign", () => {
     await manager.sign(LLM_URL, BASE_PAIRS, { credential: CRED, appVersion: "3.8.1" });
     expect(gateHeaders).toBeDefined();
     expect(gateHeaders!.get("x-api-key")).toBe(CRED);
-    expect(gateHeaders!.get("x-zcode-agent")).toBeNull();
+    // 3.12.3: the gate fetch reuses the g6n LLM header set — X-ZCode-Agent
+    // present, X-Device-Mid absent.
+    expect(gateHeaders!.get("x-zcode-agent")).toBe("glm");
     expect(gateHeaders!.get("x-device-mid")).toBeNull();
     expect(gateHeaders!.get("accept")).toBeNull();
     expect(gateHeaders!.get("user-agent")).toBe("ZCode/3.8.1");
