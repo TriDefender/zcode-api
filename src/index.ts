@@ -22,7 +22,7 @@ import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { ensureNodeFetchNoTimeouts } from "./runtime/node-fetch-compat.js";
 
-export const VERSION = "4.6.6";
+export const VERSION = "4.6.7";
 
 if (require.main === module) main();
 
