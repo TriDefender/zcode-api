@@ -70,6 +70,8 @@
         transition: margin-left .2s ease;
       }
       .sidebar.collapsed { margin-left: calc(-1 * var(--sidebar-w)); }
+      /* Backdrop only exists as a mobile drawer affordance — never on desktop. */
+      .sidebar-backdrop { display: none; }
       .sidebar-head { padding: 12px; display: flex; gap: 8px; }
       .btn-new {
         flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px;
@@ -289,12 +291,23 @@
       @media (max-width: 720px) {
         .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 40; box-shadow: 2px 0 12px rgba(0,0,0,.3); }
         .sidebar.collapsed { margin-left: calc(-1 * var(--sidebar-w)); }
+        /* Drawer backdrop: the fixed sidebar overlays the ☰ toggle in the
+           topbar, so tap-outside-to-close is the only always-reachable way
+           to dismiss it. Sits below the sidebar (40) and settings (50). */
+        .sidebar-backdrop {
+          display: block; position: fixed; inset: 0; z-index: 39;
+          background: rgba(0,0,0,.45); opacity: 0; pointer-events: none;
+          transition: opacity .2s;
+        }
+        .sidebar-backdrop.show { opacity: 1; pointer-events: auto; }
         .topbar select#model { max-width: 140px; }
       }
     </style>
   </head>
   <body>
     <div class="app">
+      <!-- Mobile drawer backdrop (tap to close the sidebar) -->
+      <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
       <!-- Sidebar -->
       <aside class="sidebar" id="sidebar">
         <div class="sidebar-head">
@@ -476,6 +489,7 @@
       var modelSel = $("model"), effortSel = $("reasoning-effort"), btnThink = $("btn-think");
       var convListEl = $("conv-list"), statusDot = $("status-dot");
       var sidebar = $("sidebar"), overlay = $("overlay"), toastEl = $("toast");
+      var sidebarBackdrop = $("sidebar-backdrop");
       var hintEl = $("hint");
 
       // =========================================================
@@ -1319,7 +1333,23 @@
         state.settings.theme = cur === "dark" ? "light" : "dark";
         saveState(); applyTheme();
       };
-      $("btn-menu").onclick = function () { sidebar.classList.toggle("collapsed"); };
+      // Mobile drawer: at <=720px the sidebar is a fixed overlay that covers
+      // the ☰ toggle itself, so the drawer starts collapsed and a backdrop
+      // provides tap-outside-to-close. Desktop layout is untouched.
+      var mobileMq = matchMedia("(max-width: 720px)");
+      var mobileDrawerInit = false;
+      function syncMobileDrawer() {
+        if (mobileMq.matches) {
+          if (!mobileDrawerInit) { sidebar.classList.add("collapsed"); mobileDrawerInit = true; }
+          sidebarBackdrop.classList.toggle("show", !sidebar.classList.contains("collapsed"));
+        } else {
+          sidebarBackdrop.classList.remove("show");
+        }
+      }
+      $("btn-menu").onclick = function () { sidebar.classList.toggle("collapsed"); syncMobileDrawer(); };
+      sidebarBackdrop.onclick = function () { sidebar.classList.add("collapsed"); syncMobileDrawer(); };
+      mobileMq.addEventListener("change", syncMobileDrawer);
+
       $("btn-mcp-connect").onclick = connectAllMcp;
       $("btn-mcp-disconnect").onclick = disconnectMcp;
       overlay.onclick = function (e) { if (e.target === overlay) closeSettings(); };
@@ -1407,6 +1437,7 @@
       // boot
       // =========================================================
       applyTheme();
+      syncMobileDrawer();
       populateModels(KNOWN_MODELS);
       renderSidebar(); renderMessages();
       populateEffort(); syncThinkButton();

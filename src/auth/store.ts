@@ -8,9 +8,24 @@ import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import type { Credential } from "./types.js";
 
-const STORE_DIR = join(homedir(), ".zcode-proxy");
-const STORE_FILE = join(STORE_DIR, "credentials.json");
 const ENV_SECRET = "ZCODE_PROXY_CREDENTIAL_SECRET";
+/**
+ * Store directory override. Production always uses `~/.zcode-proxy`; this seam
+ * exists so tests can point the store at an isolated temp dir — module-level
+ * path constants forced store.test.ts onto the REAL user store, and running
+ * the suite on a logged-in machine deleted the user's credentials
+ * (`clearCredential` in test hooks, observed 2026-09-18). Evaluated per call
+ * so the env var works even when set after module load.
+ */
+const ENV_STORE_DIR = "ZCODE_PROXY_STORE_DIR";
+
+function storeDir(): string {
+  return process.env[ENV_STORE_DIR]?.trim() || join(homedir(), ".zcode-proxy");
+}
+
+function storeFile(): string {
+  return join(storeDir(), "credentials.json");
+}
 
 /**
  * Derive the AES-GCM key as SHA-256(seed) (audit R2-13). The previous XOR-fold
@@ -44,9 +59,10 @@ function getLegacyEncryptionKey(): Uint8Array {
 
 /** Atomic store write: temp file (0o600) + rename over the target. */
 function atomicWriteStore(contents: string): void {
-  const tmp = `${STORE_FILE}.tmp-${process.pid}-${Date.now()}`;
+  const target = storeFile();
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, contents, { mode: 0o600 });
-  renameSync(tmp, STORE_FILE);
+  renameSync(tmp, target);
 }
 
 async function importAesKey(raw: Uint8Array): Promise<CryptoKey> {
@@ -102,15 +118,15 @@ async function encrypt(plaintext: string): Promise<string> {
 }
 
 export async function saveCredential(cred: Credential): Promise<void> {
-  mkdirSync(dirname(STORE_FILE), { recursive: true });
+  mkdirSync(dirname(storeFile()), { recursive: true });
   const json = JSON.stringify(cred);
   const encrypted = await encrypt(json);
   atomicWriteStore(JSON.stringify({ encrypted }));
 }
 
 export async function loadCredential(): Promise<Credential | null> {
-  if (!existsSync(STORE_FILE)) return null;
-  const raw = readFileSync(STORE_FILE, "utf-8");
+  if (!existsSync(storeFile())) return null;
+  const raw = readFileSync(storeFile(), "utf-8");
   const parsed = JSON.parse(raw);
   if (!parsed.encrypted) return null;
 
@@ -126,7 +142,7 @@ export async function loadCredential(): Promise<Credential | null> {
       // Stale/corrupt credential file — key derivation is machine-specific
       // ({homedir}-{platform}-{arch}), so cross-machine copies or OS reinstalls
       // produce undecryptable ciphertext. Silently treat as "not logged in".
-      console.warn(`Ignoring corrupted or stale credentials at ${STORE_FILE}: ${(e as Error).message}`);
+      console.warn(`Ignoring corrupted or stale credentials at ${storeFile()}: ${(e as Error).message}`);
       return null;
     }
     // Re-store under the new KDF. Best-effort by design: the credential is
@@ -142,17 +158,17 @@ export async function loadCredential(): Promise<Credential | null> {
   try {
     return JSON.parse(json) as Credential;
   } catch (e) {
-    console.warn(`Ignoring corrupted credentials at ${STORE_FILE}: ${(e as Error).message}`);
+    console.warn(`Ignoring corrupted credentials at ${storeFile()}: ${(e as Error).message}`);
     return null;
   }
 }
 
 export function clearCredential(): void {
-  if (existsSync(STORE_FILE)) {
-    unlinkSync(STORE_FILE);
+  if (existsSync(storeFile())) {
+    unlinkSync(storeFile());
   }
 }
 
 export function getStorePath(): string {
-  return STORE_FILE;
+  return storeFile();
 }

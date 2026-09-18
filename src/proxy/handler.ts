@@ -21,7 +21,7 @@ import { buildUpstreamHeaderPairs, buildUpstreamRequest, type UpstreamHeaderPair
 import { getDefaultEndpointRouting, type EndpointRoutingService } from "./endpoint-routing.js";
 import { getDefaultClientSigning, sendWithClientSigning, type ClientSigningManager } from "./client-signing.js";
 import { credentialString } from "../auth/types.js";
-import { sendOrderedUpstreamRequest } from "./ordered-transport.js";
+import { sendOrderedUpstreamRequest, orderedAdvertisedCodings } from "./ordered-transport.js";
 import { transformRequestBody } from "./body-transformer.js";
 import { isCaptchaChallenged, retryOnCaptchaChallenge } from "./captcha-retry.js";
 import { type ClientSessionResult } from "./client-session.js";
@@ -184,6 +184,17 @@ export async function proxyRequest(
   const routing = opts.endpointRouting !== undefined ? opts.endpointRouting : getDefaultEndpointRouting(config);
   const signer = opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(config);
   const translateMode = translateOpenAIToAnthropic || translateAnthropicToOpenAI;
+  // When the ordered transport must READ the upstream body (translate mode), it
+  // has to inflate whatever coding the upstream picks — cap the advertised
+  // accept-encoding (a passthrough of the inbound client's list, which browsers
+  // set to `gzip, deflate, br, zstd`) to what the transport can decompress.
+  // The ultra CDN serves SSE brotli-compressed when `br` is advertised, and a
+  // coding the transport cannot inflate would starve the SSE translator
+  // (observed 2026-09-18 as 0-byte streams → client timeouts). Pure-passthrough
+  // requests keep the client's list verbatim — the client decodes those itself.
+  if (useOrderedTransport && translateMode) {
+    upstreamHeaderPairs = capOrderedAcceptEncoding(upstreamHeaderPairs);
+  }
   const dispatch = async (req: Request, pairs: UpstreamHeaderPair[]): Promise<Response> => {
     let sendUrl = req.url;
     if (routing) {
@@ -308,6 +319,9 @@ export async function proxyRequest(
       solveAndRetry: (retryHeaders) => {
         console.log(`${reqId} captcha re-solved (token ${retryHeaders[captcha.RETRY_HEADERS.PARAM].length} chars), retrying...`);
         upstreamHeaderPairs = buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, config.identity, config.plan, retryHeaders, clientSession);
+        if (useOrderedTransport && translateMode) {
+          upstreamHeaderPairs = capOrderedAcceptEncoding(upstreamHeaderPairs);
+        }
         upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, provider, cred, transformedBody, config.identity, config.plan, retryHeaders, clientSession);
         return dispatch(upstreamReq, upstreamHeaderPairs).then((resp) => {
           if (debug) debugLine(reqId, `← retry ${resp.status} ${resp.statusText}`);
@@ -374,6 +388,30 @@ export async function proxyRequest(
 export function shouldUseOrderedTransport(config: ProxyConfig, clientSession: ClientSessionResult | undefined, hasCustomFetchImpl: boolean): boolean {
   if (hasCustomFetchImpl) return false;
   return clientSession?.action === "enforce" || clientSession?.source === "explicit";
+}
+
+/**
+ * Restrict an ordered-transport header-pair list's `accept-encoding` to codings
+ * the transport can inflate itself (see ordered-transport.ts). Preserves the
+ * client's token order, drops q-weights and unsupported tokens (including `*`),
+ * and falls back to `identity` when nothing remains. Header order is untouched —
+ * only the value at the existing position changes.
+ */
+export function capOrderedAcceptEncoding(
+  pairs: UpstreamHeaderPair[],
+  supported: readonly string[] = orderedAdvertisedCodings(),
+): UpstreamHeaderPair[] {
+  const idx = pairs.findIndex(([name]) => name.toLowerCase() === "accept-encoding");
+  if (idx < 0) return pairs;
+  const advertised = pairs[idx][1];
+  const tokens = advertised
+    .split(",")
+    .map((token) => token.split(";")[0]!.trim().toLowerCase())
+    .filter((token) => token.length > 0);
+  const kept = tokens.filter((token) => token === "identity" || supported.includes(token));
+  if (kept.length === tokens.length) return pairs;
+  const next = kept.length > 0 ? kept.join(", ") : "identity";
+  return pairs.map((pair, i) => (i === idx ? [pair[0], next] as UpstreamHeaderPair : pair));
 }
 
 /** Max attempts (initial + 2 retries) for transient CONNECT-level failures. */

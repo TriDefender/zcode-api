@@ -4,11 +4,30 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { saveCredential, loadCredential, clearCredential, getStorePath } from "./store.js";
-import { writeFileSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { writeFileSync, readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Credential } from "./types.js";
 
 const TEST_SECRET = "test-encryption-secret-for-zcode-proxy";
+
+/**
+ * Every test runs against a fresh temp store dir. The hooks must NEVER touch
+ * the real `~/.zcode-proxy` — module-real-path testing deleted live user
+ * credentials when the suite ran on a logged-in machine (observed 2026-09-18).
+ */
+function useTempStore(): string {
+  const dir = mkdtempSync(join(tmpdir(), "zcode-store-test-"));
+  process.env.ZCODE_PROXY_STORE_DIR = dir;
+  process.env.ZCODE_PROXY_CREDENTIAL_SECRET = TEST_SECRET;
+  return dir;
+}
+
+function dropTempStore(dir: string): void {
+  delete process.env.ZCODE_PROXY_STORE_DIR;
+  delete process.env.ZCODE_PROXY_CREDENTIAL_SECRET;
+  rmSync(dir, { recursive: true, force: true });
+}
 
 /** Legacy XOR-fold key + AES-GCM encrypt (pre-SHA-256 store format). */
 async function legacyEncrypt(plaintext: string): Promise<string> {
@@ -28,14 +47,13 @@ async function legacyEncrypt(plaintext: string): Promise<string> {
 }
 
 describe("credential store", () => {
+  let storeDir: string;
   beforeEach(() => {
-    process.env.ZCODE_PROXY_CREDENTIAL_SECRET = TEST_SECRET;
-    clearCredential();
+    storeDir = useTempStore();
   });
 
   afterEach(() => {
-    clearCredential();
-    delete process.env.ZCODE_PROXY_CREDENTIAL_SECRET;
+    dropTempStore(storeDir);
   });
 
   it("returns null when no credential stored", async () => {
@@ -91,14 +109,13 @@ describe("credential store", () => {
 });
 
 describe("credential store — SHA-256 KDF migration (R2-13)", () => {
+  let storeDir: string;
   beforeEach(() => {
-    process.env.ZCODE_PROXY_CREDENTIAL_SECRET = TEST_SECRET;
-    clearCredential();
+    storeDir = useTempStore();
   });
 
   afterEach(() => {
-    clearCredential();
-    delete process.env.ZCODE_PROXY_CREDENTIAL_SECRET;
+    dropTempStore(storeDir);
   });
 
   it("migrates a legacy XOR-fold-encrypted file: loads AND re-stores under the new KDF", async () => {

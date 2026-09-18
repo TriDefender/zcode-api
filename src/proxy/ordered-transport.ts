@@ -19,6 +19,54 @@ const CRLF = "\r\n";
 const HEADER_END = new Uint8Array([13, 10, 13, 10]);
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
+/**
+ * HTTP response content-coding → `DecompressionStream` format token.
+ *
+ * The ultra gateway's CDN applies brotli to SSE streams whenever the request
+ * advertises `br` (observed 2026-09-18 on coding-plan traffic rerouted via
+ * proxyEndpoint.mapping; the direct provider endpoints never compress SSE).
+ * The real client's fetch stack auto-inflates gzip/deflate/br — this transport
+ * mirrors that. Format ids differ from HTTP tokens (`br` → `"brotli"`), and
+ * support is runtime-dependent, so every coding is capability-checked before
+ * use; unsupported codings fall through to raw passthrough (paired with the
+ * accept-encoding cap in handler.ts, which stops the upstream selecting them).
+ */
+const CODING_FORMATS: Readonly<Record<string, Bun.CompressionFormat>> = {
+  gzip: "gzip",
+  "x-gzip": "gzip",
+  deflate: "deflate",
+  br: "brotli",
+  zstd: "zstd",
+};
+
+let advertisedCodingsCache: readonly string[] | null = null;
+
+// The DOM-lib `DecompressionStream` constructor type omits Bun's "brotli"/"zstd"
+// formats even though the runtime accepts them — route construction through a
+// Bun-typed alias so the wider format union stays type-safe end to end.
+type InflateConstructor = new (format: Bun.CompressionFormat) => DecompressionStream;
+const makeInflateStream: InflateConstructor = DecompressionStream as unknown as InflateConstructor;
+
+function decompressFormatFor(coding: string): Bun.CompressionFormat | null {
+  const format = CODING_FORMATS[coding];
+  if (format === undefined) return null;
+  try {
+    new makeInflateStream(format);
+    return format;
+  } catch {
+    return null;
+  }
+}
+
+/** `accept-encoding` tokens this transport can inflate itself (memoized, `x-gzip` excluded). */
+export function orderedAdvertisedCodings(): readonly string[] {
+  if (advertisedCodingsCache === null) {
+    advertisedCodingsCache = Object.keys(CODING_FORMATS)
+      .filter((coding) => coding !== "x-gzip" && decompressFormatFor(coding) !== null);
+  }
+  return advertisedCodingsCache;
+}
+
 export async function sendOrderedUpstreamRequest(req: OrderedUpstreamRequest): Promise<Response> {
   const url = new URL(req.url);
   const bodyBytes = bodyToBytes(req.body);
@@ -139,11 +187,15 @@ export async function sendOrderedUpstreamRequest(req: OrderedUpstreamRequest): P
           }
 
           let responseBody: ReadableStream<Uint8Array> = bodyStream;
-          if (req.decompress && parsed.headers.get("content-encoding")?.toLowerCase() === "gzip") {
+          const wireCoding = parsed.headers.get("content-encoding")?.toLowerCase().trim() ?? "";
+          const inflateFormat = req.decompress && wireCoding !== "" && !wireCoding.includes(",")
+            ? decompressFormatFor(wireCoding)
+            : null;
+          if (inflateFormat !== null) {
             parsed.headers.delete("content-encoding");
             parsed.headers.delete("content-length");
-            const gzip = new DecompressionStream("gzip") as unknown as ReadableWritablePair<Uint8Array, Uint8Array>;
-            responseBody = bodyStream.pipeThrough(gzip);
+            const decoder = new makeInflateStream(inflateFormat) as unknown as ReadableWritablePair<Uint8Array, Uint8Array>;
+            responseBody = bodyStream.pipeThrough(decoder);
           }
 
           resolve(new Response(responseBody, {
