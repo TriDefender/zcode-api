@@ -17,6 +17,16 @@
  * (empirically accepted during the 0828 campaign). The 3.12.3 client sends
  * the minimal set above — we now mirror that verbatim.
  *
+ * DEVIATION (2026-09-18, wk-0918 campaign): the gateway again rejects
+ * preview with biz 3001 "parameter error" unless the request carries a
+ * UUID-format `X-Device-Mid` (re-verified empirically: minimal headers +
+ * X-Device-Mid → 200 with the wk-0918 plan; the same request minus that
+ * header → 3001; adding captcha headers alone does not help). Same gateway
+ * behavior as the 0828 campaign — the 3.12.3 bundle itself is minimal, so
+ * this is a deliberate deviation from the verbatim mirror: when
+ * `deviceMid` is provided both calls append `X-Device-Mid` (last position,
+ * matching its slot in the endpoint-routing `TV` identity set).
+ *
  * @see _reverse/NOTEPAD.md "claim/billing 平面"
  */
 import type { ClaimablePlan, ClaimOutcome, PlanEntitlement } from "./types.js";
@@ -29,6 +39,11 @@ export interface ClaimClientOptions {
   appVersion: string;
   /** `${process.platform}-{arch}` in the real client (`u3()`). */
   platform: string;
+  /**
+   * Campaign-gated gateway requirement (0828 + 0918): UUID-format
+   * `X-Device-Mid`. When omitted no device header is sent.
+   */
+  deviceMid?: string;
   /** Per-call timeout in ms. Default `15000` (bundle `ss`). */
   timeoutMs?: number;
   /** DI seam for tests. Default `globalThis.fetch`. */
@@ -79,6 +94,7 @@ interface RawPlan {
 export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
   const origin = opts.origin.replace(/\/+$/, "");
   const jwt = opts.jwt?.trim() || undefined;
+  const deviceMid = opts.deviceMid?.trim() || undefined;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
 
@@ -161,8 +177,10 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
     async getPreviews(signal?: AbortSignal): Promise<ClaimablePlan[]> {
       const url = `/api/v1/zcode-plan/billing/preview?app_version=${encodeURIComponent(opts.appVersion)}&platform=${encodeURIComponent(opts.platform)}`;
       // Bundle: `Authorization: Bearer` only when a JWT exists; anonymous
-      // preview sends NO headers at all.
+      // preview sends NO headers at all. X-Device-Mid is appended last when
+      // provided (campaign gateway requirement — see file header).
       const headers: Record<string, string> = jwt ? { Authorization: `Bearer ${jwt}` } : {};
+      if (deviceMid) headers["X-Device-Mid"] = deviceMid;
       const { status, json, text } = await request("GET", url, { headers, signal });
       if (status < 200 || status >= 300 || (json?.code !== undefined && json.code !== 0) || json?.data === undefined) {
         const { code, message } = unwrapError(json, status, text);
@@ -178,7 +196,8 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
     async claim(planId: string, captcha: { verifyParam: string; region?: string }, signal?: AbortSignal): Promise<ClaimOutcome> {
       if (!jwt) return { ok: false, planId, failureKind: "login_required", code: 401, message: "manual_claim_login_required" };
       // Bundle `claimManualPlan` header order: Authorization, Content-Type,
-      // captcha param, [captcha region], X-ZCode-App-Version, X-Platform.
+      // captcha param, [captcha region], X-ZCode-App-Version, X-Platform,
+      // [X-Device-Mid] (campaign-gated deviation, same as preview).
       const headers: Record<string, string> = {
         Authorization: `Bearer ${jwt}`,
         "Content-Type": "application/json",
@@ -187,6 +206,7 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
       if (captcha.region) headers["X-Aliyun-Captcha-Verify-Region"] = captcha.region;
       headers["X-ZCode-App-Version"] = opts.appVersion;
       headers["X-Platform"] = opts.platform;
+      if (deviceMid) headers["X-Device-Mid"] = deviceMid;
       const { status, json, text } = await request("POST", "/api/v1/zcode-plan/billing/claim", { body: { plan_id: planId }, headers, signal });
 
       const data = json?.data as { plan?: RawPlan } | undefined;

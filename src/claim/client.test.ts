@@ -162,6 +162,79 @@ describe("createClaimClient — minimal claim-plane header set (3.12.3 verbatim)
   });
 });
 
+describe("createClaimClient — campaign-gated X-Device-Mid deviation (0828/0918)", () => {
+  it("preview appends X-Device-Mid after Authorization when deviceMid provided", async () => {
+    const seen: Array<{ auth: string | null; mid: string | null; keys: string[] }> = [];
+    const fetchImpl = makeMockFetch((req) => {
+      seen.push({ auth: req.headers.get("authorization"), mid: req.headers.get("x-device-mid"), keys: [...req.headers.keys()] });
+      return Promise.resolve(jsonResp(PREVIEW_BODY));
+    });
+    const client = createClaimClient({
+      origin: "https://zcode.z.ai",
+      jwt: "jwt-1",
+      appVersion: "3.12.3",
+      platform: "win32-x64",
+      deviceMid: "0cd664d3-08fb-49c6-ac89-1eab3e630e78",
+      fetchImpl,
+    });
+    await client.getPreviews();
+
+    expect(seen[0].auth).toBe("Bearer jwt-1");
+    expect(seen[0].mid).toBe("0cd664d3-08fb-49c6-ac89-1eab3e630e78");
+    expect(seen[0].keys).toEqual(["authorization", "x-device-mid"]);
+
+    const anon = createClaimClient({
+      origin: "https://zcode.z.ai",
+      appVersion: "3.12.3",
+      platform: "win32-x64",
+      deviceMid: "0cd664d3-08fb-49c6-ac89-1eab3e630e78",
+      fetchImpl,
+    });
+    await anon.getPreviews();
+    expect(seen[1].auth).toBeNull();
+    expect(seen[1].keys).toEqual(["x-device-mid"]);
+  });
+
+  it("claim sends the bundle's 6 headers plus X-Device-Mid when deviceMid provided", async () => {
+    const seen: { keys: string[]; mid: string | null }[] = [];
+    const fetchImpl = makeMockFetch((req) => {
+      seen.push({ keys: [...req.headers.keys()], mid: req.headers.get("x-device-mid") });
+      return Promise.resolve(jsonResp({ code: 0, data: { plan: { plan_id: "p1" } } }));
+    });
+    const client = createClaimClient({
+      origin: "https://zcode.z.ai",
+      jwt: "jwt-1",
+      appVersion: "3.12.3",
+      platform: "win32-x64",
+      deviceMid: "0cd664d3-08fb-49c6-ac89-1eab3e630e78",
+      fetchImpl,
+    });
+    await client.claim("p1", { verifyParam: "cap", region: "sgp" });
+
+    expect(seen[0].mid).toBe("0cd664d3-08fb-49c6-ac89-1eab3e630e78");
+    // Bun's Headers iterates sorted, not insertion-ordered — assert the exact
+    // header set (wire order is enforced by the object literal in client.ts).
+    expect(seen[0].keys).toEqual([
+      "authorization",
+      "content-type",
+      "x-aliyun-captcha-verify-param",
+      "x-aliyun-captcha-verify-region",
+      "x-device-mid",
+      "x-platform",
+      "x-zcode-app-version",
+    ]);
+  });
+
+  it("blank deviceMid is treated as absent", async () => {
+    const fetchImpl = makeMockFetch((req) => {
+      expect(req.headers.get("x-device-mid")).toBeNull();
+      return Promise.resolve(jsonResp(PREVIEW_BODY));
+    });
+    const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "j", appVersion: "3.12.3", platform: "p", deviceMid: "  ", fetchImpl });
+    await client.getPreviews();
+  });
+});
+
 describe("createClaimClient — claim", () => {
   function capture(req: Request) {
     return {
