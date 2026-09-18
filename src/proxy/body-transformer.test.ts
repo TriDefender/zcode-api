@@ -215,7 +215,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
@@ -238,7 +238,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     expect(parsed.system[2].text).toContain("- OS Version: linux 6.8.0-49-generic x64");
     // The powered-by line lives INSIDE the Environment section, followed by
     // Context Management (bundle 3.11.2 assembleSystemMessages shape).
-    expect(parsed.system[2].text).toContain("- You are powered by the model named glm-5.2.\n\n# Context management");
+    expect(parsed.system[2].text).toContain("- You are powered by the model named bigmodel-api/glm-5.2.\n\n# Context management");
     expect(parsed.system[2].cache_control).toEqual({ type: "ephemeral" });
   });
 
@@ -248,7 +248,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.messages).toHaveLength(2);
@@ -278,7 +278,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       ],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
     expect(parsed.tools[0]).toEqual({ name: "get_weather" });
     expect(parsed.tools[1]).toEqual({ name: "read_file" });
@@ -291,7 +291,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
     expect(parsed.system).toHaveLength(4);
     expect(parsed.system[3]).toEqual({ type: "text", text: "User rule" });
@@ -303,7 +303,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
@@ -317,7 +317,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
@@ -330,7 +330,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
@@ -344,7 +344,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true }));
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(4);
@@ -359,7 +359,7 @@ describe("transformRequestBody — start-plan system (OpenAI)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "openai", startPlan: true }));
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "openai", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.messages[0]).toEqual({
@@ -373,7 +373,7 @@ describe("transformRequestBody — start-plan system (OpenAI)", () => {
     expect(parsed.messages[2].content.startsWith("\n\n# Communicating with the user")).toBe(true);
     expect(parsed.messages[2].content).toContain("You have been invoked in the following environment:");
     expect(parsed.messages[2].content).toContain("- Is a git repository: no");
-    expect(parsed.messages[2].content).toContain("- You are powered by the model named glm-5.2.");
+    expect(parsed.messages[2].content).toContain("- You are powered by the model named bigmodel-api/glm-5.2.");
     expect(parsed.messages[3]).toEqual({ role: "user", content: "hi" });
   });
 
@@ -382,7 +382,7 @@ describe("transformRequestBody — start-plan system (OpenAI)", () => {
       messages: [{ role: "user", content: "hi" }],
     });
 
-    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "openai", startPlan: true }));
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "openai", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
 
     expect(parsed.messages[0].role).toBe("system");

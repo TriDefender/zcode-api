@@ -17,7 +17,7 @@
     "platformLabel": "Platform",
     "shellLabel": "Shell",
     "osVersionLabel": "OS Version",
-    "poweredByLine": "- You are powered by the model named {model}."
+    "poweredByLine": "- You are powered by the model named {provider}/{model}."
   },
   "contextPrefix": {
     "intro": "As you answer the user's questions, you can use the following context:",

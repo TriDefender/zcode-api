@@ -110,6 +110,8 @@ describe("ClientSigningManager.sign", () => {
     expect(pair(signed, "X-Client-Ts")).toMatch(/^\d+$/);
 
     // handshake body: sig = base64(HMAC(HKDF(secret, getSignKey_hmac), "get_sign_key\n{apiKeyId}\n{ts}\n{nonce}"))
+    // (3.12.3 bundle `XJe.performHandshake`: newline-joined fields — raw \n inside the
+    // template literal — base64 output; live-verified 2026-09-18, space-join is rejected)
     const hs = calls.handshakes[0];
     expect(hs.body.apiKey).toBe(CRED);
     expect(hs.auth).toBe(CRED);
@@ -120,6 +122,7 @@ describe("ClientSigningManager.sign", () => {
     expect(hs.body.sig).toBe(expectedMac);
 
     // business signature verifies with the handshake public key
+    // (bundle `sendSigned`: "{apiKeyId}\n{ts}\n{clientVersion}\n{sessionId}\n{nonce}")
     const verifyKey = await crypto.subtle.importKey("raw", fixture.publicKeyRaw, "Ed25519", false, ["verify"]);
     const message = `${API_KEY_ID}\n${pair(signed, "X-Client-Ts")}\n3.8.1\nsess-123\n${pair(signed, "X-Client-Nonce")}`;
     const sigBytes = Uint8Array.from(atob(pair(signed, "X-Client-Sig")!), (ch) => ch.charCodeAt(0));
@@ -127,6 +130,7 @@ describe("ClientSigningManager.sign", () => {
     expect(verified).toBeTrue();
 
     // proof of work: 32 hex chars, digest has 8 leading zero bits under the recomputed seed
+    // (bundle `vQt`: newline-joined challenge "{apiKeyId}\n{appId}\n{sessionId}\n{ts}" and answer hash "{seed}\n{answer}")
     const pow = pair(signed, "X-Client-Pow")!;
     expect(pow).toMatch(/^[0-9a-f]{32}$/);
     const seedDigest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${API_KEY_ID}\nzcode\nsess-123\n${pair(signed, "X-Client-Ts")}`));

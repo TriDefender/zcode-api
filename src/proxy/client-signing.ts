@@ -1,5 +1,17 @@
 /**
- * Client Request Signing V4 — mirrors the ZCode 3.9.1 `ClientRequestSigningV4Signer`.
+ * Client Request Signing V4 — mirrors the ZCode 3.12.3 `ClientRequestSigningV4Signer`
+ * (bundle `XJe`; handshake `performHandshake`, business sign `sendSigned`, PoW `vQt`,
+ * HMAC `hQt`). All four signed message templates join their fields with literal
+ * NEWLINES (the bundle templates contain raw `\n` line breaks inside the template
+ * literals — verified byte-exact 2026-09-18 by JSON.stringify'ing the raw bundle
+ * slice; live-verified: `\n` handshake → 200 + privateCipher, space-joined → rejected):
+ *   handshake HMAC   "get_sign_key\n{apiKeyId}\n{ts}\n{nonce}"
+ *   business Ed25519 "{apiKeyId}\n{ts}\n{clientVersion}\n{sessionId}\n{nonce}"
+ *   PoW challenge    sha256("{apiKeyId}\n{appId}\n{sessionId}\n{ts}") hex[:32]
+ *   PoW answer       sha256("{challenge}\n{answer}")
+ * Signatures are base64 (`_Qt`), never hex. WARNING for future bundle readers:
+ * do not pre-process extraction output with newline-replacing display filters —
+ * a 2026-09-18 session briefly "corrected" these to spaces that way.
  *
  * Per-request Ed25519 signatures + proof-of-work over coding-plan traffic.
  * Everything here is fail-open, matching the client: gate disabled/unreachable
@@ -586,6 +598,9 @@ export function getDefaultClientSigning(config: {
     defaultSigner = new ClientSigningManager({
       identity: config.identity,
       origin: config.clientSigning.origin,
+      // Fail-open decisions (gate off, handshake failure, VERIFY bypass) are
+      // otherwise silent in production — surface each once per (origin, cred).
+      onEvent: (message) => console.log(message),
     });
     defaultSignerKey = key;
   }

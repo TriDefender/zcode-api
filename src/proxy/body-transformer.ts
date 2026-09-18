@@ -36,6 +36,12 @@ interface TransformContext {
   metadataUserId?: string;
   /** When true (start-plan), prepend ZCode gateway system blocks. */
   startPlan?: boolean;
+  /**
+   * Active upstream provider — feeds the powered-by line's `{providerId}/`
+   * prefix (bundle `p2`: zai→"zai-api", bigmodel→"bigmodel-api"). Always set
+   * by production callers alongside `startPlan`.
+   */
+  provider?: "zai" | "bigmodel";
 }
 
 /**
@@ -57,14 +63,14 @@ export function transformRequestBody(body: string | undefined, ctx: TransformCon
 
   if (ctx.format === "openai") {
     if (ctx.startPlan) {
-      modified = applyStartPlanOpenAISystem(parsed as Record<string, unknown>) || modified;
+      modified = applyStartPlanOpenAISystem(parsed as Record<string, unknown>, ctx.provider) || modified;
     }
     modified = applyStreamOptionsIncludeUsage(parsed as Record<string, unknown>) || modified;
   }
   if (ctx.format === "anthropic") {
     const obj = parsed as Record<string, unknown>;
     if (ctx.startPlan) {
-      modified = applyStartPlanSystem(obj) || modified;
+      modified = applyStartPlanSystem(obj, ctx.provider) || modified;
     }
     modified = applyAnthropicCacheControl(obj) || modified;
     if (ctx.metadataUserId) {
@@ -184,9 +190,9 @@ function applyAnthropicUserId(body: Record<string, unknown>, userId: string): bo
  * stripped: official blocks (3) + last-message marker (1) already fill
  * Anthropic's 4-breakpoint cache budget.
  */
-function applyStartPlanSystem(body: Record<string, unknown>): boolean {
+function applyStartPlanSystem(body: Record<string, unknown>, provider?: "zai" | "bigmodel"): boolean {
   const model = typeof body.model === "string" ? body.model : undefined;
-  body.system = buildStartPlanSystem(body.system, model, resolveEnvPromptInfo());
+  body.system = buildStartPlanSystem(body.system, model, resolveEnvPromptInfo(), provider);
   if (Array.isArray(body.messages) && body.messages.length > 0) {
     body.messages = [buildContextPrefixMessage() as unknown, ...body.messages];
   }
@@ -200,12 +206,12 @@ function applyStartPlanSystem(body: Record<string, unknown>): boolean {
   return true;
 }
 
-function applyStartPlanOpenAISystem(body: Record<string, unknown>): boolean {
+function applyStartPlanOpenAISystem(body: Record<string, unknown>, provider?: "zai" | "bigmodel"): boolean {
   const messages = body.messages;
   if (!Array.isArray(messages)) return false;
 
   const model = typeof body.model === "string" ? body.model : undefined;
-  const official = buildStartPlanSystem(undefined, model, resolveEnvPromptInfo()).map((block) => ({
+  const official = buildStartPlanSystem(undefined, model, resolveEnvPromptInfo(), provider).map((block) => ({
     role: "system",
     content: typeof block === "object" && block !== null && "text" in block ? String(block.text) : "",
   }));

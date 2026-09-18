@@ -24,12 +24,13 @@
  *
  *   `T9o` builds the Environment lines with REAL runtime values (cwd,
  *   platform, shell, osVersion — `createNodeContextSourceAdapter`) and the
- *   conditional `- You are powered by the model named X.` as the section's
- *   last line. `cwd` is never "unknown" in real traffic; the proxy fills it
- *   (and platform/osVersion) from the SAME identity env chain as the
- *   X-Platform/X-Os-Version headers, so the prompt can never contradict the
- *   headers (a mixed combination no real client produces). See
- *   {@link resolveEnvPromptInfo} in identity.ts.
+ *   conditional `- You are powered by the model named {providerId}/{modelId}.`
+ *   as the section's last line (3.12.3 `eMi` + registry `p2`:
+ *   zai→"zai-api", bigmodel→"bigmodel-api"). `cwd` is never "unknown" in real
+ *   traffic; the proxy fills it (and platform/osVersion) from the SAME
+ *   identity env chain as the X-Platform/X-Os-Version headers, so the prompt
+ *   can never contradict the headers (a mixed combination no real client
+ *   produces). See {@link resolveEnvPromptInfo} in identity.ts.
  *
  *   `meta_user` attachments (`assembleMetaUserAttachments`/`tct`): the client
  *   ALWAYS attaches a context_prefix to the first user turn — the currentDate
@@ -73,8 +74,23 @@ export function formatLocalIsoDate(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
-/** Environment Info section (`T9o`): lines joined with `\n`; powered-by last. */
-export function buildEnvironmentSection(env: StartPlanEnvInfo, currentModel?: string): string {
+/**
+ * Bundle `p2` (3.12.3): OAuth provider → built-in model-provider id. The
+ * powered-by line renders `{providerId}/{modelId}` from the client's model
+ * selection descriptor, so coding-plan traffic carries e.g.
+ * `- You are powered by the model named bigmodel-api/glm-4.6.`
+ */
+const PROVIDER_MODEL_IDS: Readonly<Record<"zai" | "bigmodel", string>> = {
+  zai: "zai-api",
+  bigmodel: "bigmodel-api",
+};
+
+/** Environment Info section (`T9o`/`eMi`): lines joined with `\n`; powered-by last. */
+export function buildEnvironmentSection(
+  env: StartPlanEnvInfo,
+  currentModel?: string,
+  provider?: "zai" | "bigmodel",
+): string {
   const e = data.environment;
   const lines = [
     e.heading,
@@ -85,8 +101,9 @@ export function buildEnvironmentSection(env: StartPlanEnvInfo, currentModel?: st
     `- ${e.shellLabel}: ${env.shell}`,
     `- ${e.osVersionLabel}: ${env.osVersion}`,
   ];
-  if (currentModel && currentModel.trim().length > 0) {
-    lines.push(e.poweredByLine.replace("{model}", currentModel));
+  const modelId = currentModel?.trim();
+  if (modelId && provider) {
+    lines.push(e.poweredByLine.replace("{provider}", PROVIDER_MODEL_IDS[provider]).replace("{model}", modelId));
   }
   return lines.join("\n");
 }
@@ -101,11 +118,16 @@ export function buildEnvironmentSection(env: StartPlanEnvInfo, currentModel?: st
  * would push the request over the cap — the real client never emits foreign
  * markers because it owns the whole body.
  */
-export function buildStartPlanSystem(existingSystem: unknown, currentModel: string | undefined, env: StartPlanEnvInfo): SystemBlock[] {
+export function buildStartPlanSystem(
+  existingSystem: unknown,
+  currentModel: string | undefined,
+  env: StartPlanEnvInfo,
+  provider?: "zai" | "bigmodel",
+): SystemBlock[] {
   const stable = data.stableSections.join("\n\n");
   const dynamic = [
     data.dynamicSections.beforeEnvironment,
-    buildEnvironmentSection(env, currentModel),
+    buildEnvironmentSection(env, currentModel, provider),
     data.dynamicSections.afterEnvironment,
   ].join("\n\n");
   const official: SystemBlock[] = [

@@ -182,6 +182,7 @@ export async function handleResponses(
       format: "anthropic",
       metadataUserId: buildAnthropicMetadataUserId(opts.config.identity.deviceMid, undefined),
       startPlan,
+      provider: opts.config.provider,
     }) ?? JSON.stringify(anthropicReq);
   }
   const transformedBody = upstreamRequestBody;

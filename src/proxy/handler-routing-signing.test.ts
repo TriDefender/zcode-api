@@ -150,7 +150,8 @@ describe("proxyRequest endpoint-routing + client-signing wiring", () => {
     expect(capturedHeaders!.get("x-client-version")).toBe("3.8.1");
     expect(capturedHeaders!.get("x-client-pow")).toMatch(/^[0-9a-f]{32}$/);
 
-    // signature verifies with the handshake public key over the exact signed message
+    // signature verifies with the handshake public key over the exact signed
+    // message (3.12.3 bundle `sendSigned`: newline-joined fields)
     const verifyKey = await crypto.subtle.importKey("raw", publicKeyRaw, "Ed25519", false, ["verify"]);
     const message = `testkey\n${capturedHeaders!.get("x-client-ts")}\n3.8.1\n${capturedHeaders!.get("x-session-id")}\n${capturedHeaders!.get("x-client-nonce")}`;
     const sigBytes = Uint8Array.from(atob(capturedHeaders!.get("x-client-sig")!), (ch) => ch.charCodeAt(0));

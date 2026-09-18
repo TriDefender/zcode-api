@@ -161,7 +161,7 @@ export async function proxyRequest(
   // Bundle `E2e` fires for EVERY anthropic-kind request (both plans) — the
   // injected user_id is the device/session blob, never the account uuid.
   const metadataUserId = buildAnthropicMetadataUserId(config.identity.deviceMid, clientSession?.sessionId);
-  const transformedBody = transformRequestBody(upstreamBody, { format: upstreamFormat, metadataUserId, startPlan });
+  const transformedBody = transformRequestBody(upstreamBody, { format: upstreamFormat, metadataUserId, startPlan, provider: config.provider });
   if (debug && transformedBody !== upstreamBody) {
     debugLine(reqId, `body transformed (upstreamFormat=${upstreamFormat}, startPlan=${startPlan}, bytes=${transformedBody?.length ?? 0})`);
   }
@@ -214,6 +214,17 @@ export async function proxyRequest(
       appVersion: config.identity.appVersion,
       debug: debug ? (message) => debugLine(reqId, message) : undefined,
       send: (finalPairs) => {
+        if (dumpEnabled()) {
+          // The pre-built `upstream_out` line shows the pre-routing URL and
+          // pre-signing header set; this line captures what actually went on
+          // the wire (routed URL + signed pairs) — the two diverge silently
+          // otherwise and misled a 2026-09-18 debugging session.
+          dumpPhase(reqId, "wire_out", {
+            url: sendUrl,
+            signed: finalPairs.some(([k]) => k.toLowerCase() === "x-client-sig"),
+            headers: dumpHeaders(new Headers(Object.fromEntries(finalPairs))),
+          });
+        }
         const sendReq = sendUrl === req.url && finalPairs === pairs
           ? req
           : new Request(sendUrl, {

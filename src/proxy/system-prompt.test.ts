@@ -30,7 +30,7 @@ describe("formatLocalIsoDate (bundle pK)", () => {
 
 describe("buildEnvironmentSection (bundle T9o)", () => {
   it("emits the heading + invoked line + five value lines joined by \\n", () => {
-    expect(buildEnvironmentSection(ENV, "glm-5.3")).toBe(
+    expect(buildEnvironmentSection(ENV, "glm-5.3", "zai")).toBe(
       "# Environment\n" +
         "You have been invoked in the following environment:\n" +
         "- Primary working directory: /home/dev/project\n" +
@@ -38,27 +38,37 @@ describe("buildEnvironmentSection (bundle T9o)", () => {
         "- Platform: linux\n" +
         "- Shell: bash\n" +
         "- OS Version: linux 6.8.0-49-generic x64\n" +
-        "- You are powered by the model named glm-5.3.",
+        "- You are powered by the model named zai-api/glm-5.3.",
     );
   });
 
   it("omits the powered-by line when currentModel is missing/empty/whitespace", () => {
     for (const model of [undefined, "", "   "]) {
-      const out = buildEnvironmentSection(ENV, model);
+      const out = buildEnvironmentSection(ENV, model, "zai");
       expect(out).not.toContain("powered by the model named");
       expect(out.endsWith("- OS Version: linux 6.8.0-49-generic x64")).toBe(true);
     }
   });
 
+  it("prefixes the built-in model-provider id (bundle p2: zai→zai-api, bigmodel→bigmodel-api)", () => {
+    expect(buildEnvironmentSection(ENV, "glm-4.6", "bigmodel")).toContain(
+      "- You are powered by the model named bigmodel-api/glm-4.6.",
+    );
+  });
+
+  it("omits the powered-by line when the provider is unknown", () => {
+    expect(buildEnvironmentSection(ENV, "glm-5.3")).not.toContain("powered by the model named");
+  });
+
   it("never emits 'unknown' placeholders for cwd/platform/osVersion when given real values", () => {
-    const out = buildEnvironmentSection(ENV, "glm-5.3");
+    const out = buildEnvironmentSection(ENV, "glm-5.3", "zai");
     expect(out).not.toContain(": unknown");
   });
 });
 
 describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
   it("emits exactly 3 official blocks, each with an ephemeral cache_control breakpoint", () => {
-    const blocks = buildStartPlanSystem(undefined, "glm-5.3", ENV);
+    const blocks = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
     expect(blocks).toHaveLength(3);
     for (const b of blocks) {
       expect(b.type).toBe("text");
@@ -67,12 +77,12 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
   });
 
   it("block 1 is the bare CLI Prefix", () => {
-    const [cli] = buildStartPlanSystem(undefined, "glm-5.3", ENV);
+    const [cli] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
     expect(cli.text).toBe("You are ZCode, an interactive coding agent");
   });
 
   it("block 2 = Agent Identity + ZCode Desktop Context, \\n\\n-joined (stable group)", () => {
-    const [, stable] = buildStartPlanSystem(undefined, "glm-5.3", ENV);
+    const [, stable] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
     expect(stable.text.startsWith("\nYou are an interactive ZCode agent that helps users with software engineering tasks.")).toBe(true);
     expect(stable.text).toContain("# Harness");
     // Current 3.7.7+ harness line (mid-conversation system turns)
@@ -87,7 +97,7 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
   });
 
   it("block 3 = '\\n\\n' + Dynamic Behavior + Environment + Context Management (dynamic group)", () => {
-    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV);
+    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
     expect(dynamic.text.startsWith("\n\n# Communicating with the user")).toBe(true);
     // Section order: dynamic behavior → environment → context management
     const envIdx = dynamic.text.indexOf("# Environment");
@@ -95,24 +105,24 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
     expect(envIdx).toBeGreaterThan(dynamic.text.indexOf("# Communicating with the user"));
     expect(cmIdx).toBeGreaterThan(envIdx);
     // The powered-by line sits mid-block, directly before Context Management
-    expect(dynamic.text).toContain("- You are powered by the model named glm-5.3.\n\n# Context management");
+    expect(dynamic.text).toContain("- You are powered by the model named zai-api/glm-5.3.\n\n# Context management");
     // Context management ends with the state-changing-command rule
     expect(dynamic.text.endsWith("A signal that pattern-matches to a known failure may have a different cause.")).toBe(true);
   });
 
   it("byte-spot: single \\n between the code-style default and the comment rule (wTr join)", () => {
-    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV);
+    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
     expect(dynamic.text).toContain("match its comment density, naming, and idiom.\nOnly write a code comment");
   });
 
   it("byte-spot: 'exhaustive survey' has no trailing period (xTr literal)", () => {
-    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV);
+    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
     expect(dynamic.text).toContain("not an exhaustive survey\n\n");
     expect(dynamic.text).not.toContain("not an exhaustive survey.");
   });
 
   it("environment lines carry the resolved env values", () => {
-    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV);
+    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
     expect(dynamic.text).toContain("- Primary working directory: /home/dev/project");
     expect(dynamic.text).toContain("- Platform: linux");
     expect(dynamic.text).toContain("- Shell: bash");
@@ -129,6 +139,7 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
       ],
       "glm-5.3",
       ENV,
+      "zai",
     );
     expect(blocks).toHaveLength(5);
     expect(blocks[3]).toEqual({ type: "text", text: "User rule" });
