@@ -146,9 +146,11 @@ describe("buildIdentityHeaders", () => {
 
   // --- New behaviour matching `pio` in the current ZCode bundle ---
 
-  it("emits headers in the exact `TV` order", () => {
+  it("emits headers in the exact `TV` runtime insertion order", () => {
     // Clear env-gated headers so the order assertion is deterministic;
     // X-Client-Language/X-Client-Timezone are always present (unknown fallback).
+    // Order = spread-base {User-Agent, HTTP-Referer, X-Title} + appended keys
+    // (NOTEPAD §E correction — overrides keep their base positions).
     const savedRC = process.env.ZCODE_IDENTITY_RELEASE_CHANNEL;
     const savedDM = process.env.ZCODE_IDENTITY_DEVICE_MID;
     delete process.env.ZCODE_IDENTITY_RELEASE_CHANNEL;
@@ -156,10 +158,10 @@ describe("buildIdentityHeaders", () => {
     try {
       const h = buildIdentityHeaders(BASE);
       expect(Object.keys(h)).toEqual([
-        "HTTP-Referer",
         "User-Agent",
-        "X-ZCode-App-Version",
+        "HTTP-Referer",
         "X-Title",
+        "X-ZCode-App-Version",
         "X-Platform",
         "X-Release-Channel",
         "X-Client-Language",

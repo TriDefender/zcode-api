@@ -156,17 +156,23 @@ export function buildLlmIdentityHeaders(id: ProxyIdentity): Record<string, strin
 }
 
 /**
- * Context-shaped identity headers — mirrors the 3.12.3 host builder `TV`
+ * Context-shaped identity headers — mirrors the host builder
+ * `TV` (3.12.3 chunk-ZH56ETHO) / `c5` (3.14.0 chunk-WFF5YMZO) / bundle `IJt`
  * (buildZCodeSourceHeadersFromContext), reached via the endpoint-routing
- * source-headers factory (`V6n`). 3.12.3 changes vs 3.11: X-ZCode-Agent is
- * GONE from this plane, and language/timezone are always present with the
- * "unknown" fallback. Consumers: endpoint-routing.ts (source headers),
- * claim/client.ts, routes-quota.ts, async bridge.
+ * source-headers factory (`V6n`). X-ZCode-Agent is GONE from this plane, and
+ * language/timezone are always present with the "unknown" fallback. Consumers:
+ * endpoint-routing.ts (source headers), claim/client.ts, routes-quota.ts,
+ * async bridge.
  *
- * Order (bundle `TV`):
- *   HTTP-Referer, User-Agent, [X-ZCode-App-Version], X-Title, [X-Platform],
+ * Order — RUNTIME INSERTION order, not source written order (2026-09-19
+ * correction, `_reverse/NOTEPAD.md` §E): the official builder spreads a
+ * 3-key base first (`yE`/`cU`/`Llr` = `{"User-Agent","HTTP-Referer","X-Title"}`)
+ * and then overrides/adds keys. JS spread semantics keep overridden keys at
+ * their base positions, so the wire order is:
+ *   User-Agent, HTTP-Referer, X-Title, [X-ZCode-App-Version], [X-Platform],
  *   [X-Release-Channel], X-Client-Language, X-Client-Timezone,
  *   [X-Os-Category], [X-Os-Version], [X-Device-Mid]
+ * (verified byte-level against both the 3.12.3 and 3.14.0 bundles/hosts).
  *
  * Returns `Record<string, string>` rather than a fixed interface because
  * several headers are conditionally omitted.
@@ -174,10 +180,10 @@ export function buildLlmIdentityHeaders(id: ProxyIdentity): Record<string, strin
 export function buildIdentityHeaders(id: ProxyIdentity): Record<string, string> {
   const v = resolveIdentityValues(id);
   return {
-    "HTTP-Referer": id.refererOrigin,
     "User-Agent": `ZCode/${v.n ?? "unknown"}`,
-    ...(v.n ? { "X-ZCode-App-Version": v.n } : {}),
+    "HTTP-Referer": id.refererOrigin,
     "X-Title": `Z Code@${id.sourceTitle}`,
+    ...(v.n ? { "X-ZCode-App-Version": v.n } : {}),
     ...(v.platform && v.arch ? { "X-Platform": `${v.platform}-${v.arch}` } : {}),
     ...(v.releaseChannel ? { "X-Release-Channel": v.releaseChannel } : {}),
     "X-Client-Language": v.clientLanguage ?? "unknown",
