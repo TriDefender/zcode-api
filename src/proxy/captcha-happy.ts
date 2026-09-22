@@ -122,6 +122,19 @@ function shutdownSyncFetchWorker(): void {
 
 const CDN_CACHE_DIR = path.join(os.homedir(), ".zcode-captcha-cdn-cache");
 const _memCdnCache = new Map();
+// pe bundles rotate (pe.0xx…); every rotation would otherwise pin a fresh
+// multi-hundred-KB body for the process lifetime (issue #50). Insertion-ordered
+// FIFO — the oldest rotation ages out first; disk cache still serves re-reads.
+const MEM_CDN_CACHE_CAP = 16;
+function rememberCdnBody(url, body) {
+  _memCdnCache.set(url, body);
+  if (_memCdnCache.size > MEM_CDN_CACHE_CAP) {
+    for (const key of _memCdnCache.keys()) {
+      _memCdnCache.delete(key);
+      if (_memCdnCache.size <= MEM_CDN_CACHE_CAP) break;
+    }
+  }
+}
 let _cookieCache = { cookies: [], ts: 0 };
 const COOKIE_CACHE_TTL_MS = 5 * 60 * 1000;
 const _DEBUG = /^(1|true|yes)$/i.test(
@@ -136,8 +149,17 @@ if (proxyUrl) {
 }
 
 // ── Globals shared across solves ────────────────────────────────────────────
+// Ring buffer: the stall detector reads only the newest entry and failure
+// diagnostics the last ~12 entries of the CURRENT solve — anything older is
+// dead weight. Unbounded it grew for the process lifetime (issue #50).
+const REQUEST_LOG_CAP = 256;
 const _requestLog = [];
-const solveTimes = [];
+function noteRequest(entry) {
+  _requestLog.push(entry);
+  if (_requestLog.length > REQUEST_LOG_CAP) {
+    _requestLog.splice(0, _requestLog.length - REQUEST_LOG_CAP);
+  }
+}
 // Consecutive-stall tracker per pe bundle URL: the same cached pe version
 // can stall every attempt (bad rotated VM variant / stale cache). After two
 // stalls on one URL, evict its memory + disk cache entry so the next init
@@ -225,7 +247,7 @@ function getCachedBody(url) {
     const p = diskPathFor(url);
     if (fs.existsSync(p)) {
       const body = fs.readFileSync(p);
-      _memCdnCache.set(url, body);
+      rememberCdnBody(url, body);
       return body;
     }
   } catch (_) {}
@@ -237,7 +259,7 @@ async function fetchAndStore(url) {
     const res = await fetch(url, { headers: { "user-agent": fp.userAgent } });
     const buf = Buffer.from(await res.arrayBuffer());
     if (buf.length > 0) {
-      _memCdnCache.set(url, buf);
+      rememberCdnBody(url, buf);
       try {
         const p = diskPathFor(url);
         fs.mkdirSync(CDN_CACHE_DIR, { recursive: true });
@@ -339,7 +361,7 @@ function makeInterceptor(bypassPeCache = false) {
   return {
     async beforeAsyncRequest({ request, window: w }) {
       const url = request.url;
-      _requestLog.push({ at: Date.now(), method: request.method, url });
+      noteRequest({ at: Date.now(), method: request.method, url });
       injectRequestHeaders(request);
       if (/\balicdn\.com/i.test(url)) {
         let body = skipPeCache(url) ? null : getCachedBody(url);
@@ -414,7 +436,7 @@ function makeInterceptor(bypassPeCache = false) {
     },
     beforeSyncRequest({ request, window: w }) {
       const url = request.url;
-      _requestLog.push({ at: Date.now(), method: request.method, url, sync: true });
+      noteRequest({ at: Date.now(), method: request.method, url, sync: true });
       injectRequestHeaders(request);
       let body = null;
       if (/\balicdn\.com/i.test(url)) {
@@ -2174,6 +2196,31 @@ export function removeGlobalWindowAlias(g, w) {
   } catch (_) {}
 }
 
+// ── Heap reclaim at window-generation turnover ─────────────────────────────
+// A destroyed window leaves a large dead object graph behind (SDK instances,
+// pe VM, intervals, XHR buffers). JSC only hands pages back to the OS on a
+// FULL synchronous collection, so without this the serve process ratchets:
+// every window generation's allocation peak becomes the permanent RSS floor
+// (issue #50: 2.9 days → 9.95GB resident). Throttled because pe-storm retry
+// ladders destroy several windows back-to-back and Bun.gc(true) is a
+// stop-the-world pass that gets heavier at large heaps.
+const _gcStats = { calls: 0, lastAt: 0 };
+function reclaimCaptchaHeap() {
+  try {
+    const gc =
+      (typeof Bun !== "undefined" && typeof Bun.gc === "function" && Bun.gc) ||
+      (typeof globalThis.gc === "function" && globalThis.gc); // Node --expose-gc (tests)
+    if (!gc) return; // plain Node runtime (Android bundle): no exposed gc, skip
+    const raw = Number(process.env.CAPTCHA_GC_MIN_INTERVAL_MS);
+    const minMs = Number.isFinite(raw) && raw >= 0 ? raw : 5_000;
+    const now = Date.now();
+    if (now - _gcStats.lastAt < minMs) return;
+    _gcStats.lastAt = now;
+    _gcStats.calls += 1;
+    gc(true);
+  } catch (_) {}
+}
+
 function destroyDom(win) {
   try {
     const cap = win.document.getElementById("cap");
@@ -2192,6 +2239,7 @@ function destroyDom(win) {
   // host constructor (harmless: the window registry is already cleared).
   removeGuestScope(win);
   try { shutdownSyncFetchWorker(); } catch (_) {}
+  reclaimCaptchaHeap();
 }
 
 function extractVerifyParam(param) {
@@ -2247,10 +2295,13 @@ function handleCaptchaResult(result) {
 // 815ms per solve) by amortizing the DOM boot + SDK script load. On by
 // default; opt out with CAPTCHA_WINDOW_REUSE=0 (or per-call
 // solveTraceless({reuseWindow:false})). The window
-// is discarded after `maxSolves` (memory growth), after any stall/failure
-// (fresh InitCaptchaV3 rolls a new pe version), or after `maxIdleMs` idle.
+// is discarded after `maxSolves` (each solve leaves SDK instance graphs
+// resident in the window — issue #50 measured tens of MB per solve), after
+// any stall/failure (fresh InitCaptchaV3 rolls a new pe version), or after
+// `maxIdleMs` idle. 8 keeps most of the amortization win while capping a
+// generation's retention peak at ~1/3 of the old 25-solve default.
 const _reusePool = { window: null, browserFrame: null, solves: 0, lastUsedAt: 0 };
-const REUSE_MAX_SOLVES = Number(process.env.CAPTCHA_REUSE_MAX_SOLVES || 25);
+const REUSE_MAX_SOLVES = Number(process.env.CAPTCHA_REUSE_MAX_SOLVES || 8);
 const REUSE_MAX_IDLE_MS = Number(process.env.CAPTCHA_REUSE_MAX_IDLE_MS || 120_000);
 
 function takeReusableWindow() {
@@ -2448,4 +2499,17 @@ async function solveTraceless(opts) {
   }
 }
 
-export { solveTraceless, createDom, destroyDom };
+/** Test/debug observability into the memory guards (issue #50). */
+export function __captchaMemStats() {
+  return {
+    requestLogLength: _requestLog.length,
+    requestLogCap: REQUEST_LOG_CAP,
+    cdnCacheSize: _memCdnCache.size,
+    cdnCacheCap: MEM_CDN_CACHE_CAP,
+    reuseMaxSolves: REUSE_MAX_SOLVES,
+    gcCalls: _gcStats.calls,
+    gcLastAt: _gcStats.lastAt,
+  };
+}
+
+export { solveTraceless, createDom, destroyDom, noteRequest, rememberCdnBody, reclaimCaptchaHeap };

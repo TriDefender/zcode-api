@@ -1,9 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import {
+  __captchaMemStats,
   createDom,
   destroyDom,
   installGlobalWindowAlias,
+  noteRequest,
+  reclaimCaptchaHeap,
+  rememberCdnBody,
   removeGlobalWindowAlias,
 } from "./captcha-happy.js";
 
@@ -304,6 +308,55 @@ describe("alias lifecycle (install/remove descriptor contract)", () => {
       expect(typeof g.cancelAnimationFrame).toBe("function");
     } finally {
       removeGlobalWindowAlias(g, w);
+    }
+  });
+});
+
+// Memory guards for long-running serve processes (issue #50: monotonic RSS
+// growth, 2.9 days → 9.95GB). Every structure here is module-scoped and shared
+// across solves, so without an explicit bound each one grows for the process
+// lifetime.
+describe("memory guards (issue #50)", () => {
+  test("guest request log is a ring buffer, not an append-only array", () => {
+    const cap = __captchaMemStats().requestLogCap;
+    const beyond = cap + 44;
+    for (let i = 0; i < beyond; i++) {
+      noteRequest({ at: Date.now(), method: "GET", url: `https://example.com/${i}` });
+    }
+    const stats = __captchaMemStats();
+    expect(stats.requestLogLength).toBe(cap);
+  });
+
+  test("in-memory CDN cache evicts oldest entries at the cap (pe rotation)", () => {
+    for (let i = 0; i < 20; i++) {
+      rememberCdnBody(`https://o.alicdn.com/dynamicJS/v/pe.${1000 + i}.js`, Buffer.from("x"));
+    }
+    expect(__captchaMemStats().cdnCacheSize).toBe(__captchaMemStats().cdnCacheCap);
+  });
+
+  test("heap reclaim runs at most once per throttle window", () => {
+    const saved = process.env.CAPTCHA_GC_MIN_INTERVAL_MS;
+    try {
+      const before = __captchaMemStats().gcCalls;
+      process.env.CAPTCHA_GC_MIN_INTERVAL_MS = "0";
+      reclaimCaptchaHeap();
+      reclaimCaptchaHeap();
+      expect(__captchaMemStats().gcCalls).toBe(before + 2);
+
+      process.env.CAPTCHA_GC_MIN_INTERVAL_MS = "3600000";
+      reclaimCaptchaHeap();
+      expect(__captchaMemStats().gcCalls).toBe(before + 2);
+    } finally {
+      if (saved === undefined) delete process.env.CAPTCHA_GC_MIN_INTERVAL_MS;
+      else process.env.CAPTCHA_GC_MIN_INTERVAL_MS = saved;
+    }
+  });
+
+  test("reused-window solve budget defaults to the reduced cap", () => {
+    // 25 → 8 (issue #50): each solve leaves SDK instance graphs resident in a
+    // reused window, so the cap bounds a generation's retention peak.
+    if (process.env.CAPTCHA_REUSE_MAX_SOLVES === undefined) {
+      expect(__captchaMemStats().reuseMaxSolves).toBe(8);
     }
   });
 });
