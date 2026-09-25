@@ -101,6 +101,21 @@ mcp:
   webReader: false
   # (planned) Inject the three `zread` tools (search_doc/get_repo_structure/read_file).
   zread: false
+  # Official plugin-MCP gateway relay (tianyancha / Wind / 同花顺 iFinD ...).
+  # GET /mcp lists the served endpoints; /mcp/{server} relays MCP streamable
+  # HTTP to Z.AI's official gateway with your OAuth login injected — inbound
+  # callers authenticate with the same proxyApiKey as the LLM routes.
+  # The server table ships with the build (scripts/regen-mcp-catalogue.ts).
+  # Note: `mcp.enabled` above gates only the (unwired) GLM hosted-tool plane —
+  # this relay is controlled independently by `gateway.enabled`. Since the
+  # relay spends your paid data entitlements, setting auth.proxyApiKey is
+  # strongly recommended (CORS headers are only emitted when a key is set).
+  gateway:
+    enabled: true
+    # `${ZCODE_BASE_URL}` substituted into plugin .mcp.json URLs.
+    # Production default per the desktop bundle (`jee`); the
+    # chatglm.site variant is the TEST env origin.
+    upstreamOrigin: https://zcode.z.ai
 
 # Async (off-peak / "idle plan") bridge.
 # When enabled, exposes POST /async/v1/messages and /async/v1/chat/completions

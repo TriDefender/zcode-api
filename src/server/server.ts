@@ -17,6 +17,7 @@ import { handleChatCompletions, handleListModels } from "./routes-openai.js";
 import { handleMessages } from "./routes-anthropic.js";
 import { handleResponsesRoute } from "./routes-responses.js";
 import { handleAsyncMessagesRoute, handleAsyncChatRoute, handleAsyncHealthRoute } from "./routes-async.js";
+import { handleMcpListingRoute, handleMcpRelayRoute, type McpRouteOptions } from "./routes-mcp.js";
 import { handleQuota } from "./routes-quota.js";
 import { errorResponse } from "../proxy/handler.js";
 import type { ResponseStore } from "../responses/store.js";
@@ -59,15 +60,21 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
     fetchImpl: opts.fetchImpl,
     debug: opts.debug === true,
   };
+  const mcpOpts: McpRouteOptions = {
+    config,
+    auth,
+    ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+  };
 
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     const path = url.pathname;
     const method = req.method;
+    const cors = corsHeaders(Boolean(config.auth.proxyApiKey));
 
     // CORS preflight
     if (method === "OPTIONS") {
-      return corsResponse();
+      return corsResponse(cors);
     }
 
     if (method === "GET" && (path === "/webui" || path.startsWith("/webui/"))) {
@@ -129,6 +136,28 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
       }
     }
 
+    if (config.mcp.gateway.enabled) {
+      if (path === "/mcp" && method === "GET") {
+        return handleMcpListingRoute(req, mcpOpts);
+      }
+      // MCP streamable HTTP: POST (JSON-RPC), GET (SSE stream), DELETE
+      // (session close). `/mcp` itself only supports GET above.
+      if (
+        path.startsWith("/mcp/") &&
+        (method === "POST" || method === "GET" || method === "DELETE")
+      ) {
+        let serverKey = path.slice("/mcp/".length);
+        try {
+          serverKey = decodeURIComponent(serverKey);
+        } catch {
+          // Malformed percent-escape (e.g. /mcp/%zz): decodeURIComponent throws
+          // URIError; the raw string can never match a catalogue key, so let
+          // the handler's lookup produce the 404 instead of a 500 here.
+        }
+        return handleMcpRelayRoute(req, serverKey, mcpOpts);
+      }
+    }
+
     if (path === "/health" || path === "/") {
       return new Response(JSON.stringify({ status: "ok", provider: config.provider }), {
         status: 200,
@@ -151,6 +180,7 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
 export function startServer(opts: ServerOptions): Promise<ProxyServer> {
   const handler = createFetchHandler(opts);
   const { port: requestedPort, host } = opts.config.server;
+  const cors = corsHeaders(Boolean(opts.config.auth.proxyApiKey));
 
   const server: Server = createServer(async (req, res) => {
     const abortController = new AbortController();
@@ -162,15 +192,16 @@ export function startServer(opts: ServerOptions): Promise<ProxyServer> {
     // `/async/*` routes can hold the connection open for minutes-to-hours while
     // waiting for an off-peak ticket. Lift the per-request socket timeout from
     // the default 600s (set below via server.requestTimeout) to 24h so the long
-    // queue wait + LLM stream doesn't get killed mid-flight. Non-async routes
-    // keep the default timeout.
-    if ((req.url ?? "").startsWith("/async/")) {
+    // queue wait + LLM stream doesn't get killed mid-flight. `/mcp/*` GET SSE
+    // streams are equally long-lived. Other routes keep the default timeout.
+    const pathForTimeout = req.url ?? "";
+    if (pathForTimeout.startsWith("/async/") || pathForTimeout.startsWith("/mcp/")) {
       req.setTimeout(24 * 60 * 60 * 1000);
     }
 
     try {
       const webReq = nodeReqToWebRequest(req, abortController.signal);
-      const resp = await handler(webReq).then((r) => addCorsHeaders(r));
+      const resp = await handler(webReq).then((r) => addCorsHeaders(r, cors));
       await writeWebResponseToNodeResp(resp, res, abortController.signal);
     } catch (err) {
       if (abortController.signal.aborted) return;
@@ -299,17 +330,18 @@ function checkProxyKey(authHeader: string, expected: string): boolean {
 }
 
 /** Build a CORS preflight response. */
-function corsResponse(): Response {
+function corsResponse(cors: Record<string, string>): Response {
   return new Response(null, {
     status: 204,
-    headers: corsHeaders(),
+    headers: cors,
   });
 }
 
 /** Add CORS headers to an existing response (non-mutating). */
-function addCorsHeaders(resp: Response): Response {
+function addCorsHeaders(resp: Response, cors: Record<string, string>): Response {
+  if (Object.keys(cors).length === 0) return resp;
   const headers = new Headers(resp.headers);
-  for (const [k, v] of Object.entries(corsHeaders())) {
+  for (const [k, v] of Object.entries(cors)) {
     headers.set(k, v);
   }
   return new Response(resp.body, {
@@ -319,11 +351,23 @@ function addCorsHeaders(resp: Response): Response {
   });
 }
 
-function corsHeaders(): Record<string, string> {
+/**
+ * CORS headers are emitted ONLY when `auth.proxyApiKey` is set.
+ *
+ * Rationale: the /mcp relay (and /v1/*) inject the operator's real OAuth
+ * credentials upstream; with `access-control-allow-origin: *` on a keyless
+ * deployment, any webpage in a logged-in user's browser could pass preflight
+ * and drive those routes cross-origin (MCP JSON POSTs are preflighted, so
+ * withholding the headers blocks the browser before the request fires).
+ * Local CLI/curl tools and the same-origin /webui never needed CORS.
+ */
+function corsHeaders(corsEnabled: boolean): Record<string, string> {
+  if (!corsEnabled) return {};
   return {
     "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET, POST, OPTIONS",
-    "access-control-allow-headers": "Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta",
+    "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+    "access-control-allow-headers": "Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta, mcp-session-id, mcp-protocol-version, last-event-id",
+    "access-control-expose-headers": "mcp-session-id, mcp-protocol-version",
     "access-control-max-age": "86400",
   };
 }

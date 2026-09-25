@@ -31,6 +31,8 @@ beforeEach(() => {
   delete process.env.ZCODE_CLAIM_AUTO;
   delete process.env.ZCODE_CLAIM_ORIGIN;
   delete process.env.ZCODE_CLAIM_POLL_INTERVAL_MS;
+  delete process.env.ZCODE_MCP_GATEWAY;
+  delete process.env.ZCODE_MCP_GATEWAY_ORIGIN;
 });
 
 afterEach(() => {
@@ -125,7 +127,7 @@ logging:
     expect(cfg.providers.bigmodel.openaiBase).toBe("https://open.bigmodel.cn/api/coding/paas/v4");
     expect(cfg.clientIdentity).toEqual({ mode: "observe", ttlSeconds: 900, maxSessions: 1024 });
     expect(cfg.responses).toEqual({ enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 });
-    expect(cfg.mcp).toEqual({ enabled: true, webSearch: true, webReader: false, zread: false });
+    expect(cfg.mcp).toEqual({ enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.z.ai" } });
     expect(cfg.async).toEqual({
       enabled: false,
       origin: "https://zcode.z.ai",
@@ -173,8 +175,66 @@ mcp:
 `);
     const cfg = loadConfig(path);
     expect(cfg.responses).toEqual({ enabled: false, storeMaxEntries: 50, storeTtlMs: 3600000 });
-    expect(cfg.mcp).toEqual({ enabled: true, webSearch: false, webReader: true, zread: true });
+    expect(cfg.mcp).toEqual({ enabled: true, webSearch: false, webReader: true, zread: true, gateway: { enabled: true, upstreamOrigin: "https://zcode.z.ai" } });
   });
+
+  describe("mcp.gateway", () => {
+  it("rejects a non-https non-loopback upstreamOrigin", () => {
+    const path = writeYaml(`
+server:
+  port: 9090
+provider: zai
+mcp:
+  gateway:
+    upstreamOrigin: "http://zcode.example.com"
+`);
+    expect(() => loadConfig(path)).toThrow("mcp.gateway.upstreamOrigin");
+  });
+
+  it("YAML overrides enabled and upstreamOrigin", () => {
+    const path = writeYaml(`
+server:
+  port: 9090
+provider: zai
+mcp:
+  gateway:
+    enabled: false
+    upstreamOrigin: "https://mirror.example.com"
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.mcp.gateway).toEqual({ enabled: false, upstreamOrigin: "https://mirror.example.com" });
+  });
+
+  it("env overrides beat YAML", () => {
+    process.env.ZCODE_MCP_GATEWAY = "false";
+    process.env.ZCODE_MCP_GATEWAY_ORIGIN = "https://env.example.com";
+    const path = writeYaml(`
+server:
+  port: 9090
+provider: zai
+mcp:
+  gateway:
+    enabled: true
+    upstreamOrigin: "https://yaml.example.com"
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.mcp.gateway).toEqual({ enabled: false, upstreamOrigin: "https://env.example.com" });
+  });
+
+  it("env enabled=true does not shadow the YAML origin", () => {
+    process.env.ZCODE_MCP_GATEWAY = "true";
+    const path = writeYaml(`
+server:
+  port: 9090
+provider: zai
+mcp:
+  gateway:
+    upstreamOrigin: "https://yaml.example.com"
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.mcp.gateway).toEqual({ enabled: true, upstreamOrigin: "https://yaml.example.com" });
+  });
+});
 
   it("async: YAML values override defaults", () => {
     const path = writeYaml(`
