@@ -105,11 +105,15 @@ mcp:
   # GET /mcp lists the served endpoints; /mcp/{server} relays MCP streamable
   # HTTP to Z.AI's official gateway with your OAuth login injected — inbound
   # callers authenticate with the same proxyApiKey as the LLM routes.
+  # Requires a coding-plan credential: the upstream gateway rejects
+  # identity-only auth (JSON-RPC 3101), so start-plan requests fail with 400
+  # `mcp_plan_unsupported`.
   # The server table ships with the build (scripts/regen-mcp-catalogue.ts).
   # Note: `mcp.enabled` above gates only the (unwired) GLM hosted-tool plane —
   # this relay is controlled independently by `gateway.enabled`. Since the
   # relay spends your paid data entitlements, setting auth.proxyApiKey is
   # strongly recommended (CORS headers are only emitted when a key is set).
+  # Env overrides: ZCODE_MCP_GATEWAY, ZCODE_MCP_GATEWAY_ORIGIN.
   gateway:
     enabled: true
     # `${ZCODE_BASE_URL}` substituted into plugin .mcp.json URLs.

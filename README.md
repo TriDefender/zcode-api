@@ -1,5 +1,7 @@
 <div align="center">
 
+[中文版](README.md) | [英文版](README_EN.md)
+
 <img src="Android-APP/design/assets/zcode-app-icon.png" width="88" alt="ZCode Proxy 图标" />
 
 # ZCode Proxy
@@ -10,7 +12,7 @@
 本来只能在官方客户端里用，ZCode Proxy 在本机把它变成标准的 OpenAI / Anthropic 接口，
 于是 Claude Code、Codex、Silly Tavern ……都能直接用上你的套餐额度。
 
-[快速上手](#-五分钟上手) · [接入编码工具](#-把编码工具接上来) · [手机版](#-手机版-android) · [常见问题](#-常见问题)
+[快速上手](#-一分钟上手) · [接入编码工具](#-把编码工具接上来) · [手机版](#-手机版-android) · [常见问题](#-常见问题)
 
 </div>
 
@@ -23,6 +25,7 @@
 - 📱 **安卓 App** —— 手机上启动/停止代理、看实时日志、切换服务商，出门在外也好用。
 - 💬 **自带网页聊天** —— 打开 `/webui` 就是一个本地 ChatGPT 风格聊天页，随手测试模型。
 - 🌙 **闲时通道 & 套餐秒抢**（可选）—— 错峰时段的免费额度通道、限量体验套餐自动领取，都是内置功能。
+- 🔌 **套餐内 MCP 反代** —— ZCode 官方插件 MCP（天眼查 / Wind / 同花顺 iFinD…）中继到本机 `/mcp/*`（需 coding-plan 登录，`GET /mcp` 查看列表）；自带网页聊天还能外挂你自己的 MCP 服务器给模型当工具用。
 - 🪟 **全平台** —— Windows / macOS / Linux 一份代码直接跑，也能编译成单文件程序或 Docker 部署。
 
 ## 🚀 一分钟上手
