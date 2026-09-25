@@ -275,8 +275,17 @@
       .mcp-srv .mcp-err { color: var(--danger); font-size: 12px; margin-top: 4px; word-break: break-word; }
       .mcp-tools { margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.5; }
       .mcp-tool-chip { display: inline-block; background: var(--elevated); border: 1px solid var(--border); border-radius: 6px; padding: 1px 6px; margin: 2px 2px 0 0; }
+      .msg.tool details.tool-result {
+        background: var(--elevated); border: 1px dashed var(--border); border-radius: 8px; overflow: hidden;
+      }
+      .msg.tool details.tool-result summary {
+        cursor: pointer; padding: 6px 10px; font-size: 12px; color: var(--muted);
+        list-style: none; display: flex; align-items: center; gap: 6px; user-select: none;
+      }
+      .msg.tool details.tool-result summary::-webkit-details-marker { display: none; }
+      .msg.tool details.tool-result summary::before { content: "\25B6"; font-size: 9px; transition: transform .15s; }
+      .msg.tool details.tool-result[open] summary::before { transform: rotate(90deg); }
       .msg.tool .tool-body {
-        background: var(--elevated); border: 1px dashed var(--border); border-radius: 8px;
         padding: 8px 10px; font-size: 12px; color: var(--muted); white-space: pre-wrap; word-break: break-word;
       }
       .msg .toolcalls { font-size: 12px; color: var(--muted); margin-top: 4px; }
@@ -582,9 +591,12 @@
         }
 
         if (m.role === "tool") {
+          var tdetail = document.createElement("details"); tdetail.className = "tool-result";   // collapsed by default
+          var tsum = document.createElement("summary"); tsum.textContent = "🔧 tool result";
           var tbody = document.createElement("div"); tbody.className = "tool-body";
-          tbody.textContent = "🔧 tool result\n" + (m.content || "");
-          wrap.appendChild(tbody);
+          tbody.textContent = m.content || "";
+          tdetail.appendChild(tsum); tdetail.appendChild(tbody);
+          wrap.appendChild(tdetail);
           return wrap;
         }
 
