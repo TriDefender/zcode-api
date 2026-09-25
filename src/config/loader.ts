@@ -24,6 +24,8 @@ const ENV = {
   CLAIM_POLL_INTERVAL_MS: "ZCODE_CLAIM_POLL_INTERVAL_MS",
   ENDPOINT_ROUTING_ENABLED: "ZCODE_ENDPOINT_ROUTING",
   CLIENT_SIGNING_ENABLED: "ZCODE_CLIENT_SIGNING",
+  MCP_GATEWAY_ENABLED: "ZCODE_MCP_GATEWAY",
+  MCP_GATEWAY_ORIGIN: "ZCODE_MCP_GATEWAY_ORIGIN",
 } as const;
 
 /** Mirrors the ZCode desktop release (`_reverse/NOTEPAD.md`); bump per client
@@ -54,6 +56,11 @@ const DEFAULTS = {
   MCP_WEB_SEARCH: true,
   MCP_WEB_READER: false,
   MCP_ZREAD: false,
+  MCP_GATEWAY_ENABLED: true,
+  // Production default for `${ZCODE_BASE_URL}` in plugin .mcp.json URLs (glm
+  // bundle `jee`; the `sYe` fallback "https://zcode.chatglm.site" is the TEST
+  // env origin — NOT for production traffic. 3.14.3 `p1`/`air`).
+  MCP_GATEWAY_ORIGIN: "https://zcode.z.ai",
   ASYNC_ENABLED: false,
   ASYNC_ORIGIN: "https://zcode.z.ai",
   ASYNC_POLL_INTERVAL_MS: 5000,
@@ -187,11 +194,21 @@ function resolveResponsesConfig(raw: unknown): ResponsesConfig {
 
 function resolveMcpConfig(raw: unknown): McpConfig {
   const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const gwRaw = obj.gateway && typeof obj.gateway === "object" ? obj.gateway as Record<string, unknown> : {};
+  const gwEnabledEnv = process.env[ENV.MCP_GATEWAY_ENABLED];
+  const gwOriginEnv = process.env[ENV.MCP_GATEWAY_ORIGIN];
+  const gwOrigin = (gwOriginEnv ?? (typeof gwRaw.upstreamOrigin === "string" ? gwRaw.upstreamOrigin : DEFAULTS.MCP_GATEWAY_ORIGIN)).trim()
+    || DEFAULTS.MCP_GATEWAY_ORIGIN;
+  validateOrigin(gwOrigin, "mcp.gateway.upstreamOrigin");
   return {
     enabled: resolveBool(obj.enabled, DEFAULTS.MCP_ENABLED),
     webSearch: resolveBool(obj.webSearch ?? obj.web_search, DEFAULTS.MCP_WEB_SEARCH),
     webReader: resolveBool(obj.webReader ?? obj.web_reader, DEFAULTS.MCP_WEB_READER),
     zread: resolveBool(obj.zread, DEFAULTS.MCP_ZREAD),
+    gateway: {
+      enabled: gwEnabledEnv !== undefined ? resolveBool(gwEnabledEnv, DEFAULTS.MCP_GATEWAY_ENABLED) : resolveBool(gwRaw.enabled, DEFAULTS.MCP_GATEWAY_ENABLED),
+      upstreamOrigin: gwOrigin,
+    },
   };
 }
 

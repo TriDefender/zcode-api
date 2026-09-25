@@ -12,7 +12,8 @@
     "build:darwin-x64": "bun build --compile --target bun-darwin-x64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-darwin-x64",
     "build:darwin-arm64": "bun build --compile --target bun-darwin-arm64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-darwin-arm64",
     "build:android-bundle": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/android/server.cjs --define:process.env.NODE_ENV=\\\"production\\\"",
-    "build:android-apk": "bash scripts/build-android-apk.sh"
+    "build:android-apk": "bash scripts/build-android-apk.sh",
+    "regen:mcp": "bun run scripts/regen-mcp-catalogue.ts"
   },
   "dependencies": {
     "happy-dom": "^20.11.6",

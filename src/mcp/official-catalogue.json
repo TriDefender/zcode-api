@@ -1,0 +1,277 @@
+{
+  "generatedAt": "2026-09-25T15:20:02.957Z",
+  "marketplaceUrl": "https://cdn-zcode.z.ai/zcode/official-plugin/marketplace.json",
+  "defaultUpstreamOrigin": "https://zcode.z.ai",
+  "servers": [
+    {
+      "key": "finance-search",
+      "routeId": "finance_search",
+      "path": "/api/v1/mcp/server/finance_search",
+      "plugin": "finance-search",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "Financial Aggregated Search",
+        "zh-CN": "金融聚合搜索"
+      },
+      "description": {
+        "en": "MCP services for SEC EDGAR filing search and financial web and news search.",
+        "zh-CN": "SEC EDGAR 文件检索与财经网页、新闻搜索 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "hexin-bond",
+      "routeId": "finance_hexin_bond",
+      "path": "/api/v1/mcp/server/finance_hexin_bond",
+      "plugin": "hexin",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "RoyalFlush iFinD",
+        "zh-CN": "同花顺"
+      },
+      "description": {
+        "en": "MCP services for RoyalFlush iFinD stock, global stock, index, fund, and bond data.",
+        "zh-CN": "同花顺股票、海外股票、指数、基金与债券数据 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "hexin-fund",
+      "routeId": "finance_hexin_fund",
+      "path": "/api/v1/mcp/server/finance_hexin_fund",
+      "plugin": "hexin",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "RoyalFlush iFinD",
+        "zh-CN": "同花顺"
+      },
+      "description": {
+        "en": "MCP services for RoyalFlush iFinD stock, global stock, index, fund, and bond data.",
+        "zh-CN": "同花顺股票、海外股票、指数、基金与债券数据 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "hexin-global-stock",
+      "routeId": "finance_hexin_global_stock",
+      "path": "/api/v1/mcp/server/finance_hexin_global_stock",
+      "plugin": "hexin",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "RoyalFlush iFinD",
+        "zh-CN": "同花顺"
+      },
+      "description": {
+        "en": "MCP services for RoyalFlush iFinD stock, global stock, index, fund, and bond data.",
+        "zh-CN": "同花顺股票、海外股票、指数、基金与债券数据 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "hexin-index",
+      "routeId": "finance_hexin_index",
+      "path": "/api/v1/mcp/server/finance_hexin_index",
+      "plugin": "hexin",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "RoyalFlush iFinD",
+        "zh-CN": "同花顺"
+      },
+      "description": {
+        "en": "MCP services for RoyalFlush iFinD stock, global stock, index, fund, and bond data.",
+        "zh-CN": "同花顺股票、海外股票、指数、基金与债券数据 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "hexin-stock",
+      "routeId": "finance_hexin_stock",
+      "path": "/api/v1/mcp/server/finance_hexin_stock",
+      "plugin": "hexin",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "RoyalFlush iFinD",
+        "zh-CN": "同花顺"
+      },
+      "description": {
+        "en": "MCP services for RoyalFlush iFinD stock, global stock, index, fund, and bond data.",
+        "zh-CN": "同花顺股票、海外股票、指数、基金与债券数据 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "sec-search",
+      "routeId": "finance_sec_search",
+      "path": "/api/v1/mcp/server/finance_sec_search",
+      "plugin": "finance-search",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "Financial Aggregated Search",
+        "zh-CN": "金融聚合搜索"
+      },
+      "description": {
+        "en": "MCP services for SEC EDGAR filing search and financial web and news search.",
+        "zh-CN": "SEC EDGAR 文件检索与财经网页、新闻搜索 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "tianyancha",
+      "routeId": "finance_tianyancha",
+      "path": "/api/v1/mcp/server/finance_tianyancha",
+      "plugin": "tianyancha",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "Tianyancha",
+        "zh-CN": "天眼查"
+      },
+      "description": {
+        "en": "MCP service for Tianyancha company information queries.",
+        "zh-CN": "天眼查企业信息查询 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "wind-bond",
+      "routeId": "finance_wind_bond",
+      "path": "/api/v1/mcp/server/finance_wind_bond",
+      "plugin": "wind",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "Wind",
+        "zh-CN": "Wind 万得"
+      },
+      "description": {
+        "en": "MCP services for Wind stock, global stock, index, fund, bond, economic, and document data.",
+        "zh-CN": "万得股票、海外股票、指数、基金、债券、宏观经济与公告研报数据 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "wind-docs",
+      "routeId": "finance_wind_docs",
+      "path": "/api/v1/mcp/server/finance_wind_docs",
+      "plugin": "wind",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "Wind",
+        "zh-CN": "Wind 万得"
+      },
+      "description": {
+        "en": "MCP services for Wind stock, global stock, index, fund, bond, economic, and document data.",
+        "zh-CN": "万得股票、海外股票、指数、基金、债券、宏观经济与公告研报数据 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "wind-economic",
+      "routeId": "finance_wind_economic",
+      "path": "/api/v1/mcp/server/finance_wind_economic",
+      "plugin": "wind",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "Wind",
+        "zh-CN": "Wind 万得"
+      },
+      "description": {
+        "en": "MCP services for Wind stock, global stock, index, fund, bond, economic, and document data.",
+        "zh-CN": "万得股票、海外股票、指数、基金、债券、宏观经济与公告研报数据 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "wind-fund",
+      "routeId": "finance_wind_fund",
+      "path": "/api/v1/mcp/server/finance_wind_fund",
+      "plugin": "wind",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "Wind",
+        "zh-CN": "Wind 万得"
+      },
+      "description": {
+        "en": "MCP services for Wind stock, global stock, index, fund, bond, economic, and document data.",
+        "zh-CN": "万得股票、海外股票、指数、基金、债券、宏观经济与公告研报数据 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "wind-global-stock",
+      "routeId": "finance_wind_global_stock",
+      "path": "/api/v1/mcp/server/finance_wind_global_stock",
+      "plugin": "wind",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "Wind",
+        "zh-CN": "Wind 万得"
+      },
+      "description": {
+        "en": "MCP services for Wind stock, global stock, index, fund, bond, economic, and document data.",
+        "zh-CN": "万得股票、海外股票、指数、基金、债券、宏观经济与公告研报数据 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "wind-index",
+      "routeId": "finance_wind_index",
+      "path": "/api/v1/mcp/server/finance_wind_index",
+      "plugin": "wind",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "Wind",
+        "zh-CN": "Wind 万得"
+      },
+      "description": {
+        "en": "MCP services for Wind stock, global stock, index, fund, bond, economic, and document data.",
+        "zh-CN": "万得股票、海外股票、指数、基金、债券、宏观经济与公告研报数据 MCP 服务。"
+      },
+      "category": "finance"
+    },
+    {
+      "key": "wind-stock",
+      "routeId": "finance_wind_stock",
+      "path": "/api/v1/mcp/server/finance_wind_stock",
+      "plugin": "wind",
+      "version": "0.1.0",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "Wind",
+        "zh-CN": "Wind 万得"
+      },
+      "description": {
+        "en": "MCP services for Wind stock, global stock, index, fund, bond, economic, and document data.",
+        "zh-CN": "万得股票、海外股票、指数、基金、债券、宏观经济与公告研报数据 MCP 服务。"
+      },
+      "category": "finance"
+    }
+  ]
+}

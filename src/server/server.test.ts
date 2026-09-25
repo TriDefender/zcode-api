@@ -34,7 +34,7 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
     endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
     clientSigning: { enabled: false, origin: "https://zcode.z.ai" },
-    mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+    mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
     logging: { level: "info" },
@@ -262,14 +262,28 @@ describe("proxy API key auth", () => {
 });
 
 describe("CORS", () => {
-  it("OPTIONS returns 204 with CORS headers", async () => {
-    const config = makeConfig();
+  it("OPTIONS with proxyApiKey set returns 204 with CORS headers", async () => {
+    const config = makeConfig({ auth: { proxyApiKey: "secret" } });
     const auth = oauthAuth("test");
     const handler = createFetchHandler({ config, auth });
 
     const resp = await handler(new Request("http://localhost/v1/models", { method: "OPTIONS" }));
     expect(resp.status).toBe(204);
     expect(resp.headers.get("access-control-allow-origin")).toBe("*");
+    expect(resp.headers.get("access-control-allow-methods")).toContain("DELETE");
+  });
+
+  it("keyless deployment emits no CORS headers (blocks cross-origin browsers)", async () => {
+    const config = makeConfig({ auth: {} });
+    const auth = oauthAuth("test");
+    const handler = createFetchHandler({ config, auth });
+
+    const preflight = await handler(new Request("http://localhost/v1/models", { method: "OPTIONS" }));
+    expect(preflight.status).toBe(204);
+    expect(preflight.headers.get("access-control-allow-origin")).toBeNull();
+
+    const resp = await handler(new Request("http://localhost/v1/models", { method: "GET" }));
+    expect(resp.headers.get("access-control-allow-origin")).toBeNull();
   });
 });
 

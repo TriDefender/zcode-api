@@ -32,7 +32,7 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
     responses: { enabled: true, storeMaxEntries: 1000, storeTtlMs: 86400000 },
     endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
     clientSigning: { enabled: false, origin: "https://zcode.z.ai" },
-    mcp: { enabled: true, webSearch: true, webReader: false, zread: false },
+    mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
     async: {
       enabled: false,
       origin: "https://zcode.z.ai",
