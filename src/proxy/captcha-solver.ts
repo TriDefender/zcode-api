@@ -22,9 +22,11 @@
 import { Worker } from "node:worker_threads";
 // Asset import: embeds the PRE-BUNDLED worker (plain JS, self-contained ESM --
 // built by scripts/build-fork-worker.ts before compilation; raw .ts assets
-// are not parsed by the compiled runtime). @ts-expect-error -- Bun's
-// `with { type: "file" }` asset import has no DOM-lib type declaration; the
-// default export is the extracted file path at runtime.
+// are not parsed by the compiled runtime). If the bundle is missing, run
+// scripts/build-fork-worker.ts to regenerate it (package.json wires it as
+// the prebuild hook). @ts-expect-error -- Bun's `with { type: "file" }`
+// asset import has no DOM-lib type declaration; the default export is the
+// extracted file path at runtime.
 // @ts-expect-error asset import
 import captchaWorkerEntryPath from "./captcha-worker-entry.bundle.js" with { type: "file" };
 
