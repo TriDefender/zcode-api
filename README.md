@@ -240,6 +240,13 @@ bun run dev         # 开发模式启动面板
 
 架构与实现细节见 [`src/`](src/) 下各源码文件内的注释。
 
+## Privacy
+
+This fork adds **no telemetry, no analytics, and no outbound reporting** of
+any kind. Nothing about your usage, device, or configuration leaves your
+machine. (Inherited from upstream: the proxy is fully local; debug/dump logs
+auto-redact API keys, JWTs, and proxy keys.)
+
 ## License
 
 MIT
