@@ -25,25 +25,53 @@ const DEFAULT_CPU_LIMIT = Number(process.env.CAPTCHA_CPU_LIMIT_PCT || 100);
 const DEFAULT_INTERVAL_MS = Number(process.env.CAPTCHA_CPU_GOVERNOR_INTERVAL_MS || 2_000);
 const TARGET_STEP = 15;
 
-type CpuCounters = { idle: number; total: number };
+type CpuCounters = { idle: number; total: number; source: "proc" | "os" };
 
-async function readCpuCounters(): Promise<CpuCounters> {
+/** Linux fast path: host-wide tick counters straight from /proc/stat. */
+async function readProcStatCounters(): Promise<CpuCounters | null> {
   try {
     const stat = await fs.readFile("/proc/stat", "utf8");
     const line = stat.split("\n")[0] ?? "";
     const parts = line.split(/\s+/).slice(1).map((v) => Number(v) || 0);
     const idle = (parts[3] ?? 0) + (parts[4] ?? 0);
     const total = parts.reduce((sum, n) => sum + n, 0);
-    return { idle, total };
+    if (total <= 0) return null;
+    return { idle, total, source: "proc" };
   } catch {
-    const load = os.loadavg()[0] ?? 0;
-    const cpus = Math.max(1, os.cpus().length);
-    const pct = (load / cpus) * 100;
-    return { idle: 100 - pct, total: 100 };
+    return null;
   }
 }
 
-/** Samples host-wide CPU via /proc/stat (100% = all cores busy). */
+/**
+ * Cross-platform fallback: sum the per-core tick counters from os.cpus().
+ *
+ * The previous fallback used os.loadavg(), which is hard-wired to `[0,0,0]`
+ * on Windows (documented in Node, inherited by Bun). The governor therefore
+ * read "0% busy" forever there, so tick() always took the ramp branch: solve
+ * concurrency and the pool target climbed unchecked to their maxima while the
+ * host was in fact saturated — the runaway that pinned a core and grew the
+ * heap to 2.8GB until every HTTP route stopped answering (2026-09-26 field
+ * report). os.cpus() reports cumulative per-core milliseconds on every
+ * platform, so a delta between two samples yields the same host-wide busy
+ * ratio /proc/stat does (verified on win32: a 2s sample across 20 cores
+ * advances `total` by ~40s of core-time).
+ */
+function readOsCpusCounters(): CpuCounters {
+  let idle = 0;
+  let total = 0;
+  for (const cpu of os.cpus()) {
+    const t = cpu.times;
+    idle += t.idle;
+    total += t.user + t.nice + t.sys + t.idle + t.irq;
+  }
+  return { idle, total, source: "os" };
+}
+
+async function readCpuCounters(): Promise<CpuCounters> {
+  return (await readProcStatCounters()) ?? readOsCpusCounters();
+}
+
+/** Samples host-wide CPU (100% = all cores busy); /proc/stat on Linux, os.cpus() elsewhere. */
 export class CaptchaCpuGovernor {
   private prevCpu: CpuCounters | null = null;
   private lastCpuPercent = 0;
@@ -154,14 +182,23 @@ export class CaptchaCpuGovernor {
 
   private async sampleCpuPercent(): Promise<number> {
     const cur = await readCpuCounters();
-    if (!this.prevCpu) {
+    const prev = this.prevCpu;
+    // Re-baseline instead of diffing across mismatched sources (/proc/stat
+    // appears or a cgroup switch flips us onto os.cpus()): the two scales are
+    // unrelated, so their difference would be meaningless noise.
+    if (!prev || prev.source !== cur.source) {
       this.prevCpu = cur;
       return this.lastCpuPercent;
     }
-    const idleDelta = cur.idle - this.prevCpu.idle;
-    const totalDelta = cur.total - this.prevCpu.total;
+    const idleDelta = cur.idle - prev.idle;
+    const totalDelta = cur.total - prev.total;
     this.prevCpu = cur;
-    if (totalDelta <= 0) return this.lastCpuPercent;
+    // Non-positive or inverted deltas mean the counters were reset or the
+    // core count changed; keep the last good reading rather than emitting a
+    // bogus percentage the throttle logic would act on.
+    if (totalDelta <= 0 || idleDelta < 0 || idleDelta > totalDelta) {
+      return this.lastCpuPercent;
+    }
     const used = ((totalDelta - idleDelta) / totalDelta) * 100;
     return Math.max(0, Math.min(100, used));
   }
