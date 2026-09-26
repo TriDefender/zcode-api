@@ -6,6 +6,7 @@
     "dev": "bun run src/index.ts",
     "start": "bun run src/index.ts",
     "test": "bun test",
+    "prebuild": "bun run scripts/build-fork-worker.ts",
     "build": "bun build --compile --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy.exe",
     "build:linux-x64": "bun build --compile --target bun-linux-x64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-linux-x64",
     "build:linux-arm64": "bun build --compile --target bun-linux-arm64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-linux-arm64",

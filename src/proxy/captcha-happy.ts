@@ -1,6 +1,6 @@
-// @ts-nocheck — ported from the proven Node happy-dom solver (solve-happy-lib.js)
+// @ts-nocheck -- ported from the proven Node happy-dom solver (solve-happy-lib.js)
 /**
- * captcha-happy.ts — in-process happy-dom Aliyun captcha solver.
+ * captcha-happy.ts -- in-process happy-dom Aliyun captcha solver.
  *
  * Ported from the production-proven standalone happy-dom solver to run
  * INSIDE the Bun process so the release binary stays self-contained:
@@ -23,15 +23,20 @@ import os from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 
-// ── Blocking fetch for sync XHR (self-contained builds) ────────────────────
+// -- Blocking fetch for sync XHR (self-contained builds) --------------------
 // happy-dom implements sync XHR by spawning `process.argv[0] -e <script>`,
 // which fails inside a compiled Bun binary (argv[0] is the binary; `-e` is
 // not supported). We instead run the request on a worker thread that writes
 // the result into a SharedArrayBuffer and wakes the blocked host thread via
-// Atomics — no child processes, no main-thread event loop dependency (a
+// Atomics -- no child processes, no main-thread event loop dependency (a
 // postMessage-based handshake would deadlock: the main thread is blocked).
 const SYNC_FETCH_BUF_BYTES = 8 * 1024 * 1024;
 const SYNC_FETCH_HEADER_BYTES = 64;
+// Fork patch: each sync XHR blocks the HOST main thread (Atomics.wait) -- the
+// whole proxy event loop freezes for the duration. Upstream default was 30s;
+// cap at 12s so a stalled aliyuncs POST can never wedge every connection for
+// half a minute. Override: CAPTCHA_SYNC_FETCH_TIMEOUT_MS.
+const SYNC_FETCH_TIMEOUT_MS = Number(process.env.CAPTCHA_SYNC_FETCH_TIMEOUT_MS || 12_000);
 // SAB layout (Int32 words): [0]=state (0=wait,1=done,2=error), [1]=httpStatus,
 // [2]=statusTextLen, [3]=headersJsonLen, [4]=setCookieJsonLen, [5]=bodyLen,
 // [6..]=payload bytes (statusText, headersJson, setCookieJson, body)
@@ -44,7 +49,7 @@ const SYNC_WORKER_SRC = `
     (async () => {
       const i32 = new Int32Array(m.sab);
       const u8 = new Uint8Array(m.sab);
-      // Fixed-size header (bytes), NOT i32.length * 4 — that is the whole SAB.
+      // Fixed-size header (bytes), NOT i32.length * 4 -- that is the whole SAB.
       const payloadAt = 64;
       const fail = (msg) => {
         const b = enc.encode(msg);
@@ -81,7 +86,7 @@ function ensureSyncFetchWorker(): Worker {
   return _syncFetchWorker;
 }
 
-function syncFetchBlocking(url: string, init: Record<string, unknown>, timeoutMs = 30_000): {
+function syncFetchBlocking(url: string, init: Record<string, unknown>, timeoutMs = SYNC_FETCH_TIMEOUT_MS): {
   status: number; statusText: string; headers: Record<string, string>;
   setCookie: string[]; body: Buffer;
 } | { error: string } {
@@ -108,7 +113,7 @@ function syncFetchBlocking(url: string, init: Record<string, unknown>, timeoutMs
     if (i32[0] === 2) return { error: dec.decode(u8.subarray(payloadAt, payloadAt + i32[5])) || "sync fetch failed" };
     return { status: i32[1], statusText, headers, setCookie, body };
   } catch (err: any) {
-    // A crashed worker must not poison later solves — reset it.
+    // A crashed worker must not poison later solves -- reset it.
     try { _syncFetchWorker?.terminate(); } catch {}
     _syncFetchWorker = null;
     return { error: `sync fetch error: ${err?.message ?? err}` };
@@ -122,9 +127,9 @@ function shutdownSyncFetchWorker(): void {
 
 const CDN_CACHE_DIR = path.join(os.homedir(), ".zcode-captcha-cdn-cache");
 const _memCdnCache = new Map();
-// pe bundles rotate (pe.0xx…); every rotation would otherwise pin a fresh
+// pe bundles rotate (pe.0xx...); every rotation would otherwise pin a fresh
 // multi-hundred-KB body for the process lifetime (issue #50). Insertion-ordered
-// FIFO — the oldest rotation ages out first; disk cache still serves re-reads.
+// FIFO -- the oldest rotation ages out first; disk cache still serves re-reads.
 const MEM_CDN_CACHE_CAP = 16;
 function rememberCdnBody(url, body) {
   _memCdnCache.set(url, body);
@@ -148,9 +153,9 @@ if (proxyUrl) {
   } catch (_) {}
 }
 
-// ── Globals shared across solves ────────────────────────────────────────────
+// -- Globals shared across solves --------------------------------------------
 // Ring buffer: the stall detector reads only the newest entry and failure
-// diagnostics the last ~12 entries of the CURRENT solve — anything older is
+// diagnostics the last ~12 entries of the CURRENT solve -- anything older is
 // dead weight. Unbounded it grew for the process lifetime (issue #50).
 const REQUEST_LOG_CAP = 256;
 const _requestLog = [];
@@ -176,7 +181,7 @@ function noteStallAndMaybeEvict(peUrl) {
     const n = (_stallCounts.get(peUrl) || 0) + 1;
     _stallCounts.set(peUrl, n);
     if (n >= 2 && !_DEBUG) {
-      process.stderr.write(`[pe-cache-evict] ${peUrl.split("/").pop()} stalled ${n}x — evicting cache\n`);
+      process.stderr.write(`[pe-cache-evict] ${peUrl.split("/").pop()} stalled ${n}x -- evicting cache\n`);
     }
     if (n >= 2) {
       _memCdnCache.delete(peUrl);
@@ -186,7 +191,7 @@ function noteStallAndMaybeEvict(peUrl) {
   } catch (_) {}
 }
 
-// ── Fingerprint ─────────────────────────────────────────────────────────────
+// -- Fingerprint -------------------------------------------------------------
 function generateFingerprint() {
   const userAgent =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
@@ -222,7 +227,7 @@ function sniffMime(url) {
   return "application/octet-stream";
 }
 
-// ── pe.* bytecode VM harvest hook (same as solve-core) ──────────────────────
+// -- pe.* bytecode VM harvest hook (same as solve-core) ----------------------
 const peVmCallRegex =
   /55==A\?\(f=r\[n\+\+\],l=e\.pop\(\),h=e\.pop\(\),o=\[\],\w+\(f\)\.forEach\(function\(\)\{o\.unshift\(e\.pop\(\)\)\}\),p=null===h\?l\.apply\((\w+),o\):h\[l\]\.apply\(h,o\),r\[n\+\+\]&&e\.push\(p\)\):/;
 function patchPeBundle(buf, url) {
@@ -239,7 +244,7 @@ function patchPeBundle(buf, url) {
   return Buffer.from(src, "utf8");
 }
 
-// ── CDN cache access ────────────────────────────────────────────────────────
+// -- CDN cache access --------------------------------------------------------
 function getCachedBody(url) {
   const mem = _memCdnCache.get(url);
   if (mem) return mem;
@@ -267,7 +272,7 @@ async function fetchAndStore(url) {
         // verify write completed (no partial file)
         const stat = fs.statSync(p);
         if (stat.size !== buf.length) {
-          process.stderr.write(`[cache-write-short] ${url} wrote ${stat.size}/${buf.length}b — rewrite\n`);
+          process.stderr.write(`[cache-write-short] ${url} wrote ${stat.size}/${buf.length}b -- rewrite\n`);
           fs.writeFileSync(p, buf);
         }
       } catch (err) {
@@ -281,7 +286,7 @@ async function fetchAndStore(url) {
   }
 }
 
-// ── Request header injection (every frame request: XHR, fetch, scripts) ────
+// -- Request header injection (every frame request: XHR, fetch, scripts) ----
 function injectRequestHeaders(request) {
   const h = request.headers;
   try {
@@ -354,7 +359,7 @@ function storeSetCookies(res, url) {
   } catch (_) {}
 }
 
-// ── The interceptor: replaces happy-dom's network layer completely ─────────
+// -- The interceptor: replaces happy-dom's network layer completely ---------
 // All frame requests (scripts, XHR, fetch, images) funnel through here.
 function makeInterceptor(bypassPeCache = false) {
   const skipPeCache = (url) => bypassPeCache && /dynamicJS\/.*\/pe\.\d+\./.test(url);
@@ -369,7 +374,7 @@ function makeInterceptor(bypassPeCache = false) {
           try {
             new Function(body.toString("utf8"));
           } catch (parseErr) {
-            process.stderr.write(`[cache-bad-js] ${url} len=${body.length} ${parseErr.message} — refetch fresh\n`);
+            process.stderr.write(`[cache-bad-js] ${url} len=${body.length} ${parseErr.message} -- refetch fresh\n`);
             _memCdnCache.delete(url);
             try { fs.unlinkSync(diskPathFor(url)); } catch (_) {}
             body = null;
@@ -445,7 +450,7 @@ function makeInterceptor(bypassPeCache = false) {
           try {
             new Function(body.toString("utf8"));
           } catch (parseErr) {
-            process.stderr.write(`[cache-bad-js:sync] ${url} len=${body.length} ${parseErr.message} — refetch fresh\n`);
+            process.stderr.write(`[cache-bad-js:sync] ${url} len=${body.length} ${parseErr.message} -- refetch fresh\n`);
             _memCdnCache.delete(url);
             try { fs.unlinkSync(diskPathFor(url)); } catch (_) {}
             body = null;
@@ -471,7 +476,7 @@ function makeInterceptor(bypassPeCache = false) {
         };
       }
       // Non-CDN sync request: serve it blocking via a worker thread. Never
-      // fall through to happy-dom's own sync fetch — it spawns a child
+      // fall through to happy-dom's own sync fetch -- it spawns a child
       // process with `process.argv[0] -e`, which breaks compiled binaries.
       const init = { method: request.method, headers: {} as Record<string, string> };
       request.headers.forEach((value, key) => {
@@ -537,28 +542,28 @@ function makeInterceptor(bypassPeCache = false) {
   };
 }
 
-// ── Lexical guest scope: timer OWNERSHIP, not caller guessing ──────────────
+// -- Lexical guest scope: timer OWNERSHIP, not caller guessing --------------
 // Under Bun, guest scripts execute in the HOST realm, so a bare `setTimeout`
 // inside SDK code resolves to the host's. Host timers outlive the window:
 // a stray FeiLin callback that re-arms its 2s heartbeat (feilin008.js:
 // `tV = setInterval(tE, 2e3)`) after destroyDom keeps firing forever and
-// eventually dereferences a torn-down global — the field-reported
+// eventually dereferences a torn-down global -- the field-reported
 // "ReferenceError: moveBy is not defined" that killed the TUI.
 //
 // Guest timers must therefore land on the WINDOW registry, which happy-dom
 // clears in happyDOM.close(). The previous approach decided this at CALL time
 // by sniffing `new Error().stack` for a CDN frame, but a stack describes the
 // call chain, not ownership, and it misjudges BOTH ways:
-//   • false negative — guest code built via `new Function` carries no CDN
+//   - false negative -- guest code built via `new Function` carries no CDN
 //     frame, so its heartbeat escaped onto the immortal host lane;
-//   • false positive — host runtime code invoked beneath a guest frame was
+//   - false positive -- host runtime code invoked beneath a guest frame was
 //     handed a window timer with no `.unref()`, the v4.5.2 crash shape.
 // Ownership is a property of where CODE COMES FROM, so we bind it lexically.
-// Each guest script is evaluated inside `with (scope) { … }`, where `scope`
+// Each guest script is evaluated inside `with (scope) { ... }`, where `scope`
 // carries this window's timer methods. Identifier resolution is settled by the
 // scope chain at parse time; no stack is ever consulted, so neither misjudgement
 // is expressible. `with` (not an IIFE wrapper) because guest top-level `var` and
-// `function` declarations must keep escaping to the global object — an IIFE
+// `function` declarations must keep escaping to the global object -- an IIFE
 // swallows them and `initAliyunCaptcha` never appears (measured: every solve
 // timed out). The FeiLin/pe bundles have no top-level "use strict" (their
 // `"use strict"` directives sit inside module functions, which is fine), so
@@ -640,22 +645,22 @@ function makeScopedFunction(w) {
 /**
  * Wrap guest source so bare timer identifiers resolve to `w`'s registry.
  *
- * A bare `with (…) { … }` statement, not a function wrapper, and that choice
+ * A bare `with (...) { ... }` statement, not a function wrapper, and that choice
  * carries both of the properties this needs:
  *
  * - **Top-level declarations keep escaping.** `with` introduces an object
  *   environment, not a variable one, so guest `var`/`function` declarations
  *   still land on the global object. A function wrapper swallows them and
- *   `initAliyunCaptcha` never appears — every solve then timed out waiting
+ *   `initAliyunCaptcha` never appears -- every solve then timed out waiting
  *   for it (measured: ok=0 fail=3).
  *
  * - **The completion value still flows out.** happy-dom's JavaScriptCompiler
- *   hands `evaluateScript` a `(function anonymous($happy_dom){…})` expression
+ *   hands `evaluateScript` a `(function anonymous($happy_dom){...})` expression
  *   and calls whatever comes back. `eval` yields a statement's completion
  *   value, and a block completes with its last expression statement, so the
  *   compiler's function expression is returned through the `with` unchanged.
  *   (Declarations produce no completion value, so a script ending in one is
- *   also fine — the preceding expression's value stands.)
+ *   also fine -- the preceding expression's value stands.)
  */
 function wrapGuestSource(code, filename, scopeId) {
   const sourceUrl = filename && /^https?:/.test(String(filename)) ? `\n//# sourceURL=${filename}` : "";
@@ -665,7 +670,7 @@ function wrapGuestSource(code, filename, scopeId) {
   return `with(${scopeRef}){\n${code}\n}${sourceUrl}`;
 }
 
-// ── Parse-fail instrumentation (host side) ─────────────────────────────────
+// -- Parse-fail instrumentation (host side) ---------------------------------
 // Wraps happy-dom's VM eval funnel (window[PropertySymbol.evaluateScript]).
 // Every script tag / compiled module / dynamic chunk that happy-dom parses
 // passes through here with options.filename = source URL, so any SyntaxError
@@ -690,7 +695,7 @@ function installEvalInstrumentation(w) {
           return orig.call(this, wrapGuestSource(String(code ?? ""), options && options.filename, scopeId), options);
         } catch (scopeErr) {
           // Only a wrapper-induced parse failure (e.g. a top-level "use
-          // strict" making `with` illegal) falls back — a genuine error from
+          // strict" making `with` illegal) falls back -- a genuine error from
           // the guest body must propagate to the diagnostics path below.
           if (!(scopeErr instanceof SyntaxError)) throw scopeErr;
           process.stderr.write(
@@ -736,7 +741,7 @@ function installEvalInstrumentation(w) {
   };
 }
 
-// ── Mask JS-implemented platform APIs as native (FeiLin toString sweep) ─────
+// -- Mask JS-implemented platform APIs as native (FeiLin toString sweep) -----
 function installNativeToString(w) {
   const realToString = Function.prototype.toString;
   const nativeRe = /\[native code\]/;
@@ -802,7 +807,7 @@ function installNativeToString(w) {
           // (WHATWG stream `closed`/`ready` reject when the receiver is the
           // prototype, not an instance). Nobody awaits these, so without a
           // sink each probe surfaced as an unhandledRejection during every
-          // solve — noise that buried real diagnostics.
+          // solve -- noise that buried real diagnostics.
           else if (v && typeof v.then === "function") v.catch(() => {});
         } catch {}
       }
@@ -836,7 +841,7 @@ function installNativeToString(w) {
   }
 }
 
-// ── Guest-context patches (run via window.eval inside the VM realm) ─────────
+// -- Guest-context patches (run via window.eval inside the VM realm) ---------
 const GUEST_EVAL_PATCH = `
 (function() {
   try {
@@ -856,7 +861,7 @@ const GUEST_EVAL_PATCH = `
   } catch (e) {}
   // Guest errors are RECORDED, not printed: the Aliyun/FeiLin SDKs throw
   // benign uncaught TypeErrors inside happy-dom on every solve (imperfect DOM
-  // emulation) while the solve still succeeds — printing them flooded the
+  // emulation) while the solve still succeeds -- printing them flooded the
   // console with [WINDOW-ERROR] spam. They land in window.__capErrs (capped,
   // deduped) which solveTraceless surfaces only when a solve FAILS.
   // CAPTCHA_DEBUG=1 streams them live again.
@@ -937,7 +942,7 @@ const GUEST_EVAL_PATCH = `
 })();
 `;
 
-// ── Browser-ish polyfills (ported from solve-core applyPolyfills) ───────────
+// -- Browser-ish polyfills (ported from solve-core applyPolyfills) -----------
 function applyPolyfills(w) {
   if (process.env.CAPTCHA_DEBUG_BODIES === "1") {
     installTrafficLogger(w);
@@ -981,7 +986,7 @@ function applyPolyfills(w) {
   try { Object.defineProperty(w, "close", { value: w.close, configurable: true, writable: true }); } catch (_) {}
 
   // happy-dom lacks browser globals that FeiLin / the pe risk engine probe.
-  // A missing one throws ReferenceError inside the VM machine → breaks the
+  // A missing one throws ReferenceError inside the VM machine -> breaks the
   // collection chain. Ported from solve-shim.js's stub list.
   const extraGlobals = {
     print: () => {},
@@ -995,7 +1000,7 @@ function applyPolyfills(w) {
     try { Object.defineProperty(w, k, { value: v, configurable: true, writable: true }); } catch (_) {}
   }
   // happy-dom's own open()/close() are destructive (close() tears the window
-  // down); the risk engine probes them → neutralize.
+  // down); the risk engine probes them -> neutralize.
   try { Object.defineProperty(w, "open", { value: () => null, configurable: true, writable: true }); } catch (_) {}
   try { Object.defineProperty(w, "close", { value: () => {}, configurable: true, writable: true }); } catch (_) {}
 
@@ -1645,7 +1650,7 @@ function createNavigatorPlugins(w) {
   return { plugins, mimeTypes };
 }
 
-// ── Traffic logger (XHR/fetch URL capture per solve) ───────────────────────
+// -- Traffic logger (XHR/fetch URL capture per solve) -----------------------
 function installTrafficLogger(w) {
   const origOpen = w.XMLHttpRequest.prototype.open;
   const origSend = w.XMLHttpRequest.prototype.send;
@@ -1684,7 +1689,7 @@ function safeJson(x) {
   }
 }
 
-// ── Behavioral priming (FeiLin human-motion buffer) ────────────────────────
+// -- Behavioral priming (FeiLin human-motion buffer) ------------------------
 function simulateBehavior(w, durationMs = 600) {
   const { document, MouseEvent, KeyboardEvent, UIEvent } = w;
   if (!document || !MouseEvent) return;
@@ -1752,7 +1757,7 @@ function waitFor(cond, timeoutMs = 15_000, intervalMs = 40) {
   });
 }
 
-// ── createDom ──────────────────────────────────────────────────────────────
+// -- createDom --------------------------------------------------------------
 async function createDom(region, prefix) {
   let cookies = [];
   const now = Date.now();
@@ -1776,7 +1781,7 @@ async function createDom(region, prefix) {
 
   const interceptor = makeInterceptor(_bypassPeCacheOnce);
   _bypassPeCacheOnce = false;
-  // Registered once per process — adding it inside createDom leaked a new
+  // Registered once per process -- adding it inside createDom leaked a new
   // EventEmitter listener per solve (MaxListenersExceededWarning + growth).
   if (!process.__capUnhandledRejectionHooked) {
     process.__capUnhandledRejectionHooked = true;
@@ -1789,7 +1794,7 @@ async function createDom(region, prefix) {
     });
     // Guest scripts (rotated pe/FeiLin bundles) can throw synchronous errors
     // that surface as uncaughtExceptions. Without a handler, happy-dom's
-    // exception observer (or Bun's default) terminates the whole proxy —
+    // exception observer (or Bun's default) terminates the whole proxy --
     // a single bad pe version must only fail that one solve, not the server.
     process.on("uncaughtException", (err) => {
       try {
@@ -1798,7 +1803,7 @@ async function createDom(region, prefix) {
       } catch (_) {}
     });
   }
-  // Guest console is silent unless CAPTCHA_DEBUG — piping every SDK log to
+  // Guest console is silent unless CAPTCHA_DEBUG -- piping every SDK log to
   // stderr spams journald and slows mints under systemd.
   const noop = () => {};
   const guestConsole = _DEBUG
@@ -1876,7 +1881,7 @@ async function createDom(region, prefix) {
 
   // Apply polyfills + masking BEFORE the SDK script runs.
   // Bun compatibility: happy-dom's VM realm isolation doesn't apply under
-  // Bun — script tags execute against the host globalThis, where bare
+  // Bun -- script tags execute against the host globalThis, where bare
   // `window`/`document`/`location` identifiers don't exist. Node needs none
   // of this (its VM context resolves them natively). We alias the current
   // solve's window on globalThis and remove the aliases when the window is
@@ -1944,7 +1949,7 @@ async function createDom(region, prefix) {
 // getter so guest scripts resolving bare identifiers (window, document,
 // XMLHttpRequest, Range, HTMLElement, ...) find them, exactly as Node's VM
 // realm would. Removed again in destroyDom.
-// Names that must NOT be shadowed on globalThis — Bun/Node host internals the
+// Names that must NOT be shadowed on globalThis -- Bun/Node host internals the
 // window happens to expose but the host runtime depends on.
 const HOST_CRITICAL_GLOBALS = new Set([
   "process", "Bun", "console", "performance", "crypto", "fetch",
@@ -1955,21 +1960,21 @@ const HOST_CRITICAL_GLOBALS = new Set([
   // NOTE: requestAnimationFrame/cancelAnimationFrame were removed from this
   // list (2026-09-06). Bun has no native rAF, so skipping the alias left a
   // bare `requestAnimationFrame` in the FeiLin bundle unresolvable (9 call
-  // sites, only one `typeof`-guarded) — the same silent fingerprint
+  // sites, only one `typeof`-guarded) -- the same silent fingerprint
   // degradation that `print` caused. Aliasing the window's implementation
   // shadows nothing on the host.
   // NOTE: `print` was removed from this list (2026-08-29). The polyfill
   // defines a harmless no-op on the window, but the alias pass skipped it,
   // so under Bun (guest scripts run in the HOST realm) the Aliyun pe risk
-  // engine hit a bare `print` reference → ReferenceError → broken
-  // fingerprint chain → degraded solve success rate (711 WINDOW-ERRORs in
+  // engine hit a bare `print` reference -> ReferenceError -> broken
+  // fingerprint chain -> degraded solve success rate (711 WINDOW-ERRORs in
   // one day). Bun's host global has no native `print`, so aliasing the
   // stub shadows nothing critical.
   "URL", "URLSearchParams", "AbortController", "AbortSignal",
   "ReadableStream", "WritableStream", "TransformStream", "Blob", "File",
   "FormData", "Headers", "Request", "Response", "Event", "EventTarget",
   "MessageChannel", "MessagePort", "Buffer", "global", "globalThis",
-  // JS intrinsics — GlobalWindow re-exposes them as class fields; the host
+  // JS intrinsics -- GlobalWindow re-exposes them as class fields; the host
   // versions are fine, so never shadow them.
   "Array", "ArrayBuffer", "Boolean", "DataView", "Date", "Error",
   "EvalError", "Float32Array", "Float64Array", "Function", "Infinity",
@@ -1981,7 +1986,7 @@ const HOST_CRITICAL_GLOBALS = new Set([
   "encodeURIComponent", "escape", "isFinite", "isNaN", "parseFloat",
   "parseInt", "unescape", "eval",
 ]);
-// Window methods that exist as prototype members, not own props — the alias
+// Window methods that exist as prototype members, not own props -- the alias
 // pass must include them so guest bare-name references resolve (moveBy,
 // scrollTo, ... are referenced by the FeiLin fingerprint SDK).
 const EXTRA_WINDOW_PROPS = [
@@ -2001,7 +2006,7 @@ const INERT_WINDOW_METHODS = new Set(EXTRA_WINDOW_PROPS);
 let _aliasRefCount = 0;
 
 // Post-teardown tombstone (see removeGlobalWindowAlias): how long window-
-// sourced alias getters keep resolving — to the CLOSED window — after the
+// sourced alias getters keep resolving -- to the CLOSED window -- after the
 // last destroyDom. Guest (FeiLin) async fingerprint chains ride host
 // machinery (fetch/promise continuations) and can outlive the window; a
 // hard delete turns their next bare `Text`/`document` reference into an
@@ -2009,7 +2014,7 @@ let _aliasRefCount = 0;
 // feilin005.js). The closed window's objects stay readable, so stragglers
 // run harmlessly to completion; a new solve wave (generation bump) cancels
 // the pending deletion entirely. The pristine host setTimeout captured at
-// module load schedules it — never the aliased one.
+// module load schedules it -- never the aliased one.
 const ALIAS_TOMBSTONE_MS = 30_000;
 let _aliasGeneration = 0;
 let _tombstoneMs = ALIAS_TOMBSTONE_MS;
@@ -2019,7 +2024,7 @@ const _hostSetTimeout = globalThis.setTimeout;
 // host-global snapshot skips descriptors whose getter is in here: a wave
 // that starts inside a previous wave's grace period finds OUR OWN stale
 // accessors still on `g`, and saving them would "restore" window accessors
-// at removal — permanently pinning the first closed window (review-caught
+// at removal -- permanently pinning the first closed window (review-caught
 // 2026-08-31). Host getters (Bun's navigator/self accessors) are never in
 // this set and always flow to the restore path.
 const _aliasGetters = new WeakSet<object>();
@@ -2032,7 +2037,7 @@ let _savedHostGlobalDescriptors: Record<string, PropertyDescriptor> | undefined;
 
 // Guest timer/console routing is LEXICAL (see the guest scope section above):
 // bare `setTimeout`/`console` inside guest source resolve through the `with`
-// scope to this window's own objects. No stack sniffing — the previous
+// scope to this window's own objects. No stack sniffing -- the previous
 // `/alicdn/.test(new Error().stack)` predicate answered "who is calling?" when
 // the question is "who owns this?", and got both directions wrong (immortal
 // guest heartbeats; host timers stripped of `.unref`).
@@ -2056,9 +2061,9 @@ export function installGlobalWindowAlias(g, w, tombstoneMs?) {
   // them with window-forwarding accessors (GlobalWindow own props outside
   // HOST_CRITICAL_GLOBALS); a capture taken after it would save those
   // accessors and the post-remove restore would reinstate accessors onto a
-  // closed window. The snapshot covers atob/btoa (client-signing's base64 —
+  // closed window. The snapshot covers atob/btoa (client-signing's base64 --
   // field-reported ReferenceError), WebSocket, MessageEvent, CustomEvent,
-  // navigator, self, ... — every host global the window happens to expose.
+  // navigator, self, ... -- every host global the window happens to expose.
   const props = new Set(Object.getOwnPropertyNames(w));
   for (const name of EXTRA_WINDOW_PROPS) props.add(name);
   // also walk the prototype chain one level (BrowserWindow getters like
@@ -2077,7 +2082,7 @@ export function installGlobalWindowAlias(g, w, tombstoneMs?) {
         // cancelled mid-grace (retry ladder / pool bursts start the next
         // wave within the 30s tombstone): saving them would "restore"
         // window-forwarding accessors at removal and permanently pin the
-        // first closed window on globalThis. They are window-sourced — the
+        // first closed window on globalThis. They are window-sourced -- the
         // new wave's tombstone owns their cleanup. Host getters (Bun's
         // navigator/self accessors) are never in the WeakSet and keep
         // flowing to the restore path.
@@ -2137,7 +2142,7 @@ export function removeGlobalWindowAlias(g, w) {
   _aliasRefCount -= 1;
   if (_aliasRefCount > 0) return;
   // Host-contract globals come back IMMEDIATELY: every HOST-EXISTING global
-  // the wave overwrote — atob/btoa (client-signing's JWT base64 — the
+  // the wave overwrote -- atob/btoa (client-signing's JWT base64 -- the
   // field-reported ReferenceError), WebSocket/MessageEvent/navigator/self/...
   // The timers and console were never aliased, so nothing to restore there.
   const restored = new Set<string>();
@@ -2150,7 +2155,7 @@ export function removeGlobalWindowAlias(g, w) {
   }
   // Window-sourced globals get a TOMBSTONE grace period instead of an
   // immediate delete (see the ALIAS_TOMBSTONE_MS comment). Collect what is
-  // still accessor-aliased, EXCLUDING the restored set — a restored host
+  // still accessor-aliased, EXCLUDING the restored set -- a restored host
   // descriptor may itself be a getter (Bun's navigator/self are accessors)
   // and must never be tombstone-deleted.
   const generation = _aliasGeneration;
@@ -2177,7 +2182,7 @@ export function removeGlobalWindowAlias(g, w) {
           if (!Object.getOwnPropertyDescriptor(g, name)?.get) continue;
           // Do NOT `delete`: a straggler still reading the name would get a
           // ReferenceError, which is fatal in the host realm. Leave an inert
-          // value instead — the reference resolves, the call is a no-op, and
+          // value instead -- the reference resolves, the call is a no-op, and
           // nothing keeps the closed window alive. The window methods guest
           // fingerprint code probes (moveBy/scrollTo/...) are no-ops in a real
           // browser anyway, so `undefined` is a faithful stand-in for the rest.
@@ -2196,12 +2201,12 @@ export function removeGlobalWindowAlias(g, w) {
   } catch (_) {}
 }
 
-// ── Heap reclaim at window-generation turnover ─────────────────────────────
+// -- Heap reclaim at window-generation turnover -----------------------------
 // A destroyed window leaves a large dead object graph behind (SDK instances,
 // pe VM, intervals, XHR buffers). JSC only hands pages back to the OS on a
 // FULL synchronous collection, so without this the serve process ratchets:
 // every window generation's allocation peak becomes the permanent RSS floor
-// (issue #50: 2.9 days → 9.95GB resident). Throttled because pe-storm retry
+// (issue #50: 2.9 days -> 9.95GB resident). Throttled because pe-storm retry
 // ladders destroy several windows back-to-back and Bun.gc(true) is a
 // stop-the-world pass that gets heavier at large heaps.
 const _gcStats = { calls: 0, lastAt: 0 };
@@ -2254,11 +2259,11 @@ function extractVerifyParam(param) {
   // Strict validation: a REAL Aliyun verify param is ~280 chars of base64
   // JSON containing certifyId + sceneId + isSign + a long securityToken.
   // Len-76 junk like {"certifyId":"70bdb",...,"isSign":true} (no securityToken)
-  // comes from a degraded SDK result path and WILL 3007 upstream — never let
+  // comes from a degraded SDK result path and WILL 3007 upstream -- never let
   // it out of the solver.
   if (str.length < 200) {
     throw new Error(
-      "verify param too short (" + str.length + " chars) — degraded result, refusing: " + str.slice(0, 80),
+      "verify param too short (" + str.length + " chars) -- degraded result, refusing: " + str.slice(0, 80),
     );
   }
   try {
@@ -2266,7 +2271,7 @@ function extractVerifyParam(param) {
     const secTok = decoded && (decoded.securityToken || decoded.SecurityToken);
     if (!secTok || String(secTok).length < 50) {
       throw new Error(
-        "verify param missing securityToken — refusing degraded result: " + str.slice(0, 80),
+        "verify param missing securityToken -- refusing degraded result: " + str.slice(0, 80),
       );
     }
   } catch (err) {
@@ -2290,13 +2295,13 @@ function handleCaptchaResult(result) {
   return result;
 }
 
-// ── Window reuse pool ──────────────────────────────────────────────────────
+// -- Window reuse pool ------------------------------------------------------
 // Reusing one happy-dom window across solves cuts CPU ~48% (measured: 426ms vs
 // 815ms per solve) by amortizing the DOM boot + SDK script load. On by
 // default; opt out with CAPTCHA_WINDOW_REUSE=0 (or per-call
 // solveTraceless({reuseWindow:false})). The window
 // is discarded after `maxSolves` (each solve leaves SDK instance graphs
-// resident in the window — issue #50 measured tens of MB per solve), after
+// resident in the window -- issue #50 measured tens of MB per solve), after
 // any stall/failure (fresh InitCaptchaV3 rolls a new pe version), or after
 // `maxIdleMs` idle. 8 keeps most of the amortization win while capping a
 // generation's retention peak at ~1/3 of the old 25-solve default.
@@ -2331,12 +2336,12 @@ function noteWindowSolved() {
   _reusePool.lastUsedAt = Date.now();
 }
 
-// ── Guest error capture (read side) ────────────────────────────────────────
+// -- Guest error capture (read side) ----------------------------------------
 // GUEST_EVAL_PATCH records every guest window error into window.__capErrs
 // (capped, deduped) instead of console-printing them: the Aliyun/FeiLin SDKs
 // throw benign uncaught TypeErrors inside happy-dom on every solve and the
 // solve still succeeds, so printing them is pure console spam. The buffer is
-// surfaced only when a solve FAILS — that's when guest errors are
+// surfaced only when a solve FAILS -- that's when guest errors are
 // actionable. CAPTCHA_DEBUG=1 streams them live again as
 // [WINDOW-ERROR]/[UH-REASON].
 function guestErrorSummary(w, max = 4) {
@@ -2358,7 +2363,11 @@ async function solveTraceless(opts) {
   const scene = opts.scene || "11xygtvd";
   const region = opts.region || "sgp";
   const prefix = opts.prefix || "no8xfe";
-  const timeoutMs = opts.timeoutMs ?? 30_000;
+  // Fork patch: overall solve deadline default 30s -> 20s. With in-process
+  // solving on the main thread, a hung solve stalls every proxied connection;
+  // fail faster and let the pool's retry ladder handle it.
+  // Override: CAPTCHA_SOLVE_TIMEOUT_MS.
+  const timeoutMs = opts.timeoutMs ?? Number(process.env.CAPTCHA_SOLVE_TIMEOUT_MS || 20_000);
 
   const wantReuse = opts.reuseWindow ?? process.env.CAPTCHA_WINDOW_REUSE !== "0";
   let dom;
@@ -2389,11 +2398,11 @@ async function solveTraceless(opts) {
         reject(new Error(`captcha solve timeout pe=${peUrl.split("/").pop() || peUrl} reqs=${JSON.stringify(reqs)}`));
       }, timeoutMs);      // Fail-fast stall detector: healthy solves keep firing XHRs until verify
       // (~3s). If no XHR for stallMs and none pending, this pe-VM variant
-      // stalled (seen across rotated pe.0xx versions) — abort early so the
+      // stalled (seen across rotated pe.0xx versions) -- abort early so the
       // caller can retry with a fresh InitCaptchaV3 (new pe version).
       // Fail-fast stall detector: healthy solves keep firing XHRs until
       // verify (~3s, gaps <2s). If no XHR for 6s, this pe-VM variant stalled
-      // (seen across rotated pe.0xx versions) — abort early so the caller
+      // (seen across rotated pe.0xx versions) -- abort early so the caller
       // can retry with a fresh InitCaptchaV3 (new pe version).
       const stallMs = opts.stallMs ?? Number(process.env.CAPTCHA_STALL_MS || 6_000);
       const stallTimer = setInterval(() => {
@@ -2479,7 +2488,7 @@ async function solveTraceless(opts) {
     }
     return out;
   } catch (err) {
-    // Attach captured guest window errors to the failure — the only situation
+    // Attach captured guest window errors to the failure -- the only situation
     // where they are actionable (a successful solve makes them irrelevant).
     const summary = guestErrorSummary(w);
     if (summary) {
@@ -2490,7 +2499,7 @@ async function solveTraceless(opts) {
     throw err;
   } finally {
     // Reuse mode: on success the window stays pooled (keepWindow) for the next
-    // solve — a ~48% CPU cut. On failure it is destroyed: a stalled window must
+    // solve -- a ~48% CPU cut. On failure it is destroyed: a stalled window must
     // not poison later solves, and the retry rolls a fresh pe anyway.
     if (!keepWindow) {
       if (_reusePool.window === w) _reusePool.window = null;
