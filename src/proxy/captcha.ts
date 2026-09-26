@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Aliyun Captcha V3 front-end -- config fetch + pre-solved token pool.
  *
  * Solving itself lives in captcha-happy.ts (in-process happy-dom solver,

@@ -1,4 +1,4 @@
-﻿// @ts-nocheck -- ported from the proven Node happy-dom solver (solve-happy-lib.js)
+// @ts-nocheck -- ported from the proven Node happy-dom solver (solve-happy-lib.js)
 /**
  * captcha-happy.ts -- in-process happy-dom Aliyun captcha solver.
  *
@@ -23,7 +23,7 @@ import os from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 
-// ── Blocking fetch for sync XHR (self-contained builds) ────────────────────
+// -- Blocking fetch for sync XHR (self-contained builds) --------------------
 // happy-dom implements sync XHR by spawning `process.argv[0] -e <script>`,
 // which fails inside a compiled Bun binary (argv[0] is the binary; `-e` is
 // not supported). We instead run the request on a worker thread that writes
@@ -127,7 +127,7 @@ function shutdownSyncFetchWorker(): void {
 
 const CDN_CACHE_DIR = path.join(os.homedir(), ".zcode-captcha-cdn-cache");
 const _memCdnCache = new Map();
-// pe bundles rotate (pe.0xx…); every rotation would otherwise pin a fresh
+// pe bundles rotate (pe.0xx...); every rotation would otherwise pin a fresh
 // multi-hundred-KB body for the process lifetime (issue #50). Insertion-ordered
 // FIFO -- the oldest rotation ages out first; disk cache still serves re-reads.
 const MEM_CDN_CACHE_CAP = 16;
@@ -153,7 +153,7 @@ if (proxyUrl) {
   } catch (_) {}
 }
 
-// ── Globals shared across solves ────────────────────────────────────────────
+// -- Globals shared across solves --------------------------------------------
 // Ring buffer: the stall detector reads only the newest entry and failure
 // diagnostics the last ~12 entries of the CURRENT solve -- anything older is
 // dead weight. Unbounded it grew for the process lifetime (issue #50).
@@ -191,7 +191,7 @@ function noteStallAndMaybeEvict(peUrl) {
   } catch (_) {}
 }
 
-// ── Fingerprint ─────────────────────────────────────────────────────────────
+// -- Fingerprint -------------------------------------------------------------
 function generateFingerprint() {
   const userAgent =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Safari/537.36";
@@ -227,7 +227,7 @@ function sniffMime(url) {
   return "application/octet-stream";
 }
 
-// ── pe.* bytecode VM harvest hook (same as solve-core) ──────────────────────
+// -- pe.* bytecode VM harvest hook (same as solve-core) ----------------------
 const peVmCallRegex =
   /55==A\?\(f=r\[n\+\+\],l=e\.pop\(\),h=e\.pop\(\),o=\[\],\w+\(f\)\.forEach\(function\(\)\{o\.unshift\(e\.pop\(\)\)\}\),p=null===h\?l\.apply\((\w+),o\):h\[l\]\.apply\(h,o\),r\[n\+\+\]&&e\.push\(p\)\):/;
 function patchPeBundle(buf, url) {
@@ -244,7 +244,7 @@ function patchPeBundle(buf, url) {
   return Buffer.from(src, "utf8");
 }
 
-// ── CDN cache access ────────────────────────────────────────────────────────
+// -- CDN cache access --------------------------------------------------------
 function getCachedBody(url) {
   const mem = _memCdnCache.get(url);
   if (mem) return mem;
@@ -286,7 +286,7 @@ async function fetchAndStore(url) {
   }
 }
 
-// ── Request header injection (every frame request: XHR, fetch, scripts) ────
+// -- Request header injection (every frame request: XHR, fetch, scripts) ----
 function injectRequestHeaders(request) {
   const h = request.headers;
   try {
@@ -359,7 +359,7 @@ function storeSetCookies(res, url) {
   } catch (_) {}
 }
 
-// ── The interceptor: replaces happy-dom's network layer completely ─────────
+// -- The interceptor: replaces happy-dom's network layer completely ---------
 // All frame requests (scripts, XHR, fetch, images) funnel through here.
 function makeInterceptor(bypassPeCache = false) {
   const skipPeCache = (url) => bypassPeCache && /dynamicJS\/.*\/pe\.\d+\./.test(url);
@@ -542,7 +542,7 @@ function makeInterceptor(bypassPeCache = false) {
   };
 }
 
-// ── Lexical guest scope: timer OWNERSHIP, not caller guessing ──────────────
+// -- Lexical guest scope: timer OWNERSHIP, not caller guessing --------------
 // Under Bun, guest scripts execute in the HOST realm, so a bare `setTimeout`
 // inside SDK code resolves to the host's. Host timers outlive the window:
 // a stray FeiLin callback that re-arms its 2s heartbeat (feilin008.js:
@@ -554,12 +554,12 @@ function makeInterceptor(bypassPeCache = false) {
 // clears in happyDOM.close(). The previous approach decided this at CALL time
 // by sniffing `new Error().stack` for a CDN frame, but a stack describes the
 // call chain, not ownership, and it misjudges BOTH ways:
-//   • false negative -- guest code built via `new Function` carries no CDN
+//   - false negative -- guest code built via `new Function` carries no CDN
 //     frame, so its heartbeat escaped onto the immortal host lane;
-//   • false positive -- host runtime code invoked beneath a guest frame was
+//   - false positive -- host runtime code invoked beneath a guest frame was
 //     handed a window timer with no `.unref()`, the v4.5.2 crash shape.
 // Ownership is a property of where CODE COMES FROM, so we bind it lexically.
-// Each guest script is evaluated inside `with (scope) { … }`, where `scope`
+// Each guest script is evaluated inside `with (scope) { ... }`, where `scope`
 // carries this window's timer methods. Identifier resolution is settled by the
 // scope chain at parse time; no stack is ever consulted, so neither misjudgement
 // is expressible. `with` (not an IIFE wrapper) because guest top-level `var` and
@@ -645,7 +645,7 @@ function makeScopedFunction(w) {
 /**
  * Wrap guest source so bare timer identifiers resolve to `w`'s registry.
  *
- * A bare `with (…) { … }` statement, not a function wrapper, and that choice
+ * A bare `with (...) { ... }` statement, not a function wrapper, and that choice
  * carries both of the properties this needs:
  *
  * - **Top-level declarations keep escaping.** `with` introduces an object
@@ -655,7 +655,7 @@ function makeScopedFunction(w) {
  *   for it (measured: ok=0 fail=3).
  *
  * - **The completion value still flows out.** happy-dom's JavaScriptCompiler
- *   hands `evaluateScript` a `(function anonymous($happy_dom){…})` expression
+ *   hands `evaluateScript` a `(function anonymous($happy_dom){...})` expression
  *   and calls whatever comes back. `eval` yields a statement's completion
  *   value, and a block completes with its last expression statement, so the
  *   compiler's function expression is returned through the `with` unchanged.
@@ -670,7 +670,7 @@ function wrapGuestSource(code, filename, scopeId) {
   return `with(${scopeRef}){\n${code}\n}${sourceUrl}`;
 }
 
-// ── Parse-fail instrumentation (host side) ─────────────────────────────────
+// -- Parse-fail instrumentation (host side) ---------------------------------
 // Wraps happy-dom's VM eval funnel (window[PropertySymbol.evaluateScript]).
 // Every script tag / compiled module / dynamic chunk that happy-dom parses
 // passes through here with options.filename = source URL, so any SyntaxError
@@ -741,7 +741,7 @@ function installEvalInstrumentation(w) {
   };
 }
 
-// ── Mask JS-implemented platform APIs as native (FeiLin toString sweep) ─────
+// -- Mask JS-implemented platform APIs as native (FeiLin toString sweep) -----
 function installNativeToString(w) {
   const realToString = Function.prototype.toString;
   const nativeRe = /\[native code\]/;
@@ -841,7 +841,7 @@ function installNativeToString(w) {
   }
 }
 
-// ── Guest-context patches (run via window.eval inside the VM realm) ─────────
+// -- Guest-context patches (run via window.eval inside the VM realm) ---------
 const GUEST_EVAL_PATCH = `
 (function() {
   try {
@@ -942,7 +942,7 @@ const GUEST_EVAL_PATCH = `
 })();
 `;
 
-// ── Browser-ish polyfills (ported from solve-core applyPolyfills) ───────────
+// -- Browser-ish polyfills (ported from solve-core applyPolyfills) -----------
 function applyPolyfills(w) {
   if (process.env.CAPTCHA_DEBUG_BODIES === "1") {
     installTrafficLogger(w);
@@ -1650,7 +1650,7 @@ function createNavigatorPlugins(w) {
   return { plugins, mimeTypes };
 }
 
-// ── Traffic logger (XHR/fetch URL capture per solve) ───────────────────────
+// -- Traffic logger (XHR/fetch URL capture per solve) -----------------------
 function installTrafficLogger(w) {
   const origOpen = w.XMLHttpRequest.prototype.open;
   const origSend = w.XMLHttpRequest.prototype.send;
@@ -1689,7 +1689,7 @@ function safeJson(x) {
   }
 }
 
-// ── Behavioral priming (FeiLin human-motion buffer) ────────────────────────
+// -- Behavioral priming (FeiLin human-motion buffer) ------------------------
 function simulateBehavior(w, durationMs = 600) {
   const { document, MouseEvent, KeyboardEvent, UIEvent } = w;
   if (!document || !MouseEvent) return;
@@ -1757,7 +1757,7 @@ function waitFor(cond, timeoutMs = 15_000, intervalMs = 40) {
   });
 }
 
-// ── createDom ──────────────────────────────────────────────────────────────
+// -- createDom --------------------------------------------------------------
 async function createDom(region, prefix) {
   let cookies = [];
   const now = Date.now();
@@ -2201,7 +2201,7 @@ export function removeGlobalWindowAlias(g, w) {
   } catch (_) {}
 }
 
-// ── Heap reclaim at window-generation turnover ─────────────────────────────
+// -- Heap reclaim at window-generation turnover -----------------------------
 // A destroyed window leaves a large dead object graph behind (SDK instances,
 // pe VM, intervals, XHR buffers). JSC only hands pages back to the OS on a
 // FULL synchronous collection, so without this the serve process ratchets:
@@ -2295,7 +2295,7 @@ function handleCaptchaResult(result) {
   return result;
 }
 
-// ── Window reuse pool ──────────────────────────────────────────────────────
+// -- Window reuse pool ------------------------------------------------------
 // Reusing one happy-dom window across solves cuts CPU ~48% (measured: 426ms vs
 // 815ms per solve) by amortizing the DOM boot + SDK script load. On by
 // default; opt out with CAPTCHA_WINDOW_REUSE=0 (or per-call
@@ -2336,7 +2336,7 @@ function noteWindowSolved() {
   _reusePool.lastUsedAt = Date.now();
 }
 
-// ── Guest error capture (read side) ────────────────────────────────────────
+// -- Guest error capture (read side) ----------------------------------------
 // GUEST_EVAL_PATCH records every guest window error into window.__capErrs
 // (capped, deduped) instead of console-printing them: the Aliyun/FeiLin SDKs
 // throw benign uncaught TypeErrors inside happy-dom on every solve and the
