@@ -91,6 +91,8 @@ function dispatchCli(args: string[]): void {
     authCommand(args.slice(1));
   } else if (cmd === "claim") {
     void claimCommand(args.slice(1));
+  } else if (cmd === "quota") {
+    void quotaCommand();
   } else if (cmd === "android") {
     // Explicit catch: an async startup failure (e.g. control port already
     // bound by an orphaned process) must exit non-zero deterministically, not
@@ -148,6 +150,7 @@ Usage:
   zcode-proxy auth logout           Clear stored credentials
   zcode-proxy auth status           Show current authentication state
   zcode-proxy claim [list|now]      List / claim weekend-plan trial packages
+  zcode-proxy quota                 Show plan quota (per-model remaining/total)
   zcode-proxy version               Show version
   zcode-proxy help                  Show this help
 
@@ -397,6 +400,51 @@ async function claimCommand(args: string[]): Promise<void> {
     console.error(`claim failed: ${(err as Error).message}`);
     process.exit(1);
   }
+}
+
+/**
+ * `quota` subcommand — print the live plan balance snapshot (per-model
+ * remaining/total units + expiry) from the billing control plane. Reuses
+ * collectQuotaSnapshot (same path GET /quota serves).
+ */
+async function quotaCommand(): Promise<void> {
+  const path = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
+  if (!existsSync(path)) {
+    console.error(`Config file not found: ${path} (run serve once or create it).`);
+    process.exit(1);
+  }
+  ensureDeviceMidInConfig(path);
+  const config = loadConfig(path);
+  try {
+    const { collectQuotaSnapshot } = await import("./server/routes-quota.js");
+    const snap = await collectQuotaSnapshot(config);
+    if (snap.balances.length === 0) {
+      console.log("No balance windows reported by the billing endpoint.");
+    }
+    for (const b of snap.balances) {
+      const exp = b.expiresAt ? ` · expires ${fmtQuotaExpiry(b.expiresAt)}` : "";
+      console.log(`  ${b.showName || "(unnamed)"}: ${b.remainingUnits.toLocaleString("en-US")} / ${b.totalUnits.toLocaleString("en-US")} units${exp}`);
+    }
+    for (const plan of snap.claimablePlans) {
+      const grants = plan.entitlements
+        .map((e) => `${e.showName || plan.name}: ${(e.grantUnits ?? 0).toLocaleString("en-US")} ${e.unitType}`)
+        .join("; ");
+      console.log(`  claimable: ${plan.name}${grants ? ` (${grants})` : ""}`);
+    }
+    for (const err of snap.errors) console.error(`  ⚠ ${err}`);
+    if (snap.errors.length > 0) process.exitCode = 1;
+  } catch (err) {
+    console.error(`quota query failed: ${(err as Error).message}`);
+    process.exit(1);
+  }
+}
+
+/** `YYYY-MM-DD HH:mm` local time; `expiresAt` may be seconds or milliseconds. */
+function fmtQuotaExpiry(expiresAt: number): string {
+  const d = new Date(expiresAt > 1e12 ? expiresAt : expiresAt * 1000);
+  if (Number.isNaN(d.getTime())) return String(expiresAt);
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 async function authLogin(args: string[]): Promise<void> {

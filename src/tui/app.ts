@@ -24,12 +24,13 @@ import { openBrowser } from "../runtime/open-browser.js";
 import { pasteLoginInstructions, readPastedLine, boldIfTTY } from "../runtime/paste-login.js";
 import { isGuestOriginError, describeGuestError } from "../runtime/guest-error.js";
 import { ensureDeviceMidInConfig, VERSION, type ServeArgs } from "../index.js";
+import { collectQuotaSnapshot, type QuotaSnapshot } from "../server/routes-quota.js";
 import { appendFileSync } from "node:fs";
 import type { ProxyConfig } from "../config/types.js";
 import type { ProviderId } from "../provider/types.js";
 import { LogPane, type LogLevel } from "./log-pane.js";
 import { KeyParser, type KeyAction } from "./keys.js";
-import { buildFrame, findRegion, type ClickAction, type ClickRegion, type Frame } from "./frame.js";
+import { buildFrame, findRegion, type ClickAction, type ClickRegion, type Frame, type QuotaState } from "./frame.js";
 
 type PlanTier = "coding-plan" | "start-plan";
 type ServerStatus = "stopped" | "starting" | "running" | "error";
@@ -74,6 +75,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
     serverError: "",
     loginInFlight: false,
     loginHint: "",
+    quota: null as QuotaState | null,
     toast: null as { text: string; kind: "ok" | "err" | "info" } | null,
   };
 
@@ -194,6 +196,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
         modelCount: config.models.length,
         responsesEnabled: config.responses.enabled,
         claimAuto: config.claim.enabled && config.claim.auto,
+        quota: state.quota,
         logTotal: view.total,
         logView: view.lines,
         logFollowing: pane.following,
@@ -237,7 +240,50 @@ export async function runTui(args: ServeArgs): Promise<void> {
     const cred = await loadCredential().catch(() => null);
     state.loggedIn = cred != null;
     state.apiKeyPreview = cred ? `${cred.apiKey.slice(0, 8)}…` : "";
+    // Logout hides the quota card (the billing calls need the JWT).
+    if (!state.loggedIn) state.quota = null;
+    else if (!state.quota) void refreshQuota();
     scheduleRender();
+  }
+
+  // --- quota (billing balance windows; manual refresh only — the billing
+  // gateway rate-limits frequent queries, so no polling timer) ---------------
+  let quotaFetchInFlight = false;
+  async function refreshQuota(): Promise<void> {
+    if (quotaFetchInFlight) return;
+    quotaFetchInFlight = true;
+    const firstFetch = state.quota == null;
+    state.quota = { status: "loading", balances: [], errors: [], error: "", fetchedAt: Date.now() };
+    scheduleRender();
+    try {
+      const snap: QuotaSnapshot = await collectQuotaSnapshot(config);
+      state.quota = {
+        status: "ok",
+        balances: snap.balances.map((b) => ({
+          showName: b.showName,
+          remainingUnits: b.remainingUnits,
+          totalUnits: b.totalUnits,
+          ...(b.expiresAt !== undefined ? { expiresAt: b.expiresAt } : {}),
+        })),
+        errors: snap.errors,
+        error: "",
+        fetchedAt: Date.now(),
+      };
+    } catch (err) {
+      // Replace the card content with the error — stale balances shown next to
+      // a failure would read as current numbers.
+      state.quota = {
+        status: "error",
+        balances: [],
+        errors: [],
+        error: (err as Error).message,
+        fetchedAt: Date.now(),
+      };
+      if (!firstFetch) setToast(`quota refresh failed: ${(err as Error).message}`, "err");
+    } finally {
+      quotaFetchInFlight = false;
+      scheduleRender();
+    }
   }
 
   // --- proxy lifecycle (mirrors the Android startProxy/stopProxy hooks) ----
@@ -532,6 +578,7 @@ export async function runTui(args: ServeArgs): Promise<void> {
           case "s": toggleProxy(); return;
           case "l": void startLogin(); return;
           case "o": void logout(); return;
+          case "r": void refreshQuota(); return;
           case "p": switchProvider(); return;
           case "t": switchPlan(); return;
           case "c": pane.clear(); scheduleRender(); return;

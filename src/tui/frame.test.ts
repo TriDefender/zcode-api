@@ -18,6 +18,7 @@ function baseState(overrides: Partial<FrameState> = {}): FrameState {
     modelCount: 6,
     responsesEnabled: true,
     claimAuto: false,
+    quota: null,
     logTotal: 0,
     logView: [],
     logFollowing: true,
@@ -237,5 +238,121 @@ describe("buildFrame", () => {
     const frame = buildFrame(baseState({ width: 30, height: 10 })).text;
     expect(frame).toContain("terminal too small");
     expect(frame).not.toContain("╭");
+  });
+
+  test("quota card hidden when quota is null (logged out)", () => {
+    const text = plainLines(baseState({ quota: null })).join("\n");
+    expect(text).not.toContain("Quota");
+  });
+
+  test("quota card shows per-model remaining/total with expiry", () => {
+    const text = plainLines(baseState({
+      quota: {
+        status: "ok",
+        balances: [
+          { showName: "GLM-5.3", remainingUnits: 2000000, totalUnits: 3000000, expiresAt: 1767225600 },
+          { showName: "GLM Coding", remainingUnits: 5, totalUnits: 100 },
+        ],
+        errors: [],
+        error: "",
+        fetchedAt: new Date("2026-09-29T12:00:00").getTime(),
+      },
+    })).join("\n");
+    expect(text).toContain("Quota");
+    expect(text).toContain("GLM-5.3");
+    expect(text).toContain("2,000,000 / 3,000,000");
+    expect(text).toContain("GLM Coding");
+    expect(text).toContain("5 / 100");
+    expect(text).toContain("12:00:00");
+    expect(text).toContain(" Refresh ");
+  });
+
+  test("quota card caps balance rows to keep the Logs card room", () => {
+    const balances = Array.from({ length: 8 }, (_, i) => ({
+      showName: `Model ${i}`,
+      remainingUnits: i,
+      totalUnits: 100,
+    }));
+    const text = plainLines(baseState({
+      quota: { status: "ok", balances, errors: [], error: "", fetchedAt: Date.now() },
+    })).join("\n");
+    expect(text).toContain("Model 3");
+    expect(text).not.toContain("Model 4");
+  });
+
+  test("quota card shows error state and upstream warnings", () => {
+    const text = plainLines(baseState({
+      quota: {
+        status: "error",
+        balances: [],
+        errors: [],
+        error: "not logged in — no JWT credential",
+        fetchedAt: Date.now(),
+      },
+    })).join("\n");
+    expect(text).toContain("unavailable");
+    expect(text).toContain("not logged in");
+    const warned = plainLines(baseState({
+      quota: { status: "ok", balances: [], errors: ["balance: 3012 risk"], error: "", fetchedAt: Date.now() },
+    })).join("\n");
+    expect(warned).toContain("⚠");
+    expect(warned).toContain("3012");
+  });
+
+  test("quota Refresh button is clickable and footer advertises [r]", () => {
+    const f = buildFrame(baseState({
+      quota: { status: "ok", balances: [], errors: [], error: "", fetchedAt: Date.now() },
+    }));
+    const actions = f.regions.map((r) => r.action);
+    expect(actions).toContainEqual({ kind: "key", key: "r" });
+    // The footer drops its tail on 80 columns (like [p]/[t]/[c]); [r] shows
+    // only on wider terminals.
+    const wide = buildFrame(baseState({
+      width: 140,
+      quota: { status: "ok", balances: [], errors: [], error: "", fetchedAt: Date.now() },
+    }));
+    const lines = wide.text.split("\n").map((l) => stripAnsi(l.replace(/\x1b\[K$/, "")));
+    expect(lines.join("\n")).toContain("[r] quota refresh");
+  });
+
+  test("quota card hides on short terminals so the Logs card keeps room", () => {
+    const quota = { status: "ok" as const, balances: [{ showName: "GLM-5.3", remainingUnits: 1, totalUnits: 2 }], errors: [], error: "", fetchedAt: Date.now() };
+    const text = plainLines(baseState({ height: 21, quota })).join("\n");
+    expect(text).not.toContain("Quota");
+    const textTall = plainLines(baseState({ height: 22, quota })).join("\n");
+    expect(textTall).toContain("Quota");
+  });
+
+  test("quota card never pushes the frame past the terminal height", () => {
+    for (const height of [22, 24, 30, 40]) {
+      const state = baseState({
+        height,
+        logTotal: 50,
+        logView: Array.from({ length: 50 }, (_, i) => ({ level: "info", text: `log ${i}` })),
+        quota: {
+          status: "ok",
+          balances: Array.from({ length: 6 }, (_, i) => ({ showName: `Model ${i}`, remainingUnits: i, totalUnits: 100 })),
+          errors: [],
+          error: "",
+          fetchedAt: Date.now(),
+        },
+      });
+      expect(plainLines(state).length).toBe(height);
+    }
+  });
+
+  test("no line exceeds the terminal width with a long quota showName", () => {
+    const state = baseState({
+      quota: {
+        status: "ok",
+        balances: [{ showName: "超长模型名称测试超长模型名称测试超长模型名称", remainingUnits: 1234567890, totalUnits: 9876543210, expiresAt: 1735689600 }],
+        errors: [],
+        error: "",
+        fetchedAt: Date.now(),
+      },
+    });
+    for (const raw of buildFrame(state).text.split("\n")) {
+      expect(displayWidth(raw)).toBeLessThanOrEqual(state.width);
+    }
   });
 });

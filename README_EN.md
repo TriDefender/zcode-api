@@ -193,6 +193,8 @@ The plan type (`plan`: `coding-plan` personal / `start-plan` trial) can be toggl
 
 **Weekend/trial plan auto-claiming (claim)** — enabled by default. The proxy probes the official limited-plan campaign page every 5 minutes and grabs new drops for you the instant they appear (`claim.enabled: false` to disable). Manual run: `bun run src/index.ts claim`.
 
+**Quota display (quota)** — after login the panel fetches the plan's per-model balances (remaining / total units, expiry) once automatically; refresh manually with <kbd>r</kbd>. CLI: `bun run src/index.ts quota` (HTTP: `GET /quota`). The upstream billing gateway rate-limits frequent queries, so the panel does not poll on a timer.
+
 </details>
 
 ## 🧮 Available Models
