@@ -192,6 +192,8 @@ services:
 
 **周末/体验套餐自动领取 (claim)** —— 默认开启。代理每 5 分钟探测一次官方的限量套餐活动页，上新瞬间自动帮你抢（`claim.enabled: false` 可关闭）。手动抢：`bun run src/index.ts claim`。
 
+**额度显示 (quota)** —— 登录后面板会自动查一次当前套餐的各模型额度（剩余 / 总额、到期时间），之后按 <kbd>r</kbd> 手动刷新。也可以命令行直接查：`bun run src/index.ts quota`（对应 HTTP 接口 `GET /quota`）。注意上游计费网关对频繁查询有限速，所以面板不做定时轮询。
+
 </details>
 
 ## 🧮 可用模型

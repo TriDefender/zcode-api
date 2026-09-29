@@ -43,6 +43,29 @@ export function findRegion(regions: readonly ClickRegion[], row: number, col: nu
   return null;
 }
 
+/** One per-model balance window shown as a row in the Quota card. */
+export interface QuotaBalanceRow {
+  showName: string;
+  remainingUnits: number;
+  totalUnits: number;
+  expiresAt?: number;
+}
+
+/**
+ * Quota card view-state; `null` hides the card entirely (logged out / never
+ * fetched). `status: "error"` carries `error` (the fetch threw before any
+ * snapshot existed); `errors` holds per-endpoint upstream failures that rode
+ * along on an otherwise-OK snapshot.
+ */
+export interface QuotaState {
+  status: "loading" | "ok" | "error";
+  balances: QuotaBalanceRow[];
+  errors: string[];
+  error: string;
+  /** Epoch ms of the last fetch attempt — rendered as the card pill clock. */
+  fetchedAt: number;
+}
+
 export interface FrameState {
   version: string;
   configPath: string;
@@ -58,6 +81,7 @@ export interface FrameState {
   modelCount: number;
   responsesEnabled: boolean;
   claimAuto: boolean;
+  quota: QuotaState | null;
   logTotal: number;
   logView: ReadonlyArray<{ level: string; text: string }>;
   logFollowing: boolean;
@@ -216,6 +240,28 @@ function logLineCode(level: string): string | undefined {
   return undefined;
 }
 
+/** `1,234,567` — full precision; quota units are the contract, not noise. */
+function fmtUnits(n: number): string {
+  return n.toLocaleString("en-US");
+}
+
+/** Compact `MM-DD` (or `YYYY-MM-DD` in another year); `""` when unparseable. */
+function fmtExpiry(expiresAt: number): string {
+  const ms = expiresAt > 1e12 ? expiresAt : expiresAt * 1000;
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "";
+  const mmdd = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  return d.getFullYear() === new Date().getFullYear() ? mmdd : `${d.getFullYear()}-${mmdd}`;
+}
+
+function fmtClock(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:${String(d.getSeconds()).padStart(2, "0")}`;
+}
+
+/** At most this many per-model balance rows — the card must stay bounded so the Logs card keeps room on short terminals. */
+const MAX_QUOTA_ROWS = 4;
+
 export function buildFrame(s: FrameState): Frame {
   const w = s.width;
   const h = s.height;
@@ -303,6 +349,55 @@ export function buildFrame(s: FrameState): Frame {
   emit(renderBottomBorder(w));
   emit("");
 
+  // --- Quota card (auto-hidden when logged out / terminal too short) --------
+  // Height budget: everything above + the Logs card's borders/one row + the
+  // footer needs 21 rows, and each balance row costs one more — so on a 24-row
+  // terminal the card shows at most 3 models instead of pushing the footer off
+  // the screen.
+  const quotaRows = s.quota ? Math.min(MAX_QUOTA_ROWS, h - 21) : 0;
+  if (s.quota && quotaRows >= 1) {
+    const pill: Seg[] =
+      s.quota.status === "loading"
+        ? [{ t: "refreshing…", c: AMBER }]
+        : s.quota.status === "error"
+          ? [{ t: "unavailable", c: RED }]
+          : [{ t: fmtClock(s.quota.fetchedAt), c: DIM }];
+    emit(renderTopBorder(w, [{ t: "Quota", c: BOLD }], pill));
+
+    if (s.quota.status === "loading") {
+      emit((composeRow(w, lines.length, "Balances", [{ t: "refreshing…", c: DIM }])).line);
+    } else if (s.quota.status === "error") {
+      emit((composeRow(w, lines.length, "Balances", [{ t: truncateToWidth(s.quota.error, w - 22), c: RED }])).line);
+    } else if (s.quota.balances.length === 0) {
+      emit((composeRow(w, lines.length, "Balances", [{ t: "(no balance windows — run 'zcode-proxy quota')", c: DIM }])).line);
+    } else {
+      for (const [i, b] of s.quota.balances.slice(0, quotaRows).entries()) {
+        const exp = b.expiresAt ? fmtExpiry(b.expiresAt) : "";
+        const row = composeRow(w, lines.length, i === 0 ? "Balances" : "", [
+          { t: truncateToWidth(b.showName || "(unnamed)", 16), c: CYAN },
+          { t: "  " },
+          { t: `${fmtUnits(b.remainingUnits)} / ${fmtUnits(b.totalUnits)}`, c: GREEN },
+          ...(exp ? [{ t: `  · exp ${exp}` as string, c: DIM }] : []),
+        ]);
+        emit(row.line);
+        regions.push(...row.regions);
+      }
+    }
+
+    const hiddenModels = Math.max(0, s.quota.balances.length - quotaRows);
+    const refreshRow = composeRow(w, lines.length, "", [
+      { t: " Refresh ", c: BTN_GRAY, action: { kind: "key", key: "r" } },
+      ...(hiddenModels > 0 ? [{ t: `  +${hiddenModels} more (zcode-proxy quota)` as string, c: DIM }] : []),
+      ...(s.quota.errors.length > 0
+        ? [{ t: `  ⚠ ${truncateToWidth(s.quota.errors[0] ?? "", Math.max(0, w - 30))}` as string, c: AMBER }]
+        : []),
+    ]);
+    emit(refreshRow.line);
+    regions.push(...refreshRow.regions);
+    emit(renderBottomBorder(w));
+    emit("");
+  }
+
   // --- Proxy Server card --------------------------------------------------
   emit(renderTopBorder(w, [{ t: "Proxy Server", c: BOLD }]));
 
@@ -372,7 +467,7 @@ export function buildFrame(s: FrameState): Frame {
   // narrow terminals, so the primary actions must come first.
   const footerItems: Array<[string, string]> = [
     ["s", "start/stop"], ["l", "login"], ["o", "logout"], ["g", "follow"], ["q", "quit"],
-    ["p", "provider"], ["t", "plan"], ["c", "clear"],
+    ["p", "provider"], ["t", "plan"], ["r", "quota refresh"], ["c", "clear"],
   ];
   footerParts.push({ t: "↑↓ scroll", c: DIM });
   for (const [key, label] of footerItems) {
