@@ -21,7 +21,9 @@
  * Security model (deliberate, see the discussion on #58):
  *  - off by default: `ZCODE_PANEL_ENABLED` must be set to a truthy value;
  *  - a non-empty `ZCODE_PANEL_TOKEN` is mandatory — no token, no listener;
- *  - binds loopback only, and never touches `auth.proxyApiKey` or `/v1/*`,
+ *  - binds loopback by default (`ZCODE_PANEL_HOST` can override, e.g. `0.0.0.0`
+ *    for Docker bridge networks — the token stays mandatory), and never
+ *    touches `auth.proxyApiKey` or `/v1/*`,
  *    so enabling the panel does not change the proxy's own auth surface;
  *  - `/api/*` requires `Authorization: Bearer <token>` or `X-Panel-Token`,
  *    compared with `timingSafeEqual`, and a body above `MAX_BODY_BYTES` is
@@ -39,11 +41,18 @@ import panelHtml from "./panel-page.txt" with { type: "text" };
 export const PANEL_ENABLED_ENV = "ZCODE_PANEL_ENABLED";
 /** Shared secret for `/api/*`. Required whenever the panel is enabled. */
 export const PANEL_TOKEN_ENV = "ZCODE_PANEL_TOKEN";
-/** Panel listen port (loopback). */
+/** Panel listen port. */
 export const PANEL_PORT_ENV = "ZCODE_PANEL_PORT";
+/**
+ * Panel bind address. Loopback unless explicitly overridden — the supported
+ * escape hatch is `0.0.0.0` so Docker bridge `-p 8090:8090` can reach a panel
+ * bound inside the container (the token remains mandatory).
+ */
+export const PANEL_HOST_ENV = "ZCODE_PANEL_HOST";
 
 /** Defaults mirror the Android entry's wiring so operators only set one thing. */
 export const DEFAULT_PANEL_PORT = 8090;
+export const DEFAULT_PANEL_HOST = "127.0.0.1";
 
 /** Control commands are small JSON documents; anything bigger is a mistake. */
 const MAX_BODY_BYTES = 64 * 1024;
@@ -61,7 +70,7 @@ export interface PanelOptions {
   token: string;
   /** In-process dispatcher backing `POST /api/control`. */
   handleControl: ControlDispatcher;
-  /** Bind address. Loopback by default and intentionally not configurable. */
+  /** Bind address; loopback unless `ZCODE_PANEL_HOST` overrides it. */
   hostname?: string;
 }
 
@@ -76,6 +85,7 @@ export interface PanelServer {
 export interface PanelSettings {
   token: string;
   port: number;
+  host: string;
 }
 
 /** Request handler produced by {@link createPanelHandler}. */
@@ -106,7 +116,8 @@ export function resolvePanelSettings(env: NodeJS.ProcessEnv = process.env): Pane
   }
 
   const port = Number(env[PANEL_PORT_ENV] ?? DEFAULT_PANEL_PORT) || DEFAULT_PANEL_PORT;
-  return { token, port };
+  const host = (env[PANEL_HOST_ENV] ?? DEFAULT_PANEL_HOST).trim() || DEFAULT_PANEL_HOST;
+  return { token, port, host };
 }
 
 /** First value of a possibly-repeated request header. */
@@ -241,15 +252,16 @@ export function createPanelHandler(opts: PanelOptions): PanelHandler {
 }
 
 /**
- * Start the panel on the loopback interface. Throws when the token is missing
- * (silently starting an unauthenticated panel is the one outcome this module
- * refuses to allow) or when the port cannot be bound. There is nothing else to
- * roll back on failure: the panel owns the only listener it opens.
+ * Start the panel on `opts.hostname` (loopback by default). Throws when the
+ * token is missing (silently starting an unauthenticated panel is the one
+ * outcome this module refuses to allow) or when the port cannot be bound.
+ * There is nothing else to roll back on failure: the panel owns the only
+ * listener it opens.
  */
 export async function startPanelServer(opts: PanelOptions): Promise<PanelServer> {
   const token = (opts.token ?? "").trim();
   if (!token) throw new Error(`panel token required (set ${PANEL_TOKEN_ENV})`);
-  const hostname = opts.hostname ?? "127.0.0.1";
+  const hostname = opts.hostname ?? DEFAULT_PANEL_HOST;
   const handler = createPanelHandler({ ...opts, token });
   const server: Server = createServer((req, res) => {
     void handler(req, res);

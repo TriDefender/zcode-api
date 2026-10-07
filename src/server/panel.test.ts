@@ -6,8 +6,10 @@
  */
 import { afterEach, describe, expect, it } from "bun:test";
 import {
+  DEFAULT_PANEL_HOST,
   DEFAULT_PANEL_PORT,
   PANEL_ENABLED_ENV,
+  PANEL_HOST_ENV,
   PANEL_PORT_ENV,
   PANEL_TOKEN_ENV,
   isPanelEnabled,
@@ -80,12 +82,14 @@ describe("resolvePanelSettings", () => {
     expect(resolvePanelSettings({ [PANEL_TOKEN_ENV]: TOKEN })).toBeNull();
   });
 
-  it("resolves the token, the default port, and nothing else", () => {
-    // Only `{token, port}`: the panel no longer has a control port to forward
-    // to, so there is no second listener that could outlive a failed start.
+  it("resolves the token, the default port/host, and nothing else", () => {
+    // Only `{token, port, host}`: the panel no longer has a control port to
+    // forward to, so there is no second listener that could outlive a failed
+    // start.
     expect(resolvePanelSettings({ [PANEL_ENABLED_ENV]: "1", [PANEL_TOKEN_ENV]: ` ${TOKEN} ` })).toEqual({
       token: TOKEN,
       port: DEFAULT_PANEL_PORT,
+      host: DEFAULT_PANEL_HOST,
     });
   });
 
@@ -96,7 +100,26 @@ describe("resolvePanelSettings", () => {
         [PANEL_TOKEN_ENV]: TOKEN,
         [PANEL_PORT_ENV]: "9100",
       }),
-    ).toEqual({ token: TOKEN, port: 9100 });
+    ).toEqual({ token: TOKEN, port: 9100, host: DEFAULT_PANEL_HOST });
+  });
+
+  it("honours an explicit bind address, falling back to loopback on blanks", () => {
+    // The Docker bridge escape hatch: a loopback-bound panel inside the
+    // container is unreachable through `-p 8090:8090`.
+    expect(
+      resolvePanelSettings({
+        [PANEL_ENABLED_ENV]: "1",
+        [PANEL_TOKEN_ENV]: TOKEN,
+        [PANEL_HOST_ENV]: " 0.0.0.0 ",
+      }),
+    ).toEqual({ token: TOKEN, port: DEFAULT_PANEL_PORT, host: "0.0.0.0" });
+    expect(
+      resolvePanelSettings({
+        [PANEL_ENABLED_ENV]: "1",
+        [PANEL_TOKEN_ENV]: TOKEN,
+        [PANEL_HOST_ENV]: "   ",
+      }),
+    ).toEqual({ token: TOKEN, port: DEFAULT_PANEL_PORT, host: DEFAULT_PANEL_HOST });
   });
 
   it("refuses to start without a token rather than serving an open control plane", () => {
@@ -120,6 +143,16 @@ describe("startPanelServer", () => {
     const panel = await startPanel();
     expect(panel.hostname).toBe("127.0.0.1");
     expect(panel.port).toBeGreaterThan(0);
+  });
+
+  it("binds an explicit non-loopback address (Docker bridge wiring)", async () => {
+    const handleControl: Dispatcher = async () => ({ ok: true, event: "proxyStopped" });
+    const panel = await startPanelServer({ port: 0, hostname: "0.0.0.0", token: TOKEN, handleControl });
+    panels.push(panel);
+    expect(panel.hostname).toBe("0.0.0.0");
+    // 0.0.0.0 covers loopback too, so the tokenless health route stays reachable.
+    const health = await fetch(`http://127.0.0.1:${panel.port}/healthz`);
+    expect(health.status).toBe(200);
   });
 
   it("frees the port on close", async () => {

@@ -195,6 +195,15 @@ function installLogTee(): LogBuffer {
 }
 
 /**
+ * Loopback spellings that keep the panel unexposed (same set the config loader
+ * accepts for http:// origins). Anything else was an explicit `ZCODE_PANEL_HOST`
+ * and gets the startup warning below.
+ */
+function isLoopbackPanelHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
+
+/**
  * Start the optional web panel for `serve`. `serve` has no TUI, so this is the
  * only way to see quota, read live logs or switch provider/plan on a headless
  * box without `docker exec`.
@@ -343,10 +352,19 @@ async function startServePanel(
 
   const panel = await startPanelServer({
     port: settings.port,
+    hostname: settings.host,
     token: settings.token,
     handleControl,
   });
   console.log(`panel: http://${panel.hostname}:${panel.port} (token required)`);
+  // A non-loopback bind (the Docker bridge escape hatch, `ZCODE_PANEL_HOST`)
+  // is safe only as long as the token is strong and the port stays firewalled
+  // past the host that needs it — say so at startup, not only in the docs.
+  if (!isLoopbackPanelHost(panel.hostname)) {
+    console.warn(
+      `panel: bound to ${panel.hostname} — anyone who reaches this port with the token can stop the proxy, log out, or shut down`,
+    );
+  }
 
   return panel;
 }
