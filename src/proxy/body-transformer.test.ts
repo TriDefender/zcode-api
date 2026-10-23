@@ -284,7 +284,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     expect(parsed.tools[1]).toEqual({ name: "read_file" });
   });
 
-  it("strips client cache_control from preserved system blocks", () => {
+  it("merges client system blocks into the third official block instead of adding a 4th", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       system: [{ type: "text", text: "User rule", cache_control: { type: "ephemeral" } }],
@@ -293,8 +293,17 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
 
     const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
-    expect(parsed.system).toHaveLength(4);
-    expect(parsed.system[3]).toEqual({ type: "text", text: "User rule" });
+
+    // 4 system blocks is the 3012 trigger; the official 3-block shape must stay.
+    expect(parsed.system).toHaveLength(3);
+    expect(parsed.system[0].cache_control).toBeUndefined();
+    expect(parsed.system[1].cache_control).toEqual({ type: "ephemeral" });
+    expect(parsed.system[2].cache_control).toEqual({ type: "ephemeral" });
+    expect(parsed.system[2].text.endsWith("\n\nUser rule")).toBe(true);
+    // Conversation keeps the context prefix + the untouched client turn.
+    expect(parsed.messages[0].content[0].text).toMatch(/^<system-reminder>/);
+    expect(parsed.messages[1].role).toBe("user");
+    expect(parsed.messages[1].content[0].text).toBe("hi");
   });
 
   it("omits the powered-by line when body.model is missing", () => {
@@ -337,7 +346,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     expect(parsed.system[2].text).not.toContain("powered by the model named");
   });
 
-  it("preserves client system text after ZCode's official blocks", () => {
+  it("merges a string client system prompt into the official block (Claude Code compatibility)", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       system: "User rule",
@@ -347,8 +356,23 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
 
-    expect(parsed.system).toHaveLength(4);
-    expect(parsed.system[3]).toEqual({ type: "text", text: "User rule" });
+    expect(parsed.system).toHaveLength(3);
+    expect(parsed.system[2].text.endsWith("\n\nUser rule")).toBe(true);
+    expect(parsed.messages[1].role).toBe("user");
+    expect(parsed.messages[1].content[0].text).toBe("hi");
+  });
+
+  it("leaves system text untouched when startPlan is off", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      system: [{ type: "text", text: "User rule", cache_control: { type: "ephemeral" } }],
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    const out = transformRequestBody(body, { format: "anthropic" });
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.system).toEqual([{ type: "text", text: "User rule", cache_control: { type: "ephemeral" } }]);
   });
 });
 
@@ -390,6 +414,59 @@ describe("transformRequestBody — start-plan system (OpenAI)", () => {
     expect(parsed.messages[2].content).toContain("You have been invoked in the following environment:");
     expect(parsed.messages[2].content).not.toContain("powered by the model named");
     expect(parsed.messages[3]).toEqual({ role: "user", content: "hi" });
+  });
+
+  it("merges client system messages into the third official system message", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [
+        { role: "system", content: "You are Claude Code." },
+        { role: "user", content: "hi" },
+      ],
+    });
+
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "openai", startPlan: true, provider: "bigmodel" }));
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.messages.filter((m: { role: string }) => m.role === "system")).toHaveLength(3);
+    expect(parsed.messages[2].content.endsWith("\n\nYou are Claude Code.")).toBe(true);
+    expect(parsed.messages[3]).toEqual({ role: "user", content: "hi" });
+  });
+
+  it("treats developer messages like system messages when merging (OpenAI)", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [
+        { role: "developer", content: [{ type: "text", text: "dev rule" }] },
+        { role: "user", content: "hi" },
+      ],
+    });
+
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "openai", startPlan: true, provider: "bigmodel" }));
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.messages.filter((m: { role: string }) => m.role === "system")).toHaveLength(3);
+    expect(parsed.messages.some((m: { role: string }) => m.role === "developer")).toBe(false);
+    expect(parsed.messages[2].content.endsWith("\n\ndev rule")).toBe(true);
+    expect(parsed.messages[3]).toEqual({ role: "user", content: "hi" });
+  });
+
+  it("keeps the user turn untouched when merging multiple client system parts", () => {
+    const body = JSON.stringify({
+      model: "glm-5.2",
+      messages: [
+        { role: "system", content: "Rule A" },
+        { role: "system", content: [{ type: "text", text: "Rule B" }] },
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+      ],
+    });
+
+    const out = withEnvPromptVars(() => transformRequestBody(body, { format: "openai", startPlan: true, provider: "bigmodel" }));
+    const parsed = JSON.parse(out as string);
+
+    expect(parsed.messages.filter((m: { role: string }) => m.role === "system")).toHaveLength(3);
+    expect(parsed.messages[2].content.endsWith("\n\nRule A\n\nRule B")).toBe(true);
+    expect(parsed.messages[3]).toEqual({ role: "user", content: [{ type: "text", text: "hi" }] });
   });
 });
 

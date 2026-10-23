@@ -7,8 +7,12 @@
  * Transformations applied:
  *   1. OpenAI + `stream: true` → inject `stream_options.include_usage: true`
  *      (matches `@ai-sdk/openai-compatible` default in `_reverse/zcode.cjs`).
- *   2. start-plan → prepend ZCode gateway system blocks. OpenAI upstream gets
- *      system messages; Anthropic-shaped input gets the Anthropic `system` field.
+ *   2. start-plan → replace the request's system prompt with the ZCode gateway
+ *      identity blocks. OpenAI upstream gets system messages; Anthropic-shaped
+ *      input gets the Anthropic `system` field. A client-supplied system prompt
+ *      is merged into the third (dynamic) official block: the gateway
+ *      fingerprints the 3-block shape and rejects a 4th block with
+ *      405 `{"code":3012,...unusual activity...}` (every Claude Code request).
  *   3. Anthropic format → clear existing `cache_control` markers on all
  *      non-system messages, then add `{ type: "ephemeral" }` to the last
  *      content block of the last non-system message (mirrors the bundle's
@@ -22,7 +26,7 @@
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import type { Format } from "../translator/types.js";
-import { buildStartPlanSystem, buildContextPrefixMessage } from "./system-prompt.js";
+import { buildStartPlanSystem, buildContextPrefixMessage, clientSystemText } from "./system-prompt.js";
 import { resolveEnvPromptInfo } from "./identity.js";
 
 interface TransformContext {
@@ -180,19 +184,38 @@ function applyAnthropicUserId(body: Record<string, unknown>, userId: string): bo
 }
 
 /**
- * start-plan: prepend ZCode gateway system blocks (ContextBuilder mirror —
- * see system-prompt.ts). The gateway rejects requests without these identity
- * blocks with 3012 "method not allowed". Forwards `body.model` so
- * `buildStartPlanSystem` can emit the dynamic "You are powered by the model
- * named ${model}." line inside the Environment section, and attaches the
- * meta_user context_prefix (currentDate `<system-reminder>` user turn) that
- * every real client request carries. Client `cache_control` on tools is
- * stripped: official blocks (3) + last-message marker (1) already fill
+ * start-plan: replace the request's `system` field with the ZCode gateway
+ * identity blocks (ContextBuilder mirror — see system-prompt.ts).
+ *
+ * The gateway rejects requests without those blocks with 3012 "method not
+ * allowed", and it ALSO rejects a fourth block: appending the client system
+ * prompt after the official trio produced
+ * `405 {"code":3012,"msg":"request has been blocked due to unusual activity."}`
+ * for every Claude Code request. The block COUNT is part of the fingerprint.
+ *
+ * So the client's system text is appended to the third (dynamic) official block
+ * instead — the block the real client already varies per environment. That
+ * keeps exactly three system blocks, keeps the instructions in the `system`
+ * role (a user-turn merge makes models distrust them as prompt injection), and
+ * leaves the text ahead of the conversation.
+ *
+ * Forwards `body.model` so `buildStartPlanSystem` can emit the dynamic "You are
+ * powered by the model named ${model}." line inside the Environment section, and
+ * attaches the meta_user context_prefix (currentDate `<system-reminder>` user
+ * turn) that every real client request carries. Client `cache_control` on tools
+ * is stripped: the official system blocks + last-message marker already fill
  * Anthropic's 4-breakpoint cache budget.
  */
 function applyStartPlanSystem(body: Record<string, unknown>, provider?: "zai" | "bigmodel"): boolean {
   const model = typeof body.model === "string" ? body.model : undefined;
-  body.system = buildStartPlanSystem(body.system, model, resolveEnvPromptInfo(), provider);
+  const clientSystem = clientSystemText(body.system);
+  const official = buildStartPlanSystem(model, resolveEnvPromptInfo(), provider);
+  if (clientSystem) {
+    const dynamic = official[official.length - 1];
+    dynamic.text = `${dynamic.text}\n\n${clientSystem}`;
+  }
+  body.system = official;
+
   if (Array.isArray(body.messages) && body.messages.length > 0) {
     body.messages = [buildContextPrefixMessage() as unknown, ...body.messages];
   }
@@ -206,15 +229,48 @@ function applyStartPlanSystem(body: Record<string, unknown>, provider?: "zai" | 
   return true;
 }
 
+/**
+ * start-plan (OpenAI shape): keep exactly the three official `system` messages
+ * and merge every client `system`/`developer` message into the third one for the
+ * same 3012 reason as {@link applyStartPlanSystem}. Forwarding the client turns
+ * as extra system messages is what trips the upstream risk control, so they are
+ * merged rather than duplicated.
+ */
 function applyStartPlanOpenAISystem(body: Record<string, unknown>, provider?: "zai" | "bigmodel"): boolean {
   const messages = body.messages;
   if (!Array.isArray(messages)) return false;
 
+  const clientParts: string[] = [];
+  const rest: unknown[] = [];
+  for (const message of messages) {
+    if (isPlainObject(message) && (message.role === "system" || message.role === "developer")) {
+      const text = openAIContentText(message.content);
+      if (text) clientParts.push(text);
+      continue;
+    }
+    rest.push(message);
+  }
+
   const model = typeof body.model === "string" ? body.model : undefined;
-  const official = buildStartPlanSystem(undefined, model, resolveEnvPromptInfo(), provider).map((block) => ({
+  const official = buildStartPlanSystem(model, resolveEnvPromptInfo(), provider).map((block) => ({
     role: "system",
-    content: typeof block === "object" && block !== null && "text" in block ? String(block.text) : "",
+    content: block.text,
   }));
-  body.messages = [...official, ...messages];
+  if (clientParts.length > 0) {
+    const dynamic = official[official.length - 1];
+    dynamic.content = `${dynamic.content}\n\n${clientParts.join("\n\n")}`;
+  }
+  body.messages = [...official, ...rest];
   return true;
+}
+
+/** Plain-text view of an OpenAI message content (string or `{type:"text"}` parts). */
+function openAIContentText(content: unknown): string {
+  if (typeof content === "string") return content.trim();
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part) => (isPlainObject(part) && part.type === "text" && typeof part.text === "string" ? part.text : ""))
+    .filter((text) => text.length > 0)
+    .join("\n\n")
+    .trim();
 }

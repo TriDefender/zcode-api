@@ -140,15 +140,20 @@ export function buildDesktopContextSection(vizDir: string | undefined): string {
 /**
  * Prepend the official ZCode gateway blocks to the request's `system` field,
  * mirroring `assembleSystemMessages` (3 blocks: cli_prefix plain, stable and
- * dynamic blocks ephemeral, dynamic block `\n\n`-prefixed). Client system
- * blocks (if any) are preserved AFTER the official blocks, with their
- * `cache_control` stripped: the official blocks already consume cache
- * breakpoints (the last-message marker applied by body-transformer takes the
- * final one), so client markers would push the request over the cap — the
- * real client never emits foreign markers because it owns the whole body.
+ * dynamic blocks ephemeral, dynamic block `\n\n`-prefixed).
+ *
+ * The block COUNT is part of the gateway's fingerprint: the real client emits
+ * exactly three `system` blocks. A fourth block (what appending a client system
+ * prompt used to produce) makes the upstream risk-control layer reject the
+ * request with
+ * `405 {"code":3012,"msg":"request has been blocked due to unusual activity."}`
+ * — which is exactly what every Claude Code request used to hit.
+ *
+ * Client system text therefore must NOT be appended here — callers merge it
+ * into the third block via {@link clientSystemText} (see `applyStartPlanSystem`
+ * in body-transformer.ts), keeping the three-block count the gateway expects.
  */
 export function buildStartPlanSystem(
-  existingSystem: unknown,
   currentModel: string | undefined,
   env: StartPlanEnvInfo,
   provider?: "zai" | "bigmodel",
@@ -160,12 +165,23 @@ export function buildStartPlanSystem(
     buildEnvironmentSection(env, currentModel, provider),
     data.dynamicSections.afterEnvironment,
   ].join("\n\n");
-  const official: SystemBlock[] = [
+  return [
     { type: "text", text: data.cliPrefix },
     { type: "text", text: stable, cache_control: { ...EPHEMERAL } },
     { type: "text", text: `\n\n${dynamic}`, cache_control: { ...EPHEMERAL } },
   ];
-  return [...official, ...normalizeUserSystem(existingSystem)];
+}
+
+/**
+ * Flatten a client-supplied system prompt (string or Anthropic text-block
+ * array) into one plain-text string, dropping empty blocks and any
+ * `cache_control` markers (the official blocks already own the system cache
+ * breakpoints). Returns `""` when there is nothing to carry.
+ */
+export function clientSystemText(system: unknown): string {
+  return normalizeUserSystem(system)
+    .map((block) => block.text)
+    .join("\n\n");
 }
 
 /**

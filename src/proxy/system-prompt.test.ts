@@ -14,6 +14,7 @@ import {
   buildContextPrefixMessage,
   buildDesktopContextSection,
   buildEnvironmentSection,
+  clientSystemText,
   formatLocalIsoDate,
 } from "./system-prompt.js";
 
@@ -73,7 +74,7 @@ describe("buildEnvironmentSection (bundle T9o)", () => {
 
 describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
   it("emits exactly 3 official blocks; cli_prefix plain, stable/dynamic ephemeral (3.15.1+ wire)", () => {
-    const blocks = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai", VIZ_DIR);
+    const blocks = buildStartPlanSystem("glm-5.3", ENV, "zai", VIZ_DIR);
     expect(blocks).toHaveLength(3);
     for (const b of blocks) {
       expect(b.type).toBe("text");
@@ -86,12 +87,12 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
   });
 
   it("block 1 is the bare CLI Prefix", () => {
-    const [cli] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai", VIZ_DIR);
+    const [cli] = buildStartPlanSystem("glm-5.3", ENV, "zai", VIZ_DIR);
     expect(cli.text).toBe("You are ZCode, an interactive coding agent");
   });
 
   it("block 2 = Agent Identity + ZCode Desktop Context, \\n\\n-joined (stable group)", () => {
-    const [, stable] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai", VIZ_DIR);
+    const [, stable] = buildStartPlanSystem("glm-5.3", ENV, "zai", VIZ_DIR);
     expect(stable.text.startsWith("\nYou are an interactive ZCode agent that helps users with software engineering tasks.")).toBe(true);
     expect(stable.text).toContain("# Harness");
     // Current 3.7.7+ harness line (mid-conversation system turns)
@@ -112,7 +113,7 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
   });
 
   it("default vizDir renders the 3-line Interactive views variant with a JSON-quoted dir", () => {
-    const [, stable] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai", VIZ_DIR);
+    const [, stable] = buildStartPlanSystem("glm-5.3", ENV, "zai", VIZ_DIR);
     expect(stable.text).toContain("- This Desktop host supports Gen UI: completed assistant references to HTML fragments in the supplied session directory render inline, including on remote executors.");
     expect(stable.text).toContain(`- Writable, durable visualization directory for this session: ${JSON.stringify(VIZ_DIR)}. Save inline fragments here, outside the project. Other paths cannot be rendered.`);
     expect(stable.text).toContain("- Use the independent visualize skill for authoring instructions, styles and the restricted window.zcode bridge. Load the skill before generating an interactive view.");
@@ -120,7 +121,7 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
   });
 
   it("block 3 = '\\n\\n' + Dynamic Behavior + Environment + Context Management (dynamic group)", () => {
-    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai", VIZ_DIR);
+    const [, , dynamic] = buildStartPlanSystem("glm-5.3", ENV, "zai", VIZ_DIR);
     expect(dynamic.text.startsWith("\n\n# Communicating with the user")).toBe(true);
     // Section order: dynamic behavior → environment → context management
     const envIdx = dynamic.text.indexOf("# Environment");
@@ -134,18 +135,18 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
   });
 
   it("byte-spot: single \\n between the code-style default and the comment rule (wTr join)", () => {
-    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai", VIZ_DIR);
+    const [, , dynamic] = buildStartPlanSystem("glm-5.3", ENV, "zai", VIZ_DIR);
     expect(dynamic.text).toContain("match its comment density, naming, and idiom.\nOnly write a code comment");
   });
 
   it("byte-spot: 'exhaustive survey' has no trailing period (xTr literal)", () => {
-    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai", VIZ_DIR);
+    const [, , dynamic] = buildStartPlanSystem("glm-5.3", ENV, "zai", VIZ_DIR);
     expect(dynamic.text).toContain("not an exhaustive survey\n\n");
     expect(dynamic.text).not.toContain("not an exhaustive survey.");
   });
 
   it("environment lines carry the resolved env values", () => {
-    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai", VIZ_DIR);
+    const [, , dynamic] = buildStartPlanSystem("glm-5.3", ENV, "zai", VIZ_DIR);
     expect(dynamic.text).toContain("- Primary working directory: /home/dev/project");
     expect(dynamic.text).toContain("- Platform: linux");
     expect(dynamic.text).toContain("- Shell: bash");
@@ -153,25 +154,26 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
     expect(dynamic.text).toContain("- Is a git repository: no");
   });
 
-  it("appends client system blocks AFTER the official blocks, stripped of cache_control", () => {
-    const blocks = buildStartPlanSystem(
-      [
+  it("always emits exactly 3 blocks — client system text must not be appended (3012 risk control)", () => {
+    // The gateway fingerprints the block count: a 4th block is what produced
+    // 405 {"code":3012,"msg":"request has been blocked due to unusual activity."}
+    // for every Claude Code request. Callers merge client text into the third
+    // block instead (see body-transformer.ts).
+    expect(buildStartPlanSystem("glm-5.3", ENV, "zai", VIZ_DIR)).toHaveLength(3);
+    expect(buildStartPlanSystem(undefined, ENV, undefined, VIZ_DIR)).toHaveLength(3);
+  });
+
+  it("clientSystemText flattens strings and text blocks, dropping empties and cache_control", () => {
+    expect(clientSystemText("User rule")).toBe("User rule");
+    expect(
+      clientSystemText([
         { type: "text", text: "User rule", cache_control: { type: "ephemeral" } },
         { type: "text", text: "" }, // dropped
         "raw string block", // kept
-      ],
-      "glm-5.3",
-      ENV,
-      "zai",
-    );
-    expect(blocks).toHaveLength(5);
-    expect(blocks[3]).toEqual({ type: "text", text: "User rule" });
-    expect(blocks[4]).toEqual({ type: "text", text: "raw string block" });
-  });
-
-  it("returns only the 3 official blocks for absent system", () => {
-    expect(buildStartPlanSystem(undefined, undefined, ENV, undefined, VIZ_DIR)).toHaveLength(3);
-    expect(buildStartPlanSystem(null, undefined, ENV, undefined, VIZ_DIR)).toHaveLength(3);
+      ]),
+    ).toBe("User rule\n\nraw string block");
+    expect(clientSystemText(undefined)).toBe("");
+    expect(clientSystemText([])).toBe("");
   });
 });
 
