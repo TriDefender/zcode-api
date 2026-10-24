@@ -141,21 +141,22 @@ export function buildDesktopContextSection(vizDir: string | undefined): string {
  * Prepend the official ZCode gateway blocks to the request's `system` field,
  * mirroring `assembleSystemMessages`.
  *
- * No client system → the default 3-block desktop shape (cli_prefix plain,
- * stable and dynamic blocks ephemeral, dynamic block `\n\n`-prefixed).
+ * ALWAYS the default 3-block desktop shape (cli_prefix plain, stable and
+ * dynamic blocks ephemeral, dynamic block `\n\n`-prefixed).
  *
- * Client system present → the bundle's `customSystemPrompt` semantics
- * (3.16.3 `Fje#build()` `i`-branch): the custom text REPLACES the Agent
- * Identity section AND suppresses the whole default chain (Desktop Context,
- * Dynamic Behavior, Environment Info incl. the powered-by line, Context
- * Management) — the wire is EXACTLY 2 blocks: [cli_prefix, "\n"+custom],
- * block 2 ephemeral. This is the real subagent/custom-prompt client state;
- * appending the client text as a 4th system block is a shape no real client
- * produces, and the gateway's risk control rejects it with 405/3012
- * "unusual activity" (live-verified 2026-10-23 — the opencode-502 root
- * cause). Multiple client text blocks are `\n\n`-joined into the single
- * custom string the real client would carry; client `cache_control` is
- * dropped (block 2 owns the ephemeral breakpoint).
+ * Client system present → its normalized text is APPENDED to the end of the
+ * STABLE block (joined `\n\n` after Agent Identity + Desktop Context) and the
+ * session stays `main`. Gateway rule history (issue #71):
+ *   - 2026-10-23: the 2-block custom/subagent shape ([cli_prefix, "\n"+custom],
+ *     subagent session type) passed — that day's fix for #68/opencode-502.
+ *   - 2026-10-24 14:23+: the SAME 2-block shape is rejected with 405/3012
+ *     "unusual activity" under BOTH session types, while 3-block + client text
+ *     appended to the stable block + main passes (controlled matrix in the
+ *     issue, live re-verified). Appending to the dynamic block or switching
+ *     the session to subagent reintroduces the rejection.
+ * Multiple client text blocks are `\n\n`-joined into one string; client
+ * `cache_control` is dropped (the stable block owns its single ephemeral
+ * breakpoint — no new breakpoints are introduced).
  */
 export function buildStartPlanSystem(
   existingSystem: unknown,
@@ -165,13 +166,9 @@ export function buildStartPlanSystem(
   vizDir: string = resolveVisualizationDirectory(),
 ): SystemBlock[] {
   const custom = customSystemText(existingSystem);
-  if (custom !== undefined) {
-    return [
-      { type: "text", text: data.cliPrefix },
-      { type: "text", text: `\n${custom}`, cache_control: { ...EPHEMERAL } },
-    ];
-  }
-  const stable = [data.stableSections.join("\n\n"), buildDesktopContextSection(vizDir)].join("\n\n");
+  const stableParts = [data.stableSections.join("\n\n"), buildDesktopContextSection(vizDir)];
+  if (custom !== undefined) stableParts.push(custom);
+  const stable = stableParts.join("\n\n");
   const dynamic = [
     data.dynamicSections.beforeEnvironment,
     buildEnvironmentSection(env, currentModel, provider),
@@ -198,17 +195,6 @@ export function buildContextPrefixMessage(now?: Date): { role: "user"; content: 
     role: "user",
     content: [{ type: "text", text: `${data.systemReminder.open}${body}${data.systemReminder.close}` }],
   };
-}
-
-/**
- * Whether a client `system` payload would take the customSystemPrompt (2-block
- * subagent-shape) path in {@link buildStartPlanSystem} — the pairing signal for
- * the subagent session identity (gateway cross-checks x-zcode-session-type
- * against the system shape; main + custom blocks = 405/3012, live-verified
- * 2026-10-23).
- */
-export function hasCustomSystemPrompt(system: unknown): boolean {
-  return customSystemText(system) !== undefined;
 }
 
 /**

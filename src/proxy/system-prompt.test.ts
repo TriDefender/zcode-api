@@ -153,7 +153,7 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
     expect(dynamic.text).toContain("- Is a git repository: no");
   });
 
-  it("client system takes the customSystemPrompt path: 2 blocks, custom replaces the whole chain", () => {
+  it("client system keeps the 3-block shape; text is APPENDED to the stable block (issue #71)", () => {
     const blocks = buildStartPlanSystem(
       [
         { type: "text", text: "User rule", cache_control: { type: "ephemeral" } },
@@ -165,13 +165,20 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
       "zai",
       VIZ_DIR,
     );
-    // Bundle Fje#build() i-branch: cli_prefix + "\n"+custom only — identity,
-    // desktop context, dynamic behavior, environment (incl. powered-by) and
-    // context management are ALL suppressed. Appending a 4th block is the
-    // 405/3012 "unusual activity" trigger (live-verified 2026-10-23).
-    expect(blocks).toHaveLength(2);
+    // 2026-10-24 gateway rule (issue #71): the 2-block custom/subagent shape is
+    // rejected under BOTH session types; the passing shape is the official
+    // 3-block form with the client text appended to the STABLE block.
+    expect(blocks).toHaveLength(3);
     expect(blocks[0]).toEqual({ type: "text", text: "You are ZCode, an interactive coding agent" });
-    expect(blocks[1]).toEqual({ type: "text", text: "\nUser rule\n\nraw string block", cache_control: { type: "ephemeral" } });
+    expect(blocks[1].cache_control).toEqual({ type: "ephemeral" });
+    // Stable block = identity + desktop context + client text, \n\n-joined;
+    // the client text lands AFTER the ::code-comment example (stable tail),
+    // and the default chain (environment, powered-by, context mgmt) is intact.
+    expect(blocks[1].text.endsWith("start=10 end=11 priority=2}\n\nUser rule\n\nraw string block")).toBe(true);
+    expect(blocks[1].text).toContain("interactive ZCode agent");
+    expect(blocks[1].text).toContain("# ZCode Desktop Context");
+    expect(blocks[2].text).toContain("# Environment");
+    expect(blocks[2].text).toContain("powered by the model named zai-api/glm-5.3.");
   });
 
   it("whitespace-only / absent client system keeps the default 3-block identity chain", () => {

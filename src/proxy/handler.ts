@@ -55,8 +55,7 @@ import type { OpenAIChatRequest, OpenAIChatResponse, AnthropicMessagesRequest, A
 import { dumpPhase, dumpHeaders, dumpBody, dumpEnabled } from "./dump.js";
 import { StreamMetrics } from "./stream-metrics.js";
 import { inflateWithCap } from "./inflate.js";
-import { buildAnthropicMetadataUserId, SUBAGENT_PREFIX } from "./trace-headers.js";
-import { hasCustomSystemPrompt } from "./system-prompt.js";
+import { buildAnthropicMetadataUserId } from "./trace-headers.js";
 
 /** Options for the proxy handler. */
 export interface ProxyHandlerOptions {
@@ -171,27 +170,12 @@ export async function proxyRequest(
   // Session affinity 在转换后的 anthropic 侧计算：上游请求恒为 Anthropic
   // 形状，OpenAI 客户端与 Anthropic 客户端的同一逻辑对话得到同构的
   // canonical 身份（hash 谱系/任务身份与上游会话对齐，而非客户端方言）。
+  // （2026-10-24 网关规则再变，issue #71：不再因客户端 system 强制 subagent
+  // 会话身份——custom 两块形态已全灭，客户端 system 走默认三块 + main。）
   let clientSession = resolveSessionContext({ clientReq, body: upstreamBody, traceBody: body, upstreamFormat, model: meta.model, config });
   if (debug && clientSession) {
     const shortSession = clientSession.sessionId ? clientSession.sessionId.slice(0, 10) : "-";
     debugLine(reqId, `clientIdentity source=${clientSession.source} action=${clientSession.action} confidence=${clientSession.confidence.toFixed(2)} session=${shortSession}`);
-  }
-
-  // start-plan + 客户端 system prompt：body-transformer 按官方 customSystemPrompt
-  // 语义出 2 块（子代理形态）system——网关按 x-zcode-session-type 交叉校验 system
-  // 形态，main + custom 块 = 405/3012 "unusual activity"（opencode-502 根因，
-  // 2026-10-23 实弹定位；subagent + custom 200）。custom 请求必须配子代理会话
-  // 身份：会话 id 加 subagent_agent_ 前缀（出线头剥前缀、仅派生类型，镜像 bundle
-  // 前缀语义）+ 显式 sessionType 兜底（无会话 id 的 observe/lineage-fail 场景）。
-  if (startPlan && bodyHasClientSystem(upstreamBody)) {
-    if (clientSession) {
-      const base = clientSession.upstreamSessionId ?? clientSession.sessionId ?? crypto.randomUUID();
-      const subagentId = base.startsWith(SUBAGENT_PREFIX) ? base : `${SUBAGENT_PREFIX}${base}`;
-      clientSession = { ...clientSession, sessionId: subagentId, upstreamSessionId: subagentId, sessionType: "subagent" };
-    } else {
-      clientSession = { source: "none", action: "enforce", confidence: 1, sessionId: `${SUBAGENT_PREFIX}${crypto.randomUUID()}`, sessionType: "subagent" };
-    }
-    if (debug) debugLine(reqId, "subagent session identity applied (custom system prompt path)");
   }
 
   // Bundle `E2e` fires for EVERY anthropic-kind request (both plans) — the
@@ -502,9 +486,7 @@ export async function proxyRequest(
 
   if (translateOpenAIToAnthropic) {
     if (!upstreamResp.ok) {
-      const errBody = await upstreamResp.text().catch(() => "");
-      printRow(reqId, format, meta, 502, started, headersAt, 0, 0, 0);
-      return errorResponse(502, "translation_failed", `upstream returned ${upstreamResp.status}: ${errBody.slice(0, 200)}`);
+      return upstreamErrorPassthrough(reqId, format, meta, upstreamResp, started, headersAt);
     }
     if (isSSE && upstreamResp.body) {
       const translated = anthropicSseToOpenaiSse(upstreamResp.body, meta.model);
@@ -519,9 +501,7 @@ export async function proxyRequest(
 
   if (translateAnthropicToOpenAI) {
     if (!upstreamResp.ok) {
-      const errBody = await upstreamResp.text().catch(() => "");
-      printRow(reqId, format, meta, 502, started, headersAt, 0, 0, 0);
-      return errorResponse(502, "translation_failed", `upstream returned ${upstreamResp.status}: ${errBody.slice(0, 200)}`);
+      return upstreamErrorPassthrough(reqId, format, meta, upstreamResp, started, headersAt);
     }
     if (isSSE && upstreamResp.body) {
       const translated = openaiSseToAnthropicSse(upstreamResp.body, meta.model);
@@ -993,19 +973,25 @@ function nextReqId(): string {
 }
 
 /**
- * Whether the (Anthropic-shaped) upstream body carries a client system prompt
- * — i.e. transformRequestBody will take the customSystemPrompt 2-block path.
- * Same predicate as buildStartPlanSystem via hasCustomSystemPrompt; parse
- * failures read as "no custom prompt" (fail-open to the default shape).
+ * Translate-mode upstream failures pass the REAL status + body through
+ * (issue #71): wrapping them as 502 made clients retry 405/429 as if they
+ * were transient gateway faults. The upstream body (Anthropic error JSON)
+ * is forwarded verbatim with its content-type.
  */
-function bodyHasClientSystem(body: string | undefined): boolean {
-  if (!body) return false;
-  try {
-    const parsed = JSON.parse(body) as { system?: unknown };
-    return hasCustomSystemPrompt(parsed?.system);
-  } catch {
-    return false;
-  }
+async function upstreamErrorPassthrough(
+  reqId: string,
+  format: Format,
+  meta: RequestMeta,
+  upstreamResp: Response,
+  started: number,
+  headersAt: number,
+): Promise<Response> {
+  const errBody = await upstreamResp.text().catch(() => "");
+  printRow(reqId, format, meta, upstreamResp.status, started, headersAt, 0, 0, 0);
+  return new Response(errBody, {
+    status: upstreamResp.status,
+    headers: { "content-type": upstreamResp.headers.get("content-type") ?? "application/json" },
+  });
 }
 
 const DEBUG_BODY_PREVIEW = 200;

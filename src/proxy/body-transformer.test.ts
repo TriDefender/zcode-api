@@ -284,7 +284,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     expect(parsed.tools[1]).toEqual({ name: "read_file" });
   });
 
-  it("client system takes the customSystemPrompt path: 2 blocks, no default chain (3012 fix)", () => {
+  it("client system keeps the 3-block shape; text appended to the stable block (issue #71)", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       system: [{ type: "text", text: "User rule", cache_control: { type: "ephemeral" } }],
@@ -293,14 +293,16 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
 
     const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
-    // Bundle custom-prompt semantics: [cli_prefix, "\n"+custom] — the
-    // identity/desktop/dynamic chain is suppressed; a 4th appended block is a
-    // shape no real client produces and the gateway rejects with 405/3012.
-    expect(parsed.system).toHaveLength(2);
+    // 2026-10-24 gateway rule (issue #71): the 2-block custom/subagent shape
+    // is rejected under both session types; the passing shape is the official
+    // 3-block form with the client text appended to the STABLE block.
+    expect(parsed.system).toHaveLength(3);
     expect(parsed.system[0]).toEqual({ type: "text", text: "You are ZCode, an interactive coding agent" });
-    expect(parsed.system[1]).toEqual({ type: "text", text: "\nUser rule", cache_control: { type: "ephemeral" } });
-    expect(parsed.system[1].text).not.toContain("# Environment");
-    expect(parsed.system[1].text).not.toContain("powered by the model named");
+    expect(parsed.system[1].cache_control).toEqual({ type: "ephemeral" });
+    expect(parsed.system[1].text).toContain("interactive ZCode agent");
+    expect(parsed.system[1].text.endsWith("priority=2}\n\nUser rule")).toBe(true);
+    expect(parsed.system[2].text).toContain("# Environment");
+    expect(parsed.system[2].text).toContain("powered by the model named bigmodel-api/glm-5.2.");
   });
 
   it("omits the powered-by line when body.model is missing", () => {
@@ -343,7 +345,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     expect(parsed.system[2].text).not.toContain("powered by the model named");
   });
 
-  it("string client system takes the customSystemPrompt 2-block path", () => {
+  it("string client system also lands in the stable block (3-block shape)", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       system: "User rule",
@@ -353,8 +355,8 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
 
-    expect(parsed.system).toHaveLength(2);
-    expect(parsed.system[1]).toEqual({ type: "text", text: "\nUser rule", cache_control: { type: "ephemeral" } });
+    expect(parsed.system).toHaveLength(3);
+    expect(parsed.system[1].text.endsWith("\n\nUser rule")).toBe(true);
   });
 });
 
