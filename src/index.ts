@@ -555,6 +555,16 @@ async function runAndroid(): Promise<void> {
 
   const auth = new AuthManager();
 
+  // Captcha module handle for the start-plan pool warmup (started in
+  // startProxy, stopped whenever the proxy stops) — mirrors serve()'s
+  // warmup. On Android this also brings up the persistent captcha workers
+  // (ZCODE_CAPTCHA_WARM_WORKERS, injected by NodeRunner).
+  let captchaModule: { shutdownCaptcha: () => void } | null = null;
+  const stopCaptchaPoolRuntime = (): void => {
+    try { captchaModule?.shutdownCaptcha(); } catch {}
+    captchaModule = null;
+  };
+
   const serverRef: { current: ProxyServer | null } = { current: null };
 
   async function startProxy(): Promise<{ ok: true; port: number } | { ok: false; error: string }> {
@@ -566,6 +576,18 @@ async function runAndroid(): Promise<void> {
       const s = await startServer(buildServerOptions(config, auth, false));
       serverRef.current = s;
       console.log(`zcode-proxy listening on http://${s.hostname}:${s.port}`);
+      if (config.plan === "start-plan") {
+        // Mirror serve(): size the pool, start background refill and prefill
+        // — previously Android never initialized the pool at all (every take
+        // hit an empty-pool race + one urgent refill). The prefill also warms
+        // the persistent captcha workers on this platform.
+        import("./proxy/captcha.js")
+          .then(async (m) => {
+            captchaModule = m;
+            await m.startCaptchaPool(config.identity.appVersion);
+          })
+          .catch((err) => console.error(`[captcha] pool warmup failed: ${(err as Error).message}`));
+      }
       return { ok: true, port: s.port };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
@@ -578,6 +600,7 @@ async function runAndroid(): Promise<void> {
     try {
       s.stop(false);
       serverRef.current = null;
+      stopCaptchaPoolRuntime();
       console.log("zcode-proxy stopped");
       return { ok: true };
     } catch (err) {
@@ -624,6 +647,7 @@ async function runAndroid(): Promise<void> {
     onQuota: () => collectQuotaSnapshot(config),
     onShutdown: async () => {
       serverRef.current?.stop(true);
+      stopCaptchaPoolRuntime();
     },
   });
 
@@ -632,9 +656,11 @@ async function runAndroid(): Promise<void> {
   console.log(`plan: ${config.plan}`);
 
   process.on("SIGINT", () => {
+    stopCaptchaPoolRuntime();
     void controlListener.close().then(() => serverRef.current?.stop(true));
   });
   process.on("SIGTERM", () => {
+    stopCaptchaPoolRuntime();
     void controlListener.close().then(() => serverRef.current?.stop(true));
   });
 }

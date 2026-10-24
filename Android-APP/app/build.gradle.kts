@@ -114,7 +114,11 @@ dependencies {
 // "bun run build:android-bundle" + copy — release CI regenerates it before
 // packaging; local builds must too. Fail at build time rather than shipping
 // an APK whose NodeRunner dies on first launch over a missing bundle.
+// captcha-worker-entry.cjs is the same script's second output: Android runs
+// captcha solving STRICTLY in worker threads (ZCODE_CAPTCHA_REQUIRE_WORKER=1),
+// so a missing entry means every start-plan request 503s — guard it too.
 val serverBundleFile = file("src/main/assets/server_bundle/server.cjs")
+val captchaWorkerEntryFile = file("src/main/assets/server_bundle/captcha-worker-entry.cjs")
 val checkServerBundle = tasks.register("checkServerBundle") {
     doLast {
         val size = if (serverBundleFile.exists()) serverBundleFile.length() else 0L
@@ -124,6 +128,15 @@ val checkServerBundle = tasks.register("checkServerBundle") {
                     "Generate it first:\n" +
                     "  bun run build:android-bundle\n" +
                     "  cp dist/android/server.cjs Android-APP/app/src/main/assets/server_bundle/server.cjs"
+            )
+        }
+        val workerSize = if (captchaWorkerEntryFile.exists()) captchaWorkerEntryFile.length() else 0L
+        if (workerSize < 100_000L) {
+            throw GradleException(
+                "server_bundle/captcha-worker-entry.cjs is missing or implausible ($workerSize bytes). " +
+                    "Generate it first:\n" +
+                    "  bun run build:android-bundle\n" +
+                    "  cp dist/android/captcha-worker-entry.cjs Android-APP/app/src/main/assets/server_bundle/captcha-worker-entry.cjs"
             )
         }
     }

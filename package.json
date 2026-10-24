@@ -12,7 +12,7 @@
     "build:linux-arm64": "bun run scripts/build-fork-worker.ts && bun build --compile --target bun-linux-arm64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-linux-arm64",
     "build:darwin-x64": "bun run scripts/build-fork-worker.ts && bun build --compile --target bun-darwin-x64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-darwin-x64",
     "build:darwin-arm64": "bun run scripts/build-fork-worker.ts && bun build --compile --target bun-darwin-arm64 --define \"require.resolve=undefined\" src/index.ts --outfile zcode-proxy-darwin-arm64",
-    "build:android-bundle": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/android/server.cjs --define:process.env.NODE_ENV=\\\"production\\\" --external:./captcha-worker-asset.js",
+    "build:android-bundle": "esbuild src/index.ts --bundle --platform=node --format=cjs --outfile=dist/android/server.cjs --define:process.env.NODE_ENV=\\\"production\\\" --external:./captcha-worker-asset.js && esbuild src/proxy/captcha-worker-entry.ts --bundle --platform=node --format=cjs --outfile=dist/android/captcha-worker-entry.cjs --define:process.env.NODE_ENV=\\\"production\\\"",
     "build:android-apk": "bash scripts/build-android-apk.sh",
     "regen:mcp": "bun run scripts/regen-mcp-catalogue.ts"
   },

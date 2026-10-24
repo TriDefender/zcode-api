@@ -31,7 +31,14 @@ class NodeRunner(private val context: Context) {
 
     suspend fun ensureAssetsExtracted() = withContext(Dispatchers.IO) {
         // Web UI, system prompt and config template are inlined into this bundle.
-        val assetPath = "server_bundle/server.cjs"
+        // The captcha worker entry ships as a sibling file: the Node process
+        // resolves it via ZCODE_CAPTCHA_WORKER and solves captchas strictly in
+        // persistent worker threads (never in-process — see captcha-worker-dispatch.ts).
+        extractAsset("server_bundle/server.cjs")
+        extractAsset("server_bundle/captcha-worker-entry.cjs")
+    }
+
+    private fun extractAsset(assetPath: String) {
         val outFile = File(context.filesDir, assetPath)
         outFile.parentFile?.mkdirs()
         context.assets.open(assetPath).use { input ->
@@ -81,6 +88,12 @@ class NodeRunner(private val context: Context) {
             environment()["ZCODE_IDENTITY_DEVICE_MID"] = deviceMid
             environment()["ZCODE_PROXY_CONFIG"] = config.absolutePath
             environment()["ZCODE_LOG_FORMAT"] = "compact"
+            // Captcha solving: strict worker mode — a persistent warm pool of
+            // worker threads, never in-process (the main event loop must not
+            // block on the solver's Atomics.wait sync XHRs, issue #54).
+            environment()["ZCODE_CAPTCHA_WORKER"] = File(serverBundle, "captcha-worker-entry.cjs").absolutePath
+            environment()["ZCODE_CAPTCHA_REQUIRE_WORKER"] = "1"
+            environment()["ZCODE_CAPTCHA_WARM_WORKERS"] = "3"
         }
 
         val p = pb.start()
