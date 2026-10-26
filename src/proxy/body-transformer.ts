@@ -22,7 +22,7 @@
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import type { Format } from "../translator/types.js";
-import { buildStartPlanSystem, buildContextPrefixMessage } from "./system-prompt.js";
+import { buildStartPlanSystem, buildContextPrefixMessage, customSystemText } from "./system-prompt.js";
 import { resolveEnvPromptInfo } from "./identity.js";
 
 interface TransformContext {
@@ -192,9 +192,28 @@ function applyAnthropicUserId(body: Record<string, unknown>, userId: string): bo
  */
 function applyStartPlanSystem(body: Record<string, unknown>, provider?: "zai" | "bigmodel"): boolean {
   const model = typeof body.model === "string" ? body.model : undefined;
+  const clientSystem = customSystemText(body.system);
   body.system = buildStartPlanSystem(body.system, model, resolveEnvPromptInfo(), provider);
   if (Array.isArray(body.messages) && body.messages.length > 0) {
     body.messages = [buildContextPrefixMessage() as unknown, ...body.messages];
+    // The client's own system prompt rides AFTER the history, never inside the
+    // cacheable system blocks: harnesses vary it per turn, and any change
+    // before the messages invalidates every cached message segment behind it.
+    // As a trailing turn it still reaches the model.
+    if (clientSystem !== undefined) {
+      // Insert BEFORE the last user turn, not after it. applyAnthropicCacheControl
+      // marks the LAST non-system message's last block as the cache breakpoint;
+      // appending the volatile client text after that point makes the breakpoint
+      // itself vary, so every request writes a fresh cache entry and reads
+      // nothing (measured: cache_read=0 despite a stable history). Placing it
+      // before the final turn keeps the breakpoint anchored on history that is
+      // append-only across turns.
+      const history = body.messages as unknown[];
+      history.splice(Math.max(1, history.length - 1), 0, {
+        role: "user",
+        content: [{ type: "text", text: `# Additional instructions\n\n${clientSystem}` }],
+      });
+    }
   }
   if (Array.isArray(body.tools)) {
     for (const tool of body.tools) {

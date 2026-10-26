@@ -284,7 +284,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     expect(parsed.tools[1]).toEqual({ name: "read_file" });
   });
 
-  it("client system keeps the 3-block shape; text appended to the stable block (issue #71)", () => {
+  it("client system keeps the 3-block shape; text rides outside the cache breakpoint (issue #71)", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       system: [{ type: "text", text: "User rule", cache_control: { type: "ephemeral" } }],
@@ -295,12 +295,14 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     const parsed = JSON.parse(out as string);
     // 2026-10-24 gateway rule (issue #71): the 2-block custom/subagent shape
     // is rejected under both session types; the passing shape is the official
-    // 3-block form with the client text appended to the STABLE block.
+    // 3-block form. The client text rides AFTER the messages so the cacheable
+    // blocks stay byte-stable across turns (see the cache-stability suite).
     expect(parsed.system).toHaveLength(3);
     expect(parsed.system[0]).toEqual({ type: "text", text: "You are ZCode, an interactive coding agent" });
     expect(parsed.system[1].cache_control).toEqual({ type: "ephemeral" });
     expect(parsed.system[1].text).toContain("interactive ZCode agent");
-    expect(parsed.system[1].text.endsWith("priority=2}\n\nUser rule")).toBe(true);
+    expect(parsed.system[1].text).not.toContain("User rule");
+    expect(JSON.stringify(parsed.messages)).toContain("User rule");
     expect(parsed.system[2].text).toContain("# Environment");
     expect(parsed.system[2].text).toContain("powered by the model named bigmodel-api/glm-5.2.");
   });
@@ -345,7 +347,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     expect(parsed.system[2].text).not.toContain("powered by the model named");
   });
 
-  it("string client system also lands in the stable block (3-block shape)", () => {
+  it("string client system also stays out of the cacheable blocks (3-block shape)", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       system: "User rule",
@@ -356,7 +358,8 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
-    expect(parsed.system[1].text.endsWith("\n\nUser rule")).toBe(true);
+    expect(parsed.system[1].text).not.toContain("User rule");
+    expect(JSON.stringify(parsed.messages)).toContain("User rule");
   });
 });
 
@@ -457,5 +460,113 @@ describe("transformRequestBody — metadata.user_id (Anthropic)", () => {
     const out = transformRequestBody(body, { format: "openai", metadataUserId: "u_42" });
     const parsed = JSON.parse(out as string);
     expect(parsed.metadata).toBeUndefined();
+  });
+});
+
+describe("transformRequestBody — start-plan system prompt cache stability", () => {
+  /**
+   * The system blocks are the cacheable prefix. A harness that varies its own
+   * system prompt per turn (omp injects live context) must not perturb them:
+   * any change before the message history invalidates every cached message
+   * segment behind it. Measured on a 1.82 MB conversation: 26 KB reusable
+   * prefix (98.5% loss) before this guarantee, 1.81 MB after.
+   */
+  const base = {
+    model: "glm-5.3",
+    max_tokens: 64,
+    messages: [{ role: "user", content: "hello" }],
+  };
+
+  function systemBlocks(system: unknown): unknown {
+    const out = transformRequestBody(JSON.stringify({ ...base, system }), {
+      format: "anthropic",
+      startPlan: true,
+      provider: "zai",
+    });
+    const parsed = JSON.parse(out ?? "{}") as { system?: unknown };
+    return parsed.system;
+  }
+
+  it("emits byte-identical system blocks for differing client system prompts", () => {
+    const first = systemBlocks("You are omp. Time: 10:00:01");
+    const second = systemBlocks("You are omp. Time: 10:00:59");
+    expect(JSON.stringify(first)).toBe(JSON.stringify(second));
+  });
+
+  it("keeps system blocks identical when the client sends no system prompt", () => {
+    expect(JSON.stringify(systemBlocks("You are omp. Time: 10:00:01"))).toBe(JSON.stringify(systemBlocks(undefined)));
+  });
+
+  it("still forwards the client system text, ahead of the cache breakpoint", () => {
+    const out = transformRequestBody(JSON.stringify({ ...base, system: "CODEX_MARKER_XYZ" }), {
+      format: "anthropic",
+      startPlan: true,
+      provider: "zai",
+    });
+    const parsed = JSON.parse(out ?? "{}") as { messages?: { role: string; content: unknown }[] };
+    const messages = parsed.messages ?? [];
+    // The volatile instructions sit BEFORE the last turn: that turn owns the
+    // cache breakpoint, and anchoring it on varying text would defeat caching.
+    const marked = messages.filter((m) => JSON.stringify(m.content ?? "").includes("cache_control"));
+    const withMarker = messages.filter((m) => JSON.stringify(m.content ?? "").includes("CODEX_MARKER_XYZ"));
+    expect(withMarker).toHaveLength(1);
+    expect(marked).toHaveLength(1);
+    expect(JSON.stringify(marked[0].content)).not.toContain("CODEX_MARKER_XYZ");
+  });
+
+  it("leaves the client's system text out of the cacheable blocks", () => {
+    const blocks = systemBlocks("UNIQUE_CLIENT_MARKER_ABC");
+    expect(JSON.stringify(blocks)).not.toContain("UNIQUE_CLIENT_MARKER_ABC");
+  });
+});
+
+describe("transformRequestBody — cache breakpoint placement", () => {
+  /**
+   * applyAnthropicCacheControl marks the LAST non-system message's last block.
+   * If the volatile client instructions were appended after it, the breakpoint
+   * itself would vary and every request would write a fresh cache entry while
+   * reading nothing — measured cache_read=0 with a perfectly stable history.
+   */
+  it("keeps the breakpoint off the volatile client instructions", () => {
+    const out = transformRequestBody(
+      JSON.stringify({
+        model: "glm-5.3-flash",
+        max_tokens: 32,
+        system: "ctx t=1",
+        messages: [
+          { role: "user", content: "a" },
+          { role: "assistant", content: "b" },
+          { role: "user", content: "c" },
+        ],
+      }),
+      { format: "anthropic", startPlan: true, provider: "zai" },
+    );
+    const parsed = JSON.parse(out ?? "{}") as { messages?: { role: string; content: unknown }[] };
+    const marked = (parsed.messages ?? []).filter((m) => JSON.stringify(m.content ?? "").includes("cache_control"));
+    expect(marked).toHaveLength(1);
+    expect(JSON.stringify(marked[0].content)).not.toContain("# Additional instructions");
+  });
+
+  it("anchors the breakpoint on the same turn regardless of client text", () => {
+    const build = (system: string) =>
+      transformRequestBody(
+        JSON.stringify({
+          model: "glm-5.3-flash",
+          max_tokens: 32,
+          system,
+          messages: [
+            { role: "user", content: "a" },
+            { role: "assistant", content: "b" },
+            { role: "user", content: "c" },
+          ],
+        }),
+        { format: "anthropic", startPlan: true, provider: "zai" },
+      );
+    const first = JSON.parse(build("ctx t=1") ?? "{}") as { messages?: unknown[] };
+    const second = JSON.parse(build("ctx t=2") ?? "{}") as { messages?: unknown[] };
+    // The breakpoint-bearing turn must be identical across both requests.
+    const markedOf = (messages: unknown[]) =>
+      messages.filter((m) => JSON.stringify(m).includes("cache_control"));
+    expect(JSON.stringify(markedOf(first.messages ?? []))).toBe(JSON.stringify(markedOf(second.messages ?? [])));
   });
 });

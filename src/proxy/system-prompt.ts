@@ -159,16 +159,21 @@ export function buildDesktopContextSection(vizDir: string | undefined): string {
  * breakpoint — no new breakpoints are introduced).
  */
 export function buildStartPlanSystem(
-  existingSystem: unknown,
+  /** Retained for call-site compatibility; client text is attached by the caller. */
+  _existingSystem: unknown,
   currentModel: string | undefined,
   env: StartPlanEnvInfo,
   provider?: "zai" | "bigmodel",
   vizDir: string = resolveVisualizationDirectory(),
 ): SystemBlock[] {
-  const custom = customSystemText(existingSystem);
-  const stableParts = [data.stableSections.join("\n\n"), buildDesktopContextSection(vizDir)];
-  if (custom !== undefined) stableParts.push(custom);
-  const stable = stableParts.join("\n\n");
+  // The client's system text is deliberately NOT folded into these blocks.
+  // They are the cacheable prefix, and a harness that varies its system prompt
+  // per turn (omp injects live context: date, cwd, counters) would change block
+  // 2 on every request and invalidate the whole conversation behind it —
+  // measured at 1.82 MB body / 26 KB reusable prefix (98.5% loss) before this
+  // change. The caller attaches that text after the message history instead;
+  // see applyStartPlanSystem in body-transformer.ts.
+  const stable = [data.stableSections.join("\n\n"), buildDesktopContextSection(vizDir)].join("\n\n");
   const dynamic = [
     data.dynamicSections.beforeEnvironment,
     buildEnvironmentSection(env, currentModel, provider),
@@ -205,7 +210,7 @@ export function buildContextPrefixMessage(now?: Date): { role: "user"; content: 
  * Returns undefined when there is no non-empty text (whitespace-only
  * systems take the default identity path, matching `!!o` in the bundle).
  */
-function customSystemText(system: unknown): string | undefined {
+export function customSystemText(system: unknown): string | undefined {
   if (system == null) return undefined;
   if (typeof system === "string") {
     const text = system.trim();
