@@ -175,7 +175,7 @@ describe("ZaiOAuthClient (server-mediated cli login)", () => {
       expect(interstitial).toStartWith("https://zcode.z.ai/app/oauth/login?");
       const inner = new URL(interstitial);
       expect(inner.searchParams.get("redirect")).toBe("zcode://oauth/callback");
-      expect(inner.searchParams.get("app_version")).toBe("3.15.1");
+      expect(inner.searchParams.get("app_version")).toBe("3.16.3");
     } finally {
       await client.close();
     }
@@ -256,7 +256,7 @@ describe("BigmodelPollOAuthClient (server-mediated cli login)", () => {
       expect(url.origin + url.pathname).toBe("https://bigmodel.cn/login");
       const interstitial = url.searchParams.get("redirect") ?? "";
       expect(interstitial).toStartWith("https://zcode.z.ai/app/oauth/login?");
-      expect(new URL(interstitial).searchParams.get("app_version")).toBe("3.15.1");
+      expect(new URL(interstitial).searchParams.get("app_version")).toBe("3.16.3");
       expect(url.searchParams.get("redirect_uri")).toBeNull();
       expect(started.callbackUrl).toBe("");
     } finally {

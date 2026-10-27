@@ -20,9 +20,11 @@ a Kotlin shell; OAuth login happens in the system browser via Custom Tabs.
 # 1. Install JS deps
 bun install
 
-# 2. Build the esbuild CJS bundle (outputs dist/android/server.cjs)
+# 2. Build the esbuild CJS bundles (outputs dist/android/server.cjs and
+#    dist/android/captcha-worker-entry.cjs)
 bun run build:android-bundle
 cp dist/android/server.cjs Android-APP/app/src/main/assets/server_bundle/server.cjs
+cp dist/android/captcha-worker-entry.cjs Android-APP/app/src/main/assets/server_bundle/captcha-worker-entry.cjs
 
 # 3. Build the debug APK (Node binary + dependency .so files are committed
 #    in jniLibs — nothing is downloaded at build time)
@@ -53,11 +55,13 @@ cd Android-APP
 
 - `Android-APP/` — Gradle project; everything Android-specific lives here.
 - `Android-APP/app/src/main/java/com/zcode/proxy/` — Kotlin shell.
-- `Android-APP/app/src/main/assets/server_bundle/` — generated `server.cjs`;
-  the web UI, system prompt and config template are inlined into the bundle.
-  It is gitignored build output — regenerate via `bun run build:android-bundle` +
-  copy `dist/android/server.cjs` into it before building (Gradle's
-  `checkServerBundle` preBuild task fails with a hint if it is missing).
+- `Android-APP/app/src/main/assets/server_bundle/` — generated `server.cjs`
+  plus `captcha-worker-entry.cjs` (start-plan captchas are solved strictly in
+  worker processes on Android); the web UI, system prompt and config template
+  are inlined into the bundle. It is gitignored build output — regenerate via
+  `bun run build:android-bundle` + copy both files from `dist/android/` into
+  it before building (Gradle's `checkServerBundle` preBuild task fails with a
+  hint if either is missing).
 - `Android-APP/app/src/main/jniLibs/arm64-v8a/` — committed Node.js binary
   (`libnode.so`) + Termux dependency `.so` files, extracted once via
   `scripts/extract-termux-deps.sh`.
@@ -84,10 +88,11 @@ cd Android-APP
 
 ## Known limitations (v1)
 
-- **Start-plan tier untested on Android** — the in-process happy-dom captcha
-  solver is bundled into `server.cjs` (jsdom was removed from the project
-  entirely), but the tier has not been validated on-device. Coding-plan
-  (direct upstream) is the supported tier on Android v1.
+- **Start-plan tier untested on Android** — captchas are solved in dedicated
+  worker processes (`captcha-worker-entry.cjs`; strict mode — a missing or
+  failing worker is a hard solve failure, never a main-thread fallback), but
+  the tier has not been validated on-device. Coding-plan (direct upstream) is
+  the supported tier on Android v1.
 - **Not Play Store-distributed** — APK is sideload-only. Play Store rejects apps
   that launch external binaries from `jniLibs/`.
 - **arm64-v8a only** — no x86 / armeabi-v7a support. Covers 99%+ of modern

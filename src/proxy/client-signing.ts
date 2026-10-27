@@ -36,6 +36,7 @@
  *
  * Full protocol: `_reverse/NOTEPAD.md` "Client Request Signing V4".
  */
+import { DEFAULT_APP_VERSION } from "../config/loader.js";
 import type { UpstreamHeaderPair } from "./upstream.js";
 
 const HANDSHAKE_PATH = "/api/paas/c1f3a7e2/v2/client";
@@ -544,7 +545,7 @@ export class ClientSigningManager {
       const ptResp = await this.fetchImpl(`https://bigmodel.cn/api/biz/v1/organization/${encodeURIComponent(org.organizationId)}/projects/${encodeURIComponent(project.projectId)}/api_keys/${encodeURIComponent(apiKeyId)}/access_tokens`, {
         method: "POST",
         headers: { Authorization: `Bearer ${bare}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ clientType: "zcode", clientVersion: "3.15.1" }),
+        body: JSON.stringify({ clientType: "zcode", clientVersion: DEFAULT_APP_VERSION }),
         redirect: "manual",
         signal: controller.signal,
       });

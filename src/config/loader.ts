@@ -10,7 +10,6 @@ const ENV = {
   PORT: "ZCODE_PROXY_PORT",
   PROXY_API_KEY: "ZCODE_PROXY_API_KEY",
   PROVIDER: "ZCODE_PROVIDER",
-  APP_VERSION: "ZCODE_APP_VERSION",
   SOURCE_TITLE: "ZCODE_SOURCE_TITLE",
   REFERER_ORIGIN: "ZCODE_REFERER_ORIGIN",
   ASYNC_ENABLED: "ZCODE_ASYNC_ENABLED",
@@ -28,8 +27,12 @@ const ENV = {
   MCP_GATEWAY_ORIGIN: "ZCODE_MCP_GATEWAY_ORIGIN",
 } as const;
 
-/** Pinned wire fingerprint; snapshot version is tracked separately in _reverse/MANIFEST.md. */
-export const DEFAULT_APP_VERSION = "3.15.1";
+/**
+ * Wire fingerprint pinned in code — auto-bumps with mirror snapshot updates
+ * (see _reverse/MANIFEST.md). Not configurable: the identity.appVersion YAML
+ * key and the ZCODE_APP_VERSION env override were removed on 2026-10-27.
+ */
+export const DEFAULT_APP_VERSION = "3.16.3";
 
 const DEFAULTS = {
   PORT: 8080,
@@ -43,7 +46,6 @@ const DEFAULTS = {
   ZAI_OPENAI_BASE: "https://api.z.ai/api/coding/paas/v4",
   BIGMODEL_ANTHROPIC_BASE: "https://open.bigmodel.cn/api/anthropic",
   BIGMODEL_OPENAI_BASE: "https://open.bigmodel.cn/api/coding/paas/v4",
-  APP_VERSION: DEFAULT_APP_VERSION,
   SOURCE_TITLE: "cli",
   REFERER_ORIGIN: "https://zcode.z.ai",
   CLIENT_IDENTITY_MODE: "enforce" as const,
@@ -83,9 +85,6 @@ const DEFAULTS = {
   HIGHSPEED_ORIGIN: "https://zcode.z.ai",
   HIGHSPEED_MODELS: ["glm-5.3", "glm-5.2", "glm-5.1"],
 };
-
-/** Printable-ASCII gate copied from the ZCode bundle's `rYn` helper. */
-const ASCII_PRINTABLE = /^[\x20-\x7e]+$/;
 
 /**
  * Load and validate proxy configuration from a YAML file, applying env overrides.
@@ -130,8 +129,6 @@ export function loadConfig(path: string): ProxyConfig {
 
   // --- identity ---
   const identity = resolveIdentity({
-    appVersionEnv: process.env[ENV.APP_VERSION],
-    appVersionYaml: parsed?.identity?.appVersion,
     sourceTitleEnv: process.env[ENV.SOURCE_TITLE],
     sourceTitleYaml: parsed?.identity?.sourceTitle,
     refererEnv: process.env[ENV.REFERER_ORIGIN],
@@ -373,8 +370,6 @@ function resolveLogLevel(raw: unknown): "debug" | "info" | "warn" | "error" {
 }
 
 interface IdentityInputs {
-  appVersionEnv?: string;
-  appVersionYaml?: string;
   sourceTitleEnv?: string;
   sourceTitleYaml?: string;
   refererEnv?: string;
@@ -382,11 +377,9 @@ interface IdentityInputs {
   deviceMidYaml?: string;
 }
 
-/** Resolve identity fields (env > YAML > default). Non-ASCII `appVersion` silently falls back to the default. */
+/** Resolve identity fields (env > YAML > default). `appVersion` is code-pinned
+ * (DEFAULT_APP_VERSION) and has no env/YAML surface. */
 function resolveIdentity(inp: IdentityInputs): ProxyIdentity {
-  const rawVersion = (inp.appVersionEnv ?? inp.appVersionYaml ?? DEFAULTS.APP_VERSION).trim();
-  const appVersion = ASCII_PRINTABLE.test(rawVersion) ? rawVersion : DEFAULTS.APP_VERSION;
-
   const sourceTitle = (inp.sourceTitleEnv ?? inp.sourceTitleYaml ?? DEFAULTS.SOURCE_TITLE).trim()
     || DEFAULTS.SOURCE_TITLE;
 
@@ -394,7 +387,7 @@ function resolveIdentity(inp: IdentityInputs): ProxyIdentity {
     || DEFAULTS.REFERER_ORIGIN;
 
   const deviceMid = typeof inp.deviceMidYaml === "string" ? inp.deviceMidYaml.trim() : "";
-  return { appVersion, sourceTitle, refererOrigin, ...(deviceMid ? { deviceMid } : {}) };
+  return { appVersion: DEFAULT_APP_VERSION, sourceTitle, refererOrigin, ...(deviceMid ? { deviceMid } : {}) };
 }
 
 /** Cross-field validation after all fields are resolved. */

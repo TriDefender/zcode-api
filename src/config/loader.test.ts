@@ -21,7 +21,6 @@ beforeEach(() => {
   delete process.env.ZCODE_PROXY_PORT;
   delete process.env.ZCODE_PROXY_API_KEY;
   delete process.env.ZCODE_PROVIDER;
-  delete process.env.ZCODE_APP_VERSION;
   delete process.env.ZCODE_SOURCE_TITLE;
   delete process.env.ZCODE_REFERER_ORIGIN;
   delete process.env.ZCODE_ASYNC_ENABLED;
@@ -46,7 +45,6 @@ server:
   host: "127.0.0.1"
 provider: zai
 identity:
-  appVersion: "3.8.1"
   deviceMid: "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0"
 `);
     const cfg = loadConfig(path);
@@ -60,7 +58,6 @@ server:
   host: "127.0.0.1"
 provider: zai
 identity:
-  appVersion: "3.8.1"
   deviceMid: ""
 `);
     expect(loadConfig(path).identity.deviceMid).toBeUndefined();
@@ -69,8 +66,6 @@ identity:
 server:
   port: 9090
 provider: zai
-identity:
-  appVersion: "3.8.1"
 `);
     expect(loadConfig(path2).identity.deviceMid).toBeUndefined();
   });
@@ -433,16 +428,7 @@ models:
     expect(cfg.models).toContain("glm-4.6");
   });
 
-  it("identity defaults to current ZCode release when no field provided", () => {
-    const path = writeYaml(`
-`);
-    const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("3.15.1");
-    expect(cfg.identity.sourceTitle).toBe("cli");
-    expect(cfg.identity.refererOrigin).toBe("https://zcode.z.ai");
-  });
-
-  it("identity: YAML values override defaults", () => {
+  it("identity: appVersion is code-pinned (3.16.3), sourceTitle/refererOrigin overridable", () => {
     const path = writeYaml(`
 identity:
   appVersion: "9.9.9"
@@ -450,27 +436,8 @@ identity:
   refererOrigin: "https://example.com"
 `);
     const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("9.9.9");
+    expect(cfg.identity.appVersion).toBe("3.16.3");
     expect(cfg.identity.sourceTitle).toBe("electron");
     expect(cfg.identity.refererOrigin).toBe("https://example.com");
-  });
-
-  it("identity: ZCODE_APP_VERSION env overrides YAML", () => {
-    const path = writeYaml(`
-identity:
-  appVersion: "from-yaml"
-`);
-    process.env.ZCODE_APP_VERSION = "from-env";
-    const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("from-env");
-  });
-
-  it("identity: non-ASCII appVersion falls back to default", () => {
-    const path = writeYaml(`
-identity:
-  appVersion: "v3.3.3-中文"
-`);
-    const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("3.15.1");
   });
 });

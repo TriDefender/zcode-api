@@ -52,6 +52,7 @@
 | <kbd>o</kbd> | 退出登录 |
 | <kbd>p</kbd> / <kbd>t</kbd> | 切换服务商（Z.AI ↔ 智谱）/ 套餐（coding-plan ↔ start-plan） |
 | <kbd>r</kbd> | 刷新套餐用量 |
+| <kbd>u</kbd> | 手动重查新版本（更新提示） |
 | <kbd>↑</kbd><kbd>↓</kbd> / <kbd>PgUp</kbd> / <kbd>g</kbd> | 滚动日志 / 回到底部 |
 | <kbd>c</kbd> | 清屏日志 |
 | <kbd>q</kbd> | 退出面板 |
@@ -110,7 +111,7 @@ env_key = "ZCODE_API_KEY"   # 任意非空值即可，除非你设置了代理�
 |--------|-----|
 | API 地址 (Base URL) | `http://127.0.0.1:8080/v1` |
 | API Key | 你的代理密钥（没设就随便填） |
-| 模型 | `glm-5.3`、`glm-5.3-flash`、`glm-4.6v` 等，见下方模型表 |
+| 模型 | `glm-5.3`、`glm-5.3-flash`，见下方模型表 |
 
 Anthropic 格式的工具（如某些 Claude 客户端）地址填 `http://127.0.0.1:8080`，路径 `/v1/messages` 代理会自动接。
 
@@ -151,7 +152,7 @@ docker run -d --name zcode-proxy -p 8080:8080 \
   ghcr.io/tridefender/zcode-proxy:latest
 ```
 
-镜像多架构（amd64 / arm64），以 `bun` 用户运行。多阶段构建后的运行层仅带应用 bundle 和验证码 worker，不带 `node_modules`、源码、测试或额外构建工具，保留完整功能；体积对比和本地构建方法见 [Docker 镜像说明](docs/docker-image.md)。compose 写法：
+镜像多架构（amd64 / arm64），以 `bun` 用户运行。多阶段构建后的运行层仅带应用 bundle 和验证码 worker，不带 `node_modules`、源码、测试或额外构建工具，保留完整功能。compose 写法：
 
 ```yaml
 services:
@@ -288,4 +289,4 @@ Copyright (c) 2026 TriDefender and the ZCode Proxy contributors.
 
 ## 协议与维护说明
 
-三端的支持范围、降级行为及不支持的字段见 [兼容矩阵](docs/compatibility.md)；源码对拍、修复和未验证项见 [2026-10-20 审计](docs/audit-2026-10-20.md)。Responses hosted 搜索工具不会在服务端执行。
+Responses hosted 搜索工具不会在服务端执行。

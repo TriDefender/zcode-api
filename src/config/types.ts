@@ -26,10 +26,10 @@ interface AuthConfig {
  * desktop client. Mirrors the `pio` builder in the reverse-engineered bundle
  * (`_reverse/zcode.cjs`); see `_reverse/NOTEPAD.md` "How Credential is Used".
  *
- * Resolution: env var (matches ZCode's own convention) → YAML override → default.
- * `appVersion` must be printable ASCII (`/^[\x20-\x7e]+$/`); non-conforming
- * values are silently dropped and fall back to the default (current ZCode
- * release), exactly like `fio` in the bundle.
+ * `appVersion` is pinned in code (DEFAULT_APP_VERSION in config/loader.ts) and
+ * auto-bumps with mirror snapshot updates — it has no env/YAML surface. The
+ * `fio`-style printable-ASCII validation lives on in the header builder
+ * (proxy/identity.ts), mirroring the bundle.
  */
 export interface ProxyIdentity {
   appVersion: string;

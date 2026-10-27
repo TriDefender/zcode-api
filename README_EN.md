@@ -53,6 +53,7 @@ The panel has four cards: **Login & Settings** (provider / plan / login), **Quot
 | <kbd>o</kbd> | Log out |
 | <kbd>p</kbd> / <kbd>t</kbd> | Switch provider (Z.AI ↔ Zhipu) / plan (coding-plan ↔ start-plan) |
 | <kbd>r</kbd> | Refresh the quota card |
+| <kbd>u</kbd> | Re-check for updates manually (update notice) |
 | <kbd>↑</kbd><kbd>↓</kbd> / <kbd>PgUp</kbd> / <kbd>g</kbd> | Scroll logs / jump back to the bottom |
 | <kbd>c</kbd> | Clear the log screen |
 | <kbd>q</kbd> | Quit the panel |
@@ -111,7 +112,7 @@ In your tool's "Custom Provider" section, fill in:
 |--------|-----|
 | API address (Base URL) | `http://127.0.0.1:8080/v1` |
 | API Key | Your proxy key (anything, if unset) |
-| Model | `glm-5.3`, `glm-5.3-flash`, `glm-4.6v`, etc. — see the model table below |
+| Model | `glm-5.3`, `glm-5.3-flash` — see the model table below |
 
 Anthropic-format tools (e.g. some Claude clients) should use `http://127.0.0.1:8080` as the address; the proxy handles the `/v1/messages` path automatically.
 
@@ -152,7 +153,7 @@ docker run -d --name zcode-proxy -p 8080:8080 \
   ghcr.io/tridefender/zcode-proxy:latest
 ```
 
-The image is multi-arch (amd64 / arm64) and runs as the `bun` user. Its multi-stage build ships only the application bundle and captcha worker, with all features retained and no `node_modules`, sources, tests, or additional build tools in the runtime layer. See [Docker image notes](docs/docker-image.md) for size measurements and local build commands. With compose:
+The image is multi-arch (amd64 / arm64) and runs as the `bun` user. Its multi-stage build ships only the application bundle and captcha worker, with all features retained and no `node_modules`, sources, tests, or additional build tools in the runtime layer. With compose:
 
 ```yaml
 services:
@@ -292,4 +293,4 @@ Third-party components retain their own licenses. This license covers only mater
 
 ## Protocol and maintenance notes
 
-See the [compatibility matrix](docs/compatibility.md) and [2026-10-20 audit](docs/audit-2026-10-20.md) for supported mappings, deliberate deviations and verification limits. Responses hosted search tools are not executed by this proxy.
+Responses hosted search tools are not executed by this proxy.

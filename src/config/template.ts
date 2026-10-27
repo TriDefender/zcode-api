@@ -56,16 +56,13 @@ models:
   - glm-5.3-flash
 
 # Configurable identity headers injected on every upstream request to mimic the
-# ZCode desktop client (User-Agent, X-ZCode-App-Version, X-Title,
-# X-ZCode-Agent, HTTP-Referer). Runtime platform headers (X-Platform,
-# X-Os-Category, X-Os-Version) are detected dynamically and are not configured
-# here. All fields below are optional; env vars override YAML, which overrides
-# defaults.
+# ZCode desktop client (User-Agent, X-Title, X-ZCode-Agent, HTTP-Referer).
+# X-ZCode-App-Version is not configurable: the app version is pinned in code
+# (DEFAULT_APP_VERSION in src/config/loader.ts) and auto-bumps with mirror
+# snapshot updates. Runtime platform headers (X-Platform, X-Os-Category,
+# X-Os-Version) are detected dynamically and are not configured here. All
+# fields below are optional; env vars override YAML, which overrides defaults.
 identity:
-  # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
-  # Must be printable ASCII; non-conforming values fall back to the default.
-  # Default: "3.15.1" (current ZCode release). Override to match your real client.
-  appVersion: "3.15.1"
   # X-Title suffix → "Z Code@{sourceTitle}". Default "cli".
   sourceTitle: "cli"
   # HTTP-Referer URL. Default "https://zcode.z.ai".
@@ -115,7 +112,7 @@ clientSigning:
 # model with the highspeed auth set (X-Highspeed-Card-ID) and stay unsigned,
 # exactly like the official client. The loop self-extinguishes 5 minutes after
 # the last eligible request; account unavailability (503/3404) is
-# negative-cached 10min, HTTP 429 backs off 30s. task_id reuses the local
+# negative-cached 10min, HTTP 429 backs off 5s. task_id reuses the local
 # client-session affinity inference. Env override: ZCODE_HIGHSPEED_ENABLED=false.
 highspeed:
   enabled: true

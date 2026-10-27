@@ -47,16 +47,13 @@ models:
   - glm-5.3-flash
 
 # Configurable identity headers injected on every upstream request to mimic the
-# ZCode desktop client (User-Agent, X-ZCode-App-Version, X-Title,
-# X-ZCode-Agent, HTTP-Referer). Runtime platform headers (X-Platform,
-# X-Os-Category, X-Os-Version) are detected dynamically and are not configured
-# here. All fields below are optional; env vars override YAML, which overrides
-# defaults.
+# ZCode desktop client (User-Agent, X-Title, X-ZCode-Agent, HTTP-Referer).
+# X-ZCode-App-Version is not configurable: the app version is pinned in code
+# (DEFAULT_APP_VERSION in src/config/loader.ts) and auto-bumps with mirror
+# snapshot updates. Runtime platform headers (X-Platform, X-Os-Category,
+# X-Os-Version) are detected dynamically and are not configured here. All
+# fields below are optional; env vars override YAML, which overrides defaults.
 identity:
-  # Mirrors process.env.ZCODE_APP_VERSION in the ZCode bundle.
-  # Must be printable ASCII; non-conforming values fall back to the default.
-  # Default: "3.15.1" (current ZCode release). Override to match your real client.
-  appVersion: "3.15.1"
   # X-Title suffix → "Z Code@{sourceTitle}". Default "cli".
   sourceTitle: "cli"
   # HTTP-Referer URL. Default "https://zcode.z.ai".
@@ -87,35 +84,23 @@ responses:
     maxEntries: 1000
     ttlMs: 86400000
 
-# GLM MCP hosted-tool integration — NOT currently wired into production.
-# These keys are parsed but have no effect: hosted tools (`mcp`,
-# `web_search_preview`, ...) are silently stripped by the Responses
-# translator. The GLM open-platform MCP client that once consumed these
-# keys has been removed — src/mcp now only hosts the plugin gateway relay
-# documented below.
+# Official plugin-MCP aggregate (tianyancha / Wind / 同花顺 iFinD ...).
+# ONE /mcp endpoint exposes every plugin's tools, namespaced {plugin}__{tool}
+# (streamable HTTP JSON-RPC: initialize / ping / tools list & call). GET /mcp
+# returns a human-readable catalogue; DELETE /mcp closes the cached upstream
+# plugin sessions. Outbound calls hit Z.AI's official gateway with your
+# OAuth login injected — inbound callers authenticate with the same
+# proxyApiKey as the LLM routes.
+# Requires a coding-plan credential: the upstream gateway rejects
+# identity-only auth (JSON-RPC 3101), so start-plan requests fail with 400
+# `mcp_plan_unsupported`.
+# The server table ships with the build (scripts/regen-mcp-catalogue.ts).
+# The relay spends your paid data entitlements, so setting auth.proxyApiKey
+# is strongly recommended (CORS headers are only emitted when a key is set).
+# Legacy `mcp.enabled`/`webSearch`/`webReader`/`zread` keys are still parsed
+# but ignored (the GLM hosted-tool client they fed has been removed).
+# Env overrides: ZCODE_MCP_GATEWAY, ZCODE_MCP_GATEWAY_ORIGIN.
 mcp:
-  enabled: true
-  # (planned) Intercept `web_search`/`web_search_preview` hosted tools via
-  # GLM's `web_search_prime` MCP.
-  webSearch: true
-  # (planned) Inject `webReader` as a function tool the model can call directly.
-  webReader: false
-  # (planned) Inject the three `zread` tools (search_doc/get_repo_structure/read_file).
-  zread: false
-  # Official plugin-MCP gateway relay (tianyancha / Wind / 同花顺 iFinD ...).
-  # GET /mcp lists the served endpoints; /mcp/{server} relays MCP streamable
-  # HTTP to Z.AI's official gateway with your OAuth login injected — inbound
-  # callers authenticate with the same proxyApiKey as the LLM routes.
-  # Requires a coding-plan credential: the upstream gateway rejects
-  # identity-only auth (JSON-RPC 3101), so start-plan requests fail with 400
-  # `mcp_plan_unsupported`.
-  # The server table ships with the build (scripts/regen-mcp-catalogue.ts).
-  # Note: `mcp.enabled` above is parsed but gates nothing since the GLM
-  # hosted-tool client was removed — this relay is controlled independently
-  # by `gateway.enabled`. Since the relay spends your paid data entitlements,
-  # setting auth.proxyApiKey is strongly recommended (CORS headers are only
-  # emitted when a key is set).
-  # Env overrides: ZCODE_MCP_GATEWAY, ZCODE_MCP_GATEWAY_ORIGIN.
   gateway:
     enabled: true
     # `${ZCODE_BASE_URL}` substituted into plugin .mcp.json URLs.
@@ -162,8 +147,8 @@ async:
 # `auth login`), and identity.appVersion must be >= the campaign's minimum
 # client version or the server rejects with `ineligible` — an app_version
 # below the floor can also surface as a silently empty preview list
-  # (measured floor 3.14.0 for the 2026-09 campaign; the default appVersion
-  # "3.15.1" satisfies it).
+  # (measured floor 3.14.0 for the 2026-09 campaign; the built-in appVersion
+  # "3.16.3" satisfies it).
 #
 # Env overrides: ZCODE_CLAIM_ENABLED, ZCODE_CLAIM_AUTO, ZCODE_CLAIM_ORIGIN,
 # ZCODE_CLAIM_POLL_INTERVAL_MS.
@@ -213,7 +198,7 @@ clientSigning:
 # model with the highspeed auth set (X-Highspeed-Card-ID) and stay unsigned,
 # exactly like the official client. The loop self-extinguishes 5 minutes after
 # the last eligible request; account unavailability (503/3404) is
-# negative-cached 10min, HTTP 429 backs off 30s. task_id reuses the local
+# negative-cached 10min, HTTP 429 backs off 5s. task_id reuses the local
 # client-session affinity inference. Env override: ZCODE_HIGHSPEED_ENABLED=false.
 highspeed:
   enabled: true
