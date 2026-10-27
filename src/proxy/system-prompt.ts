@@ -18,15 +18,13 @@
  *     3. every DYNAMIC section, `\n\n`-joined, with an explicit `"\n\n"`
  *        prefix on the block text, ephemeral
  *
- *   The default desktop section set mirrored here (config-dependent sections
+ *   The default section set mirrored here (config-dependent sections
  *   — Session Guidance, Memory, Output Style, git System Context, skills —
  *   are absent, which is a real, common client state):
- *     block 2: Agent Identity (`BDt`-family) + ZCode Desktop Context
- *              (`Ekn`, gated on presentationSurface === "zcode_desktop").
- *              The Desktop Context carries the Interactive views subsection
- *              since 3.15.1 (always present): with a genUiOutputDirectory
- *              (the desktop norm) 3 lines incl. the JSON-stringified
- *              visualization dir, else a 1-line fallback.
+ *     block 2: Agent Identity (`BDt`-family). The desktop client appends
+ *              ZCode Desktop Context (`Ekn`, presentationSurface ===
+ *              "zcode_desktop" gate) here; the proxy deliberately does NOT
+ *              (CLI-face traffic never carries it — see buildStartPlanSystem).
  *     block 3: Dynamic Behavior (`N0o`) → Environment Info (`ckn`/`Eua`) →
  *              Context Management (`F0o`)
  *
@@ -57,7 +55,6 @@
 // `readFileSync` would resolve `__dirname` to the build-time CI path and crash
 // with ENOENT on every other host. @see types.d.ts
 import data from "./zcode_system.json" with { type: "json" };
-import { resolveVisualizationDirectory } from "./identity.js";
 
 export interface SystemBlock {
   type: "text";
@@ -118,42 +115,36 @@ export function buildEnvironmentSection(
 }
 
 /**
- * ZCode Desktop Context section (3.16.3 `Ekn`): Interactive views subsection
- * (since 3.15.1, always present) followed by Files & URLs + Inline Code
- * Comments. With a visualization directory (desktop norm) the 3-line variant
- * renders the dir JSON-stringified — on Windows that means quoted with escaped
- * backslashes, exactly the real client's `${JSON.stringify(dir)}` output.
- */
-export function buildDesktopContextSection(vizDir: string | undefined): string {
-  const iv = data.desktopContext.interactiveViews;
-  const dirLines = vizDir
-    ? [
-        iv.genUiLine,
-        iv.visualizationDirectoryLine.replace("{dir}", JSON.stringify(vizDir)),
-        iv.visualizeSkillLine,
-      ]
-    : [iv.fallbackLine];
-  const interactive = [iv.heading, ...dirLines, iv.widgetLine].join("\n");
-  return [data.desktopContext.heading, interactive, data.desktopContext.filesAndUrlsOnwards].join("\n\n");
-}
-
-/**
  * Prepend the official ZCode gateway blocks to the request's `system` field,
  * mirroring `assembleSystemMessages`.
  *
- * ALWAYS the default 3-block desktop shape (cli_prefix plain, stable and
- * dynamic blocks ephemeral, dynamic block `\n\n`-prefixed).
+ * ALWAYS the 3-block shape (cli_prefix plain, stable and dynamic blocks
+ * ephemeral, dynamic block `\n\n`-prefixed).
  *
- * Client system present → its normalized text is APPENDED to the end of the
- * STABLE block (joined `\n\n` after Agent Identity + Desktop Context) and the
- * session stays `main`. Gateway rule history (issue #71):
- *   - 2026-10-23: the 2-block custom/subagent shape ([cli_prefix, "\n"+custom],
- *     subagent session type) passed — that day's fix for #68/opencode-502.
- *   - 2026-10-24 14:23+: the SAME 2-block shape is rejected with 405/3012
- *     "unusual activity" under BOTH session types, while 3-block + client text
- *     appended to the stable block + main passes (controlled matrix in the
- *     issue, live re-verified). Appending to the dynamic block or switching
- *     the session to subagent reintroduces the rejection.
+ * DELIBERATE DEVIATION from the desktop client's stable block: the ZCode
+ * Desktop Context section (3.16.3 `Ekn`, ~1.8KB) is NOT injected. It is gated
+ * on `presentationSurface === "zcode_desktop"` in the real client, so CLI-face
+ * traffic never carries it — a real, common client state. The start-plan
+ * gateway requires the stable block to OPEN with the full identity text but
+ * does not require Desktop Context behind it (probe matrix 2026-10-27,
+ * `_reverse/NOTEPAD.md` "3.16.3 增补" §J; P10/P12 both 200).
+ *
+ * Client system present → its normalized text becomes the ENTIRE block-3
+ * content behind the `\n\n` prefix, REPLACING the dynamic trio (C1 form,
+ * user-approved 2026-10-27 after the §J live matrix proved block 3 is
+ * unconstrained — empty string, 1 char, whitespace-only and arbitrary client
+ * text all pass). Block 2 then stays the byte-exact pure stable text, immune
+ * to a prefix→exact gateway tightening, and the client text rides the
+ * loosest-validated block. Gateway rule history (issue #71 + §J):
+ *   - 2026-10-23: 2-block custom/subagent shape passed (that day's #68 fix).
+ *   - 2026-10-24: that shape rejected under both session types; stable-suffix
+ *     folding (§I) passed and is live re-verified 2026-10-27 (T1).
+ *   - 2026-10-27 §J unified rules: system REQUIRED (absent → 3012), block 1
+ *     exact-match, block 2 must OPEN with the full stable text (suffix
+ *     allowed), block 3 UNCONSTRAINED, block count NOT checked (2-block
+ *     [cli_prefix, stable] passes).
+ * Client system ABSENT → the official default trio (dynamic behavior →
+ * environment → context management), the shape of every real desktop request.
  * Multiple client text blocks are `\n\n`-joined into one string; client
  * `cache_control` is dropped (the stable block owns its single ephemeral
  * breakpoint — no new breakpoints are introduced).
@@ -163,17 +154,18 @@ export function buildStartPlanSystem(
   currentModel: string | undefined,
   env: StartPlanEnvInfo,
   provider?: "zai" | "bigmodel",
-  vizDir: string = resolveVisualizationDirectory(),
 ): SystemBlock[] {
   const custom = customSystemText(existingSystem);
-  const stableParts = [data.stableSections.join("\n\n"), buildDesktopContextSection(vizDir)];
-  if (custom !== undefined) stableParts.push(custom);
-  const stable = stableParts.join("\n\n");
-  const dynamic = [
-    data.dynamicSections.beforeEnvironment,
-    buildEnvironmentSection(env, currentModel, provider),
-    data.dynamicSections.afterEnvironment,
-  ].join("\n\n");
+  const stable = data.stableSections.join("\n\n");
+  // C1: client text replaces the dynamic trio as block-3 content; the official
+  // trio stays only on the default (no client system) path.
+  const dynamic = custom !== undefined
+    ? custom
+    : [
+        data.dynamicSections.beforeEnvironment,
+        buildEnvironmentSection(env, currentModel, provider),
+        data.dynamicSections.afterEnvironment,
+      ].join("\n\n");
   return [
     { type: "text", text: data.cliPrefix },
     { type: "text", text: stable, cache_control: { ...EPHEMERAL } },

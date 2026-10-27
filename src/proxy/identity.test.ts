@@ -5,8 +5,7 @@
  */
 import { describe, it, expect } from "bun:test";
 import os from "node:os";
-import { join, sep } from "node:path";
-import { buildIdentityHeaders, buildLlmIdentityHeaders, resolveVisualizationDirectory } from "./identity.js";
+import { buildIdentityHeaders, buildLlmIdentityHeaders } from "./identity.js";
 import type { ProxyIdentity } from "../config/types.js";
 
 const BASE: ProxyIdentity = {
@@ -285,56 +284,6 @@ describe("buildLlmIdentityHeaders (3.12.3 `g6n` shape — CL-27)", () => {
       if (savedEnv === undefined) delete process.env.ZCODE_ENV;
       else process.env.ZCODE_ENV = savedEnv;
       if (savedRC !== undefined) process.env.ZCODE_IDENTITY_RELEASE_CHANNEL = savedRC;
-    }
-  });
-});
-
-describe("resolveVisualizationDirectory (Desktop Context genUiOutputDirectory)", () => {
-  it("rides the ZCODE_IDENTITY_VIZ_DIR override verbatim", () => {
-    const saved = process.env.ZCODE_IDENTITY_VIZ_DIR;
-    process.env.ZCODE_IDENTITY_VIZ_DIR = "/data/custom/viz";
-    try {
-      expect(resolveVisualizationDirectory()).toBe("/data/custom/viz");
-    } finally {
-      if (saved === undefined) delete process.env.ZCODE_IDENTITY_VIZ_DIR;
-      else process.env.ZCODE_IDENTITY_VIZ_DIR = saved;
-    }
-  });
-
-  it("defaults to ~/.zcode/v2/visualizations/<64-hex>, stable across calls", () => {
-    const saved = process.env.ZCODE_IDENTITY_VIZ_DIR;
-    delete process.env.ZCODE_IDENTITY_VIZ_DIR;
-    try {
-      const a = resolveVisualizationDirectory();
-      const b = resolveVisualizationDirectory();
-      expect(a).toBe(b); // deterministic — never random (fingerprint discipline)
-      const expectedPrefix = join(os.homedir(), ".zcode", "v2", "visualizations") + sep;
-      expect(a.startsWith(expectedPrefix)).toBe(true);
-      const sessionId = a.slice(expectedPrefix.length);
-      expect(sessionId).toMatch(/^[0-9a-f]{64}$/);
-    } finally {
-      if (saved === undefined) delete process.env.ZCODE_IDENTITY_VIZ_DIR;
-      else process.env.ZCODE_IDENTITY_VIZ_DIR = saved;
-    }
-  });
-
-  it("session id is NOT a global constant — it depends on the host identity inputs", async () => {
-    const { createHash } = await import("node:crypto");
-    const ours = createHash("sha256")
-      .update(`${process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform}|${process.env.ZCODE_IDENTITY_RELEASE ?? os.release()}|${process.env.ZCODE_IDENTITY_ARCH ?? os.arch()}|${os.homedir()}`)
-      .digest("hex");
-    const saved = process.env.ZCODE_IDENTITY_VIZ_DIR;
-    delete process.env.ZCODE_IDENTITY_VIZ_DIR;
-    try {
-      const dir = resolveVisualizationDirectory();
-      expect(dir.endsWith(ours)).toBe(true);
-      // A different host (different homedir input) must derive a different id.
-      expect(ours).not.toBe(
-        createHash("sha256").update(`other-platform|other-release|other-arch|/other/home`).digest("hex"),
-      );
-    } finally {
-      if (saved === undefined) delete process.env.ZCODE_IDENTITY_VIZ_DIR;
-      else process.env.ZCODE_IDENTITY_VIZ_DIR = saved;
     }
   });
 });

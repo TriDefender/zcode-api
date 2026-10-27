@@ -42,8 +42,7 @@
  * @see _reverse/NOTEPAD.md "2. Identity Headers"
  */
 import os from "node:os";
-import { createHash } from "node:crypto";
-import { basename, join } from "node:path";
+import { basename } from "node:path";
 import type { ProxyIdentity } from "../config/types.js";
 
 /** Printable-ASCII gate copied from the ZCode bundle's `fio` helper. */
@@ -238,27 +237,4 @@ export function resolveEnvPromptInfo(): EnvPromptInfo {
   const shell = shellRaw ? basename(shellRaw) : "unknown";
   const cwd = process.env.ZCODE_IDENTITY_ENV_CWD?.trim() || process.cwd();
   return { cwd, platform, shell, osVersion };
-}
-
-/**
- * genUiOutputDirectory for the Desktop Context section's Interactive views
- * subsection (3.16.3 `Ekn`/`ybn`): the desktop host passes its per-session
- * visualization directory, which selects the 3-line variant
- * (`~/.zcode/v2/visualizations/<64-hex session id>` on every platform).
- *
- * The session id is a deterministic sha256 over the same identity env chain as
- * resolveEnvPromptInfo (platform|release|arch|homedir) — stable per host so the
- * stable system block (and its cache prefix) never churns, never random
- * (fingerprint discipline), and not one global constant shared by every proxy
- * install. `ZCODE_IDENTITY_VIZ_DIR` overrides the whole path (Android /
- * masked-identity deployments, same pattern as ZCODE_IDENTITY_ENV_CWD).
- */
-export function resolveVisualizationDirectory(): string {
-  const override = process.env.ZCODE_IDENTITY_VIZ_DIR?.trim();
-  if (override) return override;
-  const platform = process.env.ZCODE_IDENTITY_PLATFORM ?? process.platform;
-  const release = process.env.ZCODE_IDENTITY_RELEASE ?? os.release();
-  const arch = process.env.ZCODE_IDENTITY_ARCH ?? os.arch();
-  const sessionId = createHash("sha256").update(`${platform}|${release}|${arch}|${os.homedir()}`).digest("hex");
-  return join(os.homedir(), ".zcode", "v2", "visualizations", sessionId);
 }

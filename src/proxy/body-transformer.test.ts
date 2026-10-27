@@ -226,7 +226,8 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     });
     expect(parsed.system[1].text).toContain("# Harness");
     expect(parsed.system[1].text).toContain("interactive ZCode agent");
-    expect(parsed.system[1].text).toContain("# ZCode Desktop Context");
+    // Desktop Context deliberately not injected (CLI-face state, NOTEPAD §J)
+    expect(parsed.system[1].text).not.toContain("# ZCode Desktop Context");
     expect(parsed.system[1].cache_control).toEqual({ type: "ephemeral" });
     expect(parsed.system[2].text.startsWith("\n\n# Communicating with the user")).toBe(true);
     expect(parsed.system[2].text).toContain("You have been invoked in the following environment:");
@@ -284,7 +285,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     expect(parsed.tools[1]).toEqual({ name: "read_file" });
   });
 
-  it("client system keeps the 3-block shape; text appended to the stable block (issue #71)", () => {
+  it("client system keeps the 3-block shape; text becomes block 3 (C1: replaces the dynamic trio)", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       system: [{ type: "text", text: "User rule", cache_control: { type: "ephemeral" } }],
@@ -293,16 +294,17 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
 
     const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
-    // 2026-10-24 gateway rule (issue #71): the 2-block custom/subagent shape
-    // is rejected under both session types; the passing shape is the official
-    // 3-block form with the client text appended to the STABLE block.
+    // §J unified rules (2026-10-27): block 2 must only OPEN with the full
+    // stable text and block 3 is unconstrained — C1 puts the client text in
+    // block 3 so block 2 stays byte-exact pure stable.
     expect(parsed.system).toHaveLength(3);
     expect(parsed.system[0]).toEqual({ type: "text", text: "You are ZCode, an interactive coding agent" });
     expect(parsed.system[1].cache_control).toEqual({ type: "ephemeral" });
     expect(parsed.system[1].text).toContain("interactive ZCode agent");
-    expect(parsed.system[1].text.endsWith("priority=2}\n\nUser rule")).toBe(true);
-    expect(parsed.system[2].text).toContain("# Environment");
-    expect(parsed.system[2].text).toContain("powered by the model named bigmodel-api/glm-5.2.");
+    expect(parsed.system[1].text.endsWith("it's clickable.")).toBe(true);
+    expect(parsed.system[1].text).not.toContain("User rule");
+    expect(parsed.system[2].text).toBe("\n\nUser rule");
+    expect(parsed.system[2].cache_control).toEqual({ type: "ephemeral" });
   });
 
   it("omits the powered-by line when body.model is missing", () => {
@@ -345,7 +347,7 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     expect(parsed.system[2].text).not.toContain("powered by the model named");
   });
 
-  it("string client system also lands in the stable block (3-block shape)", () => {
+  it("string client system becomes block 3 (C1, 3-block shape)", () => {
     const body = JSON.stringify({
       model: "glm-5.2",
       system: "User rule",
@@ -356,7 +358,9 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
-    expect(parsed.system[1].text.endsWith("\n\nUser rule")).toBe(true);
+    expect(parsed.system[1].text.endsWith("it's clickable.")).toBe(true);
+    expect(parsed.system[1].text).not.toContain("User rule");
+    expect(parsed.system[2].text).toBe("\n\nUser rule");
   });
 });
 
@@ -376,7 +380,8 @@ describe("transformRequestBody — start-plan system (OpenAI)", () => {
     });
     expect(parsed.messages[1].role).toBe("system");
     expect(parsed.messages[1].content).toContain("# Harness");
-    expect(parsed.messages[1].content).toContain("# ZCode Desktop Context");
+    // Desktop Context deliberately not injected (CLI-face state, NOTEPAD §J)
+    expect(parsed.messages[1].content).not.toContain("# ZCode Desktop Context");
     expect(parsed.messages[2].role).toBe("system");
     expect(parsed.messages[2].content.startsWith("\n\n# Communicating with the user")).toBe(true);
     expect(parsed.messages[2].content).toContain("You have been invoked in the following environment:");
