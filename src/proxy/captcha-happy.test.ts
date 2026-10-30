@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import {
   __captchaMemStats,
+  __realmGlobalsLifecycle,
   createDom,
   destroyDom,
   installGlobalWindowAlias,
@@ -340,6 +341,69 @@ describe("memory guards (issue #50)", () => {
     // reused window, so the cap bounds a generation's retention peak.
     if (process.env.CAPTCHA_REUSE_MAX_SOLVES === undefined) {
       expect(__captchaMemStats().reuseMaxSolves).toBe(8);
+    }
+  });
+});
+
+describe("realm globals lifecycle (Node bridge, descriptor contract)", () => {
+  test("installs window props, restores prior descriptors verbatim, deletes fresh ones", () => {
+    const w = new GlobalWindow();
+    // A pre-existing host global with a distinctive value…
+    const prevDescriptor = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+    const sentinel = { marker: "realm-bridge-test" };
+    Object.defineProperty(globalThis, "__realmBridgeProbe", {
+      value: sentinel,
+      writable: false,
+      configurable: true,
+      enumerable: true,
+    });
+    // A host global that does NOT exist…
+    delete (globalThis as Record<string, unknown>).XMLHttpRequest;
+
+    const restore = __realmGlobalsLifecycle(w);
+    try {
+      // Window props resolve in the host realm…
+      expect((globalThis as Record<string, unknown>).XMLHttpRequest).toBe(w.XMLHttpRequest);
+      expect((globalThis as Record<string, unknown>).window).toBe(w);
+      // Deny-protected names keep the host's own value…
+      expect((globalThis as Record<string, unknown>).__realmBridgeProbe).toBe(sentinel);
+      expect((globalThis as unknown as { fetch: unknown }).fetch).toBe(fetch);
+      // Aliases install non-enumerable (host for..in must not see them)…
+      expect(Object.getOwnPropertyDescriptor(globalThis, "XMLHttpRequest")?.enumerable).toBe(false);
+    } finally {
+      restore();
+    }
+
+    // Restore contract: pre-existing prop keeps its descriptor; fresh alias removed.
+    expect(Object.getOwnPropertyDescriptor(globalThis, "__realmBridgeProbe")?.writable).toBe(false);
+    delete (globalThis as Record<string, unknown>).__realmBridgeProbe;
+    if (prevDescriptor) Object.defineProperty(globalThis, "navigator", prevDescriptor);
+    expect((globalThis as Record<string, unknown>).XMLHttpRequest).toBeUndefined();
+    expect((globalThis as Record<string, unknown>).window).toBeUndefined();
+  });
+
+  test("never aliases the WHATWG fetch/stream family or JS intrinsics", () => {
+    const w = new GlobalWindow();
+    const before = {
+      Response,
+      Headers,
+      Request,
+      ReadableStream,
+      Blob,
+      Promise,
+      JSON,
+    };
+    const restore = __realmGlobalsLifecycle(w);
+    try {
+      expect(Response).toBe(before.Response);
+      expect(Headers).toBe(before.Headers);
+      expect(Request).toBe(before.Request);
+      expect(ReadableStream).toBe(before.ReadableStream);
+      expect(Blob).toBe(before.Blob);
+      expect(Promise).toBe(before.Promise);
+      expect(JSON).toBe(before.JSON);
+    } finally {
+      restore();
     }
   });
 });

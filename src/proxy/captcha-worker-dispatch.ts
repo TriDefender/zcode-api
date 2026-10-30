@@ -36,7 +36,7 @@ import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 
 /** Per-solve timeout: overall deadline the worker gets before termination. */
-const SOLVE_WORKER_TIMEOUT_MS = Number(process.env.CAPTCHA_SOLVE_TIMEOUT_MS || 20_000);
+const SOLVE_WORKER_TIMEOUT_MS = Number(process.env.CAPTCHA_SOLVE_TIMEOUT_MS || 30_000);
 
 interface SolveRequest {
   id: number;
@@ -442,8 +442,9 @@ export function stopCaptchaWorkers(): void {
 /**
  * One solve = one Worker. Startup cost is a few ms (happy-dom loads lazily
  * inside the entry on first message); termination guarantees no state leaks
- * between solves. A hung solve cannot wedge anything: the pool's takeToken
- * race deadline (25s) fires first, and the worker is force-terminated here.
+ * between solves. A hung solve cannot wedge anything: the worker timeout
+ * (30s) fires first and force-terminates here; the pool's takeToken race
+ * deadline (35s) is the outer backstop.
  */
 function solveInWorker(
   entryPath: string,

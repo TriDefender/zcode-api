@@ -258,7 +258,7 @@ export class CaptchaTokenPool {
       // Overall deadline for the racing chain: during mint storms a racer can
       // grind through its retry budget (~30-45s) — cap the client-facing wait
       // and let the background waves finish the job instead.
-      const raceDeadlineMs = Number(process.env.CAPTCHA_SOLVE_RACE_DEADLINE_MS || 25_000);
+      const raceDeadlineMs = Number(process.env.CAPTCHA_SOLVE_RACE_DEADLINE_MS || 35_000);
       param = await Promise.race([
         this.solveRaced(cfg),
         new Promise<never>((_, rej) =>

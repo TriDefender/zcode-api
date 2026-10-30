@@ -1,6 +1,23 @@
 /**
  * Entry point — load config, create auth manager, start proxy server.
  */
+import net from "node:net";
+
+// Process-wide Happy Eyeballs (2026-10-30): z.ai/alicdn CDN IPv6 answers
+// are intermittently blackholed and Node's fetch (undici) does not race
+// address families — a v6-first DNS answer wedged outbound requests
+// (captcha config/solves → persistent 503 on IPv6-preferring networks;
+// see NOTEPAD「3.17.1 增补」八轮). Node-only API; Bun's node:net shim
+// ignores it and carries its own connect behavior.
+try {
+  if (typeof net.setDefaultAutoSelectFamily === "function") {
+    net.setDefaultAutoSelectFamily(true);
+    if (typeof net.setDefaultAutoSelectFamilyAttemptTimeout === "function") {
+      net.setDefaultAutoSelectFamilyAttemptTimeout(250);
+    }
+  }
+} catch { /* never fatal */ }
+
 import { loadConfig } from "./config/loader.js";
 import { AuthManager } from "./auth/manager.js";
 import { startServer, type ProxyServer } from "./server/server.js";

@@ -95594,7 +95594,52 @@ var SYNC_FETCH_TIMEOUT_MS = Number(process.env.CAPTCHA_SYNC_FETCH_TIMEOUT_MS || 
 var _syncFetchWorker = null;
 var SYNC_WORKER_SRC = `
   const { parentPort } = require("node:worker_threads");
+  const https = require("node:https");
+  const http = require("node:http");
   const enc = new TextEncoder();
+  // node:http(s) with Happy Eyeballs + manual redirect following (plain
+  // fetch here wedges on IPv6-blackholed CDN answers \u2014 see the dispatcher
+  // note in captcha-happy.ts; the eval worker must stay builtin-only).
+  function requestOnce(url, init, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const mod = u.protocol === "http:" ? http : https;
+      const headers = Object.assign({}, init.headers || {});
+      delete headers["accept-encoding"]; // no transparent decompression here
+      const req = mod.request(u, {
+        method: init.method || "GET",
+        headers,
+        autoSelectFamily: true,
+        autoSelectFamilyAttemptTimeout: 300,
+      }, resolve);
+      // Idle-socket timer (resets on activity) + a TOTAL deadline: a
+      // slow-drip response must not outlive the host's Atomics cap and
+      // wedge the single-flight sync worker behind a zombie request.
+      req.setTimeout(timeoutMs, () => req.destroy(new Error("socket idle timeout")));
+      const total = setTimeout(() => req.destroy(new Error("headers timeout (total)")), timeoutMs);
+      req.on("error", (err) => { clearTimeout(total); reject(err); });
+      req.on("close", () => clearTimeout(total));
+      if (init.body) req.end(Buffer.from(init.body));
+      else req.end();
+    });
+  }
+  async function robustFetch(url, init, timeoutMs) {
+    let cur = url, method = init.method || "GET", body = init.body;
+    for (let hop = 0; hop < 6; hop++) {
+      const res = await requestOnce(cur, { method, headers: init.headers, body }, timeoutMs);
+      const code = res.statusCode || 0;
+      if (code >= 300 && code < 400 && res.headers.location) {
+        if (code === 301 || code === 302 || code === 303) { method = "GET"; body = undefined; }
+        res.resume();
+        cur = new URL(res.headers.location, cur).href;
+        continue;
+      }
+      const chunks = [];
+      for await (const c of res) chunks.push(c);
+      return { res, body: Buffer.concat(chunks) };
+    }
+    throw new Error("too many redirects");
+  }
   parentPort.on("message", (m) => {
     (async () => {
       const i32 = new Int32Array(m.sab);
@@ -95608,20 +95653,16 @@ var SYNC_WORKER_SRC = `
         i32[0] = 2; Atomics.notify(i32, 0);
       };
       try {
-        const res = await fetch(m.url, m.init);
-        const body = Buffer.from(await res.arrayBuffer());
-        const headers = {};
-        for (const [k, v] of res.headers) headers[k] = v;
-        const setCookie = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
-        const statusText = enc.encode(res.statusText || "");
-        const headersJson = enc.encode(JSON.stringify(headers));
-        const setCookieJson = enc.encode(JSON.stringify(setCookie));
+        const { res, body } = await robustFetch(m.url, m.init, m.timeoutMs || 12000);
+        const statusText = enc.encode(res.statusMessage || "");
+        const headersJson = enc.encode(JSON.stringify(res.headers || {}));
+        const setCookieJson = enc.encode(JSON.stringify(res.headers["set-cookie"] || []));
         let off = payloadAt;
         u8.set(statusText, off); i32[2] = statusText.length; off += statusText.length;
         u8.set(headersJson, off); i32[3] = headersJson.length; off += headersJson.length;
         u8.set(setCookieJson, off); i32[4] = setCookieJson.length; off += setCookieJson.length;
         u8.set(body, off); i32[5] = body.length;
-        i32[1] = res.status;
+        i32[1] = res.statusCode || 0;
         i32[0] = 1; Atomics.notify(i32, 0);
       } catch (err) {
         fail(String((err && err.message) || err));
@@ -95640,7 +95681,7 @@ function syncFetchBlocking(url2, init, timeoutMs = SYNC_FETCH_TIMEOUT_MS) {
     const sab = new SharedArrayBuffer(SYNC_FETCH_HEADER_BYTES + SYNC_FETCH_BUF_BYTES);
     const i32 = new Int32Array(sab);
     const u8 = new Uint8Array(sab);
-    worker.postMessage({ sab, url: url2, init });
+    worker.postMessage({ sab, url: url2, init, timeoutMs });
     const waitResult = Atomics.wait(i32, 0, 0, timeoutMs);
     if (waitResult === "timed-out") return { error: "sync fetch timeout" };
     const dec = new TextDecoder();
@@ -95696,6 +95737,24 @@ if (proxyUrl) {
     (0, import_undici.setGlobalDispatcher)(new import_undici.ProxyAgent(proxyUrl));
   } catch (_) {
   }
+}
+var happyEyeballsDispatcher = new import_undici.Agent({
+  connect: { autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 250 }
+});
+try {
+  const net = require("node:net");
+  if (typeof net.setDefaultAutoSelectFamily === "function") {
+    net.setDefaultAutoSelectFamily(true);
+    if (typeof net.setDefaultAutoSelectFamilyAttemptTimeout === "function") {
+      net.setDefaultAutoSelectFamilyAttemptTimeout(250);
+    }
+  }
+} catch (_) {
+}
+async function solveFetch(url2, init, timeoutMs = Number(process.env.CAPTCHA_SOLVE_FETCH_TIMEOUT_MS || 15e3)) {
+  const signal2 = AbortSignal.timeout(timeoutMs);
+  const merged = { ...init, signal: signal2 };
+  return proxyUrl ? fetch(url2, merged) : (0, import_undici.fetch)(url2, { ...merged, dispatcher: happyEyeballsDispatcher });
 }
 var REQUEST_LOG_CAP = 256;
 var _requestLog = [];
@@ -95914,7 +95973,7 @@ function makeInterceptor(bypassPeCache = false) {
           }
         } catch (_) {
         }
-        const res = await fetch(url2, init);
+        const res = await solveFetch(url2, init);
         const buf = Buffer.from(await res.arrayBuffer());
         storeSetCookies(res, url2);
         if (_DEBUG && /captcha-open|verify\.|device\.saf|cloudauth-device|upload\./i.test(url2) && buf.length && buf.length < 4096) {
@@ -97279,14 +97338,119 @@ function waitFor(cond, timeoutMs = 15e3, intervalMs = 40) {
     }, intervalMs);
   });
 }
+var GUEST_REALM_DENY = /* @__PURE__ */ new Set([
+  "process",
+  "Buffer",
+  "require",
+  "module",
+  "exports",
+  "global",
+  "globalThis",
+  "fetch",
+  "console",
+  "setTimeout",
+  "clearTimeout",
+  "setInterval",
+  "clearInterval",
+  "setImmediate",
+  "clearImmediate",
+  "queueMicrotask",
+  "structuredClone",
+  "crypto",
+  "performance",
+  "TextEncoder",
+  "TextDecoder",
+  "URL",
+  "URLSearchParams",
+  "AbortController",
+  "AbortSignal",
+  "atob",
+  "btoa",
+  "eval",
+  "Function",
+  "Worker",
+  "SharedArrayBuffer",
+  "Atomics"
+]);
+var _realmGlobalsOwner = null;
+var _realmGlobalsRestore = null;
+function installGuestRealmGlobals(w2) {
+  const saved = /* @__PURE__ */ Object.create(null);
+  let names;
+  try {
+    names = Object.getOwnPropertyNames(w2);
+  } catch (_) {
+    names = [];
+  }
+  for (const name2 of names) {
+    try {
+      if (GUEST_REALM_DENY.has(name2) || HOST_CRITICAL_GLOBALS.has(name2)) continue;
+      const value2 = w2[name2];
+      const kind2 = typeof value2;
+      if (kind2 !== "function" && (kind2 !== "object" || value2 === null)) continue;
+      if (name2 in saved) continue;
+      saved[name2] = Object.getOwnPropertyDescriptor(globalThis, name2) ?? null;
+      Object.defineProperty(globalThis, name2, { value: value2, writable: true, configurable: true, enumerable: false });
+    } catch (_) {
+    }
+  }
+  return () => {
+    for (const name2 of Object.keys(saved)) {
+      try {
+        const d = saved[name2];
+        if (d) Object.defineProperty(globalThis, name2, d);
+        else delete globalThis[name2];
+      } catch (_) {
+      }
+    }
+  };
+}
+function ensureGuestRealmGlobals(w2) {
+  if (typeof Bun !== "undefined") return;
+  if (_realmGlobalsOwner === w2) return;
+  if (_realmGlobalsRestore) _realmGlobalsRestore();
+  _realmGlobalsRestore = installGuestRealmGlobals(w2);
+  _realmGlobalsOwner = w2;
+}
+function releaseGuestRealmGlobals(w2) {
+  if (_realmGlobalsOwner !== w2) return;
+  if (_realmGlobalsRestore) _realmGlobalsRestore();
+  _realmGlobalsRestore = null;
+  _realmGlobalsOwner = null;
+}
+var ALIYUN_CAPTCHA_JS = "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js";
+async function prewarmCaptchaScript() {
+  if (getCachedBody(ALIYUN_CAPTCHA_JS)) return;
+  try {
+    const res = await solveFetch(ALIYUN_CAPTCHA_JS, { method: "GET" });
+    if (res.ok) {
+      const body2 = Buffer.from(await res.arrayBuffer());
+      if (body2.length > 0) {
+        try {
+          new Function(body2.toString("utf8"));
+        } catch (_) {
+          return;
+        }
+        rememberCdnBody(ALIYUN_CAPTCHA_JS, body2);
+        try {
+          import_node_fs.default.mkdirSync(CDN_CACHE_DIR, { recursive: true });
+          import_node_fs.default.writeFileSync(diskPathFor(ALIYUN_CAPTCHA_JS), body2);
+        } catch (_) {
+        }
+      }
+    }
+  } catch (_) {
+  }
+}
 async function createDom(region, prefix2) {
+  await prewarmCaptchaScript();
   let cookies = [];
   const now = Date.now();
   if (_cookieCache.ts > 0 && now - _cookieCache.ts < COOKIE_CACHE_TTL_MS) {
     cookies = _cookieCache.cookies;
   } else {
     try {
-      const res = await fetch("https://zcode.z.ai/", {
+      const res = await solveFetch("https://zcode.z.ai/", {
         headers: {
           "User-Agent": fp.userAgent,
           "sec-ch-ua": '"Chromium";v="' + fp.uaMajor + '", "Not)A;Brand";v="24"',
@@ -97447,6 +97611,7 @@ async function createDom(region, prefix2) {
     }
   };
   w2.eval(GUEST_EVAL_PATCH);
+  ensureGuestRealmGlobals(w2);
   w2.document.write(HTML);
   w2.AliyunCaptchaConfig = { region, prefix: prefix2 };
   return { window: w2, browserFrame };
@@ -97728,6 +97893,7 @@ function reclaimCaptchaHeap() {
   }
 }
 function destroyDom(win) {
+  releaseGuestRealmGlobals(win);
   try {
     const cap = win.document.getElementById("cap");
     if (cap) cap.replaceChildren();
@@ -97844,7 +98010,7 @@ async function solveTraceless(opts) {
   const scene = opts.scene || "11xygtvd";
   const region = opts.region || "sgp";
   const prefix2 = opts.prefix || "no8xfe";
-  const timeoutMs = opts.timeoutMs ?? Number(process.env.CAPTCHA_SOLVE_TIMEOUT_MS || 2e4);
+  const timeoutMs = opts.timeoutMs ?? Number(process.env.CAPTCHA_SOLVE_TIMEOUT_MS || 3e4);
   const wantReuse = opts.reuseWindow ?? process.env.CAPTCHA_WINDOW_REUSE !== "0";
   let dom;
   let reused = false;

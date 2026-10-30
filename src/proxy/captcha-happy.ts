@@ -16,7 +16,7 @@
  */
 import { GlobalWindow as Window, PropertySymbol } from "happy-dom";
 import WindowBrowserContext from "happy-dom/lib/window/WindowBrowserContext.js";
-import { ProxyAgent, setGlobalDispatcher } from "undici";
+import { ProxyAgent, setGlobalDispatcher, Agent as UndiciAgent, fetch as undiciFetch } from "undici";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -45,7 +45,52 @@ let _syncFetchWorker: Worker | null = null;
 
 const SYNC_WORKER_SRC = `
   const { parentPort } = require("node:worker_threads");
+  const https = require("node:https");
+  const http = require("node:http");
   const enc = new TextEncoder();
+  // node:http(s) with Happy Eyeballs + manual redirect following (plain
+  // fetch here wedges on IPv6-blackholed CDN answers — see the dispatcher
+  // note in captcha-happy.ts; the eval worker must stay builtin-only).
+  function requestOnce(url, init, timeoutMs) {
+    return new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const mod = u.protocol === "http:" ? http : https;
+      const headers = Object.assign({}, init.headers || {});
+      delete headers["accept-encoding"]; // no transparent decompression here
+      const req = mod.request(u, {
+        method: init.method || "GET",
+        headers,
+        autoSelectFamily: true,
+        autoSelectFamilyAttemptTimeout: 300,
+      }, resolve);
+      // Idle-socket timer (resets on activity) + a TOTAL deadline: a
+      // slow-drip response must not outlive the host's Atomics cap and
+      // wedge the single-flight sync worker behind a zombie request.
+      req.setTimeout(timeoutMs, () => req.destroy(new Error("socket idle timeout")));
+      const total = setTimeout(() => req.destroy(new Error("headers timeout (total)")), timeoutMs);
+      req.on("error", (err) => { clearTimeout(total); reject(err); });
+      req.on("close", () => clearTimeout(total));
+      if (init.body) req.end(Buffer.from(init.body));
+      else req.end();
+    });
+  }
+  async function robustFetch(url, init, timeoutMs) {
+    let cur = url, method = init.method || "GET", body = init.body;
+    for (let hop = 0; hop < 6; hop++) {
+      const res = await requestOnce(cur, { method, headers: init.headers, body }, timeoutMs);
+      const code = res.statusCode || 0;
+      if (code >= 300 && code < 400 && res.headers.location) {
+        if (code === 301 || code === 302 || code === 303) { method = "GET"; body = undefined; }
+        res.resume();
+        cur = new URL(res.headers.location, cur).href;
+        continue;
+      }
+      const chunks = [];
+      for await (const c of res) chunks.push(c);
+      return { res, body: Buffer.concat(chunks) };
+    }
+    throw new Error("too many redirects");
+  }
   parentPort.on("message", (m) => {
     (async () => {
       const i32 = new Int32Array(m.sab);
@@ -59,20 +104,16 @@ const SYNC_WORKER_SRC = `
         i32[0] = 2; Atomics.notify(i32, 0);
       };
       try {
-        const res = await fetch(m.url, m.init);
-        const body = Buffer.from(await res.arrayBuffer());
-        const headers = {};
-        for (const [k, v] of res.headers) headers[k] = v;
-        const setCookie = typeof res.headers.getSetCookie === "function" ? res.headers.getSetCookie() : [];
-        const statusText = enc.encode(res.statusText || "");
-        const headersJson = enc.encode(JSON.stringify(headers));
-        const setCookieJson = enc.encode(JSON.stringify(setCookie));
+        const { res, body } = await robustFetch(m.url, m.init, m.timeoutMs || 12000);
+        const statusText = enc.encode(res.statusMessage || "");
+        const headersJson = enc.encode(JSON.stringify(res.headers || {}));
+        const setCookieJson = enc.encode(JSON.stringify(res.headers["set-cookie"] || []));
         let off = payloadAt;
         u8.set(statusText, off); i32[2] = statusText.length; off += statusText.length;
         u8.set(headersJson, off); i32[3] = headersJson.length; off += headersJson.length;
         u8.set(setCookieJson, off); i32[4] = setCookieJson.length; off += setCookieJson.length;
         u8.set(body, off); i32[5] = body.length;
-        i32[1] = res.status;
+        i32[1] = res.statusCode || 0;
         i32[0] = 1; Atomics.notify(i32, 0);
       } catch (err) {
         fail(String((err && err.message) || err));
@@ -96,7 +137,7 @@ function syncFetchBlocking(url: string, init: Record<string, unknown>, timeoutMs
     const sab = new SharedArrayBuffer(SYNC_FETCH_HEADER_BYTES + SYNC_FETCH_BUF_BYTES);
     const i32 = new Int32Array(sab);
     const u8 = new Uint8Array(sab);
-    worker.postMessage({ sab, url, init });
+    worker.postMessage({ sab, url, init, timeoutMs });
     const waitResult = Atomics.wait(i32, 0, 0, timeoutMs);
     if (waitResult === "timed-out") return { error: "sync fetch timeout" };
     const dec = new TextDecoder();
@@ -152,6 +193,43 @@ if (proxyUrl) {
   try {
     setGlobalDispatcher(new ProxyAgent(proxyUrl));
   } catch (_) {}
+}
+
+// Happy-Eyeballs dispatcher (2026-10-30): Alibaba CDN IPv6 is intermittently
+// blackholed (curl-6 → 000 @11s while curl-4 → 200 @2s) and neither undici
+// nor Bun races address families by default — a v6-first DNS answer wedged
+// every captcha solve until the outer deadlines killed it (persistent 503
+// captcha_solver_failed on IPv6-preferring mobile networks, reproduced on
+// the Android strict-worker bundle). Only used when NO proxy is configured
+// (a ProxyAgent global dispatcher already owns routing in that case).
+const happyEyeballsDispatcher = new UndiciAgent({
+  connect: { autoSelectFamily: true, autoSelectFamilyAttemptTimeout: 250 },
+});
+
+// Node-side global Happy Eyeballs: flips the net.connect default so the
+// runtime's own fetches (cookie priming, the sync-fetch worker, undici
+// internals) race address families too. Bun ignores these setters (its
+// node:net is a shim) — the explicit undiciFetch/node:https paths above
+// carry the fix there.
+try {
+  const net = require("node:net");
+  if (typeof net.setDefaultAutoSelectFamily === "function") {
+    net.setDefaultAutoSelectFamily(true);
+    if (typeof net.setDefaultAutoSelectFamilyAttemptTimeout === "function") {
+      net.setDefaultAutoSelectFamilyAttemptTimeout(250);
+    }
+  }
+} catch (_) {}
+
+/** Captcha solve fetch with HE routing + a hard deadline. Proxy-aware.
+ *  Default 15s (override CAPTCHA_SOLVE_FETCH_TIMEOUT_MS): the aliyuncs
+ *  cross-border API hosts jitter well past 8s (measured 3.6–15s same
+ *  minute) — the cap must sit at or above the observed tail; the solve
+ *  deadline still bounds the overall flow. */
+async function solveFetch(url, init, timeoutMs = Number(process.env.CAPTCHA_SOLVE_FETCH_TIMEOUT_MS || 15_000)): Promise<Response> {
+  const signal = AbortSignal.timeout(timeoutMs);
+  const merged = { ...init, signal };
+  return proxyUrl ? fetch(url, merged) : undiciFetch(url, { ...merged, dispatcher: happyEyeballsDispatcher });
 }
 
 // -- Globals shared across solves --------------------------------------------
@@ -414,7 +492,9 @@ function makeInterceptor(bypassPeCache = false) {
             }
           }
         } catch (_) {}
-        const res = await fetch(url, init);
+        // solveFetch: Happy Eyeballs when direct (IPv6-blackhole-safe), plain
+        // global fetch keeps ProxyAgent semantics when a proxy is set.
+        const res = await solveFetch(url, init);
         const buf = Buffer.from(await res.arrayBuffer());
         storeSetCookies(res, url);
         if (_DEBUG && /captcha-open|verify\.|device\.saf|cloudauth-device|upload\./i.test(url) && buf.length && buf.length < 4096) {
@@ -1759,14 +1839,137 @@ function waitFor(cond, timeoutMs = 15_000, intervalMs = 40) {
 }
 
 // -- createDom --------------------------------------------------------------
+/**
+ * Host-realm aliases for the happy-dom window globals (see the call site in
+ * solveTraceless). defineProperty so Node's getter-only globals (navigator)
+ * are overridable; the saved descriptors are restored verbatim.
+ */
+// Globals that must stay the host's own even during a solve (the proxy's
+// request path depends on them; `fetch` especially must remain the runtime's
+// — the interceptor layer already routes guest traffic deliberately).
+// HOST_CRITICAL_GLOBALS (defined below) is unioned in at INSTALL time: it
+// carries the WHATWG fetch/stream family (Response/Headers/Request/...)
+// and the JS intrinsics that the proxy hot path `instanceof`-checks against
+// — shadowing any of them on a shared realm (in-process fallback) breaks
+// concurrently served traffic. Module-scope const order makes a static
+// union impossible here; the union is recomputed per install.
+const GUEST_REALM_DENY = new Set([
+  "process", "Buffer", "require", "module", "exports", "global", "globalThis",
+  "fetch", "console", "setTimeout", "clearTimeout", "setInterval", "clearInterval",
+  "setImmediate", "clearImmediate", "queueMicrotask", "structuredClone", "crypto",
+  "performance", "TextEncoder", "TextDecoder", "URL", "URLSearchParams",
+  "AbortController", "AbortSignal", "atob", "btoa", "eval", "Function",
+  "Worker", "SharedArrayBuffer", "Atomics",
+]);
+let _realmGlobalsOwner = null;
+let _realmGlobalsRestore = null;
+/**
+ * Bridge the happy-dom window's own properties onto the host realm. The
+ * Aliyun SDK escapes its `with` guest scope through indirect evals that
+ * resolve bare identifiers (`window`, `XMLHttpRequest`, …) in the HOST
+ * realm; under Bun those already resolve (guest host-realm execution) —
+ * and under Bun the bridge MUST NOT run: on the in-process fallback the
+ * host realm is the proxy's own, and the union'd DENY would still be a
+ * change surface for nothing. Node-only by design (worker threads on
+ * Android, and the Node in-process fallback where the worker entry is
+ * missing). The aliases live for the window's lifetime (createDom →
+ * destroyDom); the DENY union keeps the proxy's own runtime globals
+ * untouched even there.
+ */
+function installGuestRealmGlobals(w) {
+  const saved = Object.create(null);
+  let names;
+  try {
+    names = Object.getOwnPropertyNames(w);
+  } catch (_) {
+    names = [];
+  }
+  for (const name of names) {
+    try {
+      if (GUEST_REALM_DENY.has(name) || HOST_CRITICAL_GLOBALS.has(name)) continue;
+      const value = w[name];
+      const kind = typeof value;
+      if (kind !== "function" && (kind !== "object" || value === null)) continue;
+      if (name in saved) continue; // first descriptor wins
+      saved[name] = Object.getOwnPropertyDescriptor(globalThis, name) ?? null;
+      Object.defineProperty(globalThis, name, { value, writable: true, configurable: true, enumerable: false });
+    } catch (_) {}
+  }
+  return () => {
+    for (const name of Object.keys(saved)) {
+      try {
+        const d = saved[name];
+        if (d) Object.defineProperty(globalThis, name, d);
+        else delete globalThis[name];
+      } catch (_) {}
+    }
+  };
+}
+/** Idempotent per-window install: the aliases live for the window's lifetime
+ *  (createDom → destroyDom), so pooled reuse needs no re-install. Node only —
+ *  see installGuestRealmGlobals. */
+function ensureGuestRealmGlobals(w) {
+  if (typeof Bun !== "undefined") return; // Bun host realm already resolves these
+  if (_realmGlobalsOwner === w) return;
+  if (_realmGlobalsRestore) _realmGlobalsRestore();
+  _realmGlobalsRestore = installGuestRealmGlobals(w);
+  _realmGlobalsOwner = w;
+}
+function releaseGuestRealmGlobals(w) {
+  if (_realmGlobalsOwner !== w) return;
+  if (_realmGlobalsRestore) _realmGlobalsRestore();
+  _realmGlobalsRestore = null;
+  _realmGlobalsOwner = null;
+}
+/** Test seam: descriptor save/restore contract of the Node realm bridge. */
+export function __realmGlobalsLifecycle(w) {
+  const restore = installGuestRealmGlobals(w);
+  return restore;
+}
+
+
+/** URL of the Aliyun captcha SDK script (the <script src> in the solve page). */
+const ALIYUN_CAPTCHA_JS = "https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js";
+
+/**
+ * Prewarm the captcha SDK script into the CDN cache (async, HE-routed, hard
+ * deadline). The <script> executes SYNCHRONOUSLY during the document.write
+ * parse — its beforeSyncRequest would otherwise hit the network through the
+ * blocking-fetch worker, which is where IPv6-blackholed DNS answers wedge
+ * (12s Atomics cap, solve deadline, 503). With the body cached, the sync
+ * interceptor serves from memory and the network is never on the sync path.
+ */
+async function prewarmCaptchaScript(): Promise<void> {
+  if (getCachedBody(ALIYUN_CAPTCHA_JS)) return;
+  try {
+    const res = await solveFetch(ALIYUN_CAPTCHA_JS, { method: "GET" });
+    if (res.ok) {
+      const body = Buffer.from(await res.arrayBuffer());
+      // Same parse validation the interceptors apply to cached .js bodies —
+      // a captive-portal/HTML 200 must not poison the cache (the eviction
+      // would then push the sync load back onto the network path this
+      // prewarm exists to avoid).
+      if (body.length > 0) {
+        try { new Function(body.toString("utf8")); } catch (_) { return; }
+        rememberCdnBody(ALIYUN_CAPTCHA_JS, body);
+        try {
+          fs.mkdirSync(CDN_CACHE_DIR, { recursive: true });
+          fs.writeFileSync(diskPathFor(ALIYUN_CAPTCHA_JS), body);
+        } catch (_) {}
+      }
+    }
+  } catch (_) {}
+}
+
 async function createDom(region, prefix) {
+  await prewarmCaptchaScript();
   let cookies = [];
   const now = Date.now();
   if (_cookieCache.ts > 0 && now - _cookieCache.ts < COOKIE_CACHE_TTL_MS) {
     cookies = _cookieCache.cookies;
   } else {
     try {
-      const res = await fetch("https://zcode.z.ai/", {
+      const res = await solveFetch("https://zcode.z.ai/", {
         headers: {
           "User-Agent": fp.userAgent,
           "sec-ch-ua": '"Chromium";v="' + fp.uaMajor + '", "Not)A;Brand";v="24"',
@@ -1936,6 +2139,11 @@ async function createDom(region, prefix) {
     } catch (_) {}
   };
   w.eval(GUEST_EVAL_PATCH);
+
+  // Host-realm guest globals must be live BEFORE document.write — the SDK
+  // script evaluates synchronously during the parse and its indirect evals
+  // resolve in the host realm (see installGuestRealmGlobals).
+  ensureGuestRealmGlobals(w);
 
   // Write the page HTML (loads the SDK script)
   w.document.write(HTML);
@@ -2228,6 +2436,7 @@ function reclaimCaptchaHeap() {
 }
 
 function destroyDom(win) {
+  releaseGuestRealmGlobals(win);
   try {
     const cap = win.document.getElementById("cap");
     if (cap) cap.replaceChildren();
@@ -2368,7 +2577,7 @@ async function solveTraceless(opts) {
   // stalls the main event loop — fail fast and let the pool's retry ladder
   // handle it; the worker path terminates on the same env knob.
   // Override: CAPTCHA_SOLVE_TIMEOUT_MS.
-  const timeoutMs = opts.timeoutMs ?? Number(process.env.CAPTCHA_SOLVE_TIMEOUT_MS || 20_000);
+  const timeoutMs = opts.timeoutMs ?? Number(process.env.CAPTCHA_SOLVE_TIMEOUT_MS || 30_000);
 
   const wantReuse = opts.reuseWindow ?? process.env.CAPTCHA_WINDOW_REUSE !== "0";
   let dom;
