@@ -17,7 +17,8 @@ import type { ClaimOutcome, ClaimablePlan } from "./types.js";
 import { ClaimPreviewError } from "./client.js";
 
 interface ClaimGateway {
-  getPreviews(): Promise<ClaimablePlan[]>;
+  /** Merged enumeration: billing preview + marketing banner plans (wk-1030+). */
+  listPlans(): Promise<ClaimablePlan[]>;
   /** `captcha` omitted → claim without captcha headers (3.16.3 switch off). */
   claim(planId: string, captcha?: { verifyParam: string; region?: string }): Promise<ClaimOutcome>;
 }
@@ -98,7 +99,7 @@ export class ClaimScheduler {
     const client = this.deps.createClient(jwt);
     let plans: ClaimablePlan[];
     try {
-      plans = await client.getPreviews();
+      plans = await client.listPlans();
     } catch (err) {
       // 404 = campaign endpoint not deployed yet (the expected pre-launch state
       // for weekend plans); poll at normal cadence instead of error backoff.

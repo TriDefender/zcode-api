@@ -28,7 +28,18 @@
  * `deviceMid` is provided both calls append `X-Device-Mid` (last position,
  * matching its slot in the endpoint-routing `TV` identity set).
  *
- * @see _reverse/NOTEPAD.md "claim/billing 平面"
+ * MARKETING ENUMERATION (2026-10-30, wk-1030 campaign): the weekend plan
+ * was distributed via the marketing banner (`createMarketingTouchService`,
+ * present since ≤3.16.3 in the host bundle) instead of the billing preview —
+ * `GET {origin}/api/v1/marketing/touch?seq=N` with X-Device-Mid (required,
+ * UUID-parsed) / X-Client-Language / X-ZCode-App-Version / [Authorization].
+ * The banner button action `claim_zcode_plan` carries the plan_id (and the
+ * banner background args carry the full `zcode_plan` object); the desktop
+ * renderer then calls the SAME `claimManualPlan` billing endpoint with that
+ * plan_id. `getMarketingPlans` mirrors the snapshot parse; `listPlans`
+ * merges both faces (billing preview first, banner plans appended).
+ *
+ * @see _reverse/NOTEPAD.md "claim/billing 平面" + "3.17.1 增补"五轮
  */
 import type { ClaimablePlan, ClaimOutcome, PlanEntitlement } from "./types.js";
 import { classifyClaimCode } from "./types.js";
@@ -45,6 +56,14 @@ export interface ClaimClientOptions {
    * `X-Device-Mid`. When omitted no device header is sent.
    */
   deviceMid?: string;
+  /**
+   * Marketing-face device id (`marketing/touch` uuid.parse's it — required
+   * there even when the billing campaign gate is off). The caller supplies
+   * a stable value (config `identity.deviceMid` or a derived fallback).
+   */
+  marketingDeviceMid?: string;
+  /** Marketing-face locale header. Default `zh-CN` (client enum zh-CN|en-US). */
+  language?: string;
   /** Per-call timeout in ms. Default `15000` (bundle `ss`). */
   timeoutMs?: number;
   /** DI seam for tests. Default `globalThis.fetch`. */
@@ -53,6 +72,10 @@ export interface ClaimClientOptions {
 
 export interface ClaimClient {
   getPreviews(signal?: AbortSignal): Promise<ClaimablePlan[]>;
+  /** Banner-distributed plans from `marketing/touch` (wk-1030 shape). */
+  getMarketingPlans(signal?: AbortSignal): Promise<ClaimablePlan[]>;
+  /** Preview + banner merged, deduped by planId (preview wins). */
+  listPlans(signal?: AbortSignal): Promise<ClaimablePlan[]>;
   claim(planId: string, captcha?: { verifyParam: string; region?: string }, signal?: AbortSignal): Promise<ClaimOutcome>;
 }
 
@@ -96,8 +119,13 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
   const origin = opts.origin.replace(/\/+$/, "");
   const jwt = opts.jwt?.trim() || undefined;
   const deviceMid = opts.deviceMid?.trim() || undefined;
+  const marketingDeviceMid = opts.marketingDeviceMid?.trim() || undefined;
+  const language = opts.language?.trim() || "zh-CN";
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
+  // Marketing snapshot sequence — the client keeps a module-level counter
+  // (`Xde++`); a per-client counter from 0 is equivalent per session.
+  let marketingSeq = 0;
 
   function parseEntitlement(c: RawEntitlement): PlanEntitlement | null {
     const entitlementId = c.entitlement_id?.trim() ?? "";
@@ -132,6 +160,64 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
     if (Number.isFinite(p.starts_at)) plan.startsAt = p.starts_at as number;
     if (Number.isFinite(p.ends_at)) plan.endsAt = p.ends_at as number;
     return plan;
+  }
+
+  /** Marketing snapshot delivery (wk-1030 shape, parsed defensively). */
+  interface MarketingNode {
+    action?: { type?: unknown; args?: { plan_id?: unknown } };
+    buttons?: MarketingNode[];
+  }
+  interface MarketingDelivery {
+    campaign_id?: unknown;
+    banner?: MarketingNode & { background?: { args?: Record<string, unknown> } };
+    popup?: MarketingNode & { background?: { args?: Record<string, unknown> } };
+  }
+
+  /** Collect `zcode_plan` RawPlan objects anywhere inside a delivery (depth-limited). */
+  function collectZcodePlans(node: unknown, out: RawPlan[], depth = 0): void {
+    if (depth > 4 || node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const item of node) collectZcodePlans(item, out, depth + 1);
+      return;
+    }
+    const rec = node as Record<string, unknown>;
+    const zp = rec.zcode_plan;
+    if (zp && typeof zp === "object" && !Array.isArray(zp)) out.push(zp as RawPlan);
+    for (const value of Object.values(rec)) collectZcodePlans(value, out, depth + 1);
+  }
+
+  /**
+   * deliveries → claimable plans: button action `claim_zcode_plan` supplies
+   * the plan_id (schema-conformant minimal args); the banner background args
+   * carry the full `zcode_plan` object for enrichment when the ids match.
+   */
+  function parseMarketingDeliveries(deliveries: unknown[]): ClaimablePlan[] {
+    const plans: ClaimablePlan[] = [];
+    const seen = new Set<string>();
+    for (const d of deliveries) {
+      if (d === null || typeof d !== "object") continue;
+      const delivery = d as MarketingDelivery;
+      const campaignId = typeof delivery.campaign_id === "string" ? delivery.campaign_id : undefined;
+      const richPlans: RawPlan[] = [];
+      collectZcodePlans(delivery, richPlans);
+      const richById = new Map(richPlans.map((p) => [p.plan_id?.trim() ?? "", p]));
+      const buttonHosts = [delivery.banner, delivery.popup];
+      for (const host of buttonHosts) {
+        for (const button of host?.buttons ?? []) {
+          if (button?.action?.type !== "claim_zcode_plan") continue;
+          const planId = typeof button.action.args?.plan_id === "string" ? button.action.args.plan_id.trim() : "";
+          if (!planId || seen.has(planId)) continue;
+          const raw = richById.get(planId) ?? { plan_id: planId };
+          const plan = parsePlan(raw);
+          if (!plan) continue;
+          seen.add(planId);
+          plan.source = "banner";
+          if (campaignId) plan.campaignId = campaignId;
+          plans.push(plan);
+        }
+      }
+    }
+    return plans;
   }
 
   async function request(
@@ -183,15 +269,64 @@ export function createClaimClient(opts: ClaimClientOptions): ClaimClient {
       const headers: Record<string, string> = jwt ? { Authorization: `Bearer ${jwt}` } : {};
       if (deviceMid) headers["X-Device-Mid"] = deviceMid;
       const { status, json, text } = await request("GET", url, { headers, signal });
+      // code 0 + NO data field (observed 2026-10-30, wk-1030): the billing
+      // preview simply has no manual campaigns for this account — the
+      // desktop client throws `manual_claim_preview_missing_data` here, but
+      // its banner flow never calls preview. For enumeration we treat it as
+      // an empty list so the marketing fallback can supply the plans.
+      if (status >= 200 && status < 300 && json?.code === 0 && json?.data === undefined) {
+        return [];
+      }
       if (status < 200 || status >= 300 || (json?.code !== undefined && json.code !== 0) || json?.data === undefined) {
         const { code, message } = unwrapError(json, status, text);
         throw new ClaimPreviewError(`claim preview failed (${code}): ${message}`, status, code);
       }
       const data = json.data as { plans?: RawPlan[] };
-      return (data.plans ?? []).flatMap((p) => {
+      return ((data.plans ?? []) as RawPlan[]).flatMap((p) => {
         const plan = parsePlan(p);
         return plan ? [plan] : [];
       });
+    },
+
+    async getMarketingPlans(signal?: AbortSignal): Promise<ClaimablePlan[]> {
+      if (!marketingDeviceMid) return [];
+      const headers: Record<string, string> = {
+        "X-Device-Mid": marketingDeviceMid,
+        "X-Client-Language": language,
+        "X-ZCode-App-Version": opts.appVersion,
+      };
+      if (jwt) headers["Authorization"] = `Bearer ${jwt}`;
+      const path = `/api/v1/marketing/touch?seq=${marketingSeq++}`;
+      const { status, json, text } = await request("GET", path, { headers, signal });
+      if (status < 200 || status >= 300 || (json?.code !== undefined && json.code !== 0)) {
+        // Marketing failures never block enumeration — log-free empty result
+        // (the billing face stays authoritative when both are alive).
+        void text;
+        return [];
+      }
+      const deliveries = (json?.data as { deliveries?: unknown[] } | undefined)?.deliveries ?? [];
+      return parseMarketingDeliveries(deliveries);
+    },
+
+    async listPlans(signal?: AbortSignal): Promise<ClaimablePlan[]> {
+      const [preview, banner] = await Promise.all([
+        this.getPreviews(signal).catch((err: unknown) => {
+          // 404 = campaign endpoint not deployed (pre-launch state) — keep
+          // polling semantics to the caller by surfacing an EMPTY list here
+          // only for that case; real errors propagate.
+          if (err instanceof ClaimPreviewError && err.status === 404) return [];
+          throw err;
+        }),
+        this.getMarketingPlans(signal),
+      ]);
+      const seen = new Set(preview.map((p) => p.planId));
+      const merged = [...preview];
+      for (const p of banner) {
+        if (seen.has(p.planId)) continue;
+        seen.add(p.planId);
+        merged.push(p);
+      }
+      return merged;
     },
 
     async claim(planId: string, captcha?: { verifyParam: string; region?: string }, signal?: AbortSignal): Promise<ClaimOutcome> {

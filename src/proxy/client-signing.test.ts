@@ -426,7 +426,7 @@ describe("project-access JWT signing form (bigmodel OAuth)", () => {
           mintUrls.push(url); mintAuths.push(auth);
           // Bearer form on access_tokens
           expect(auth).toBe(`Bearer ${OAUTH}`);
-          expect(JSON.parse(String(init?.body))).toEqual({ clientType: "zcode", clientVersion: "3.16.3" });
+          expect(JSON.parse(String(init?.body))).toEqual({ clientType: "zcode", clientVersion: "3.17.1" });
           return new Response(JSON.stringify({ code: 200, data: { accessToken: mintedJwt } }), { status: 200 });
         }
         if (url.endsWith("/api/paas/c1f3a7e2/v2/client")) {

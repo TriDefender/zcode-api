@@ -46,7 +46,7 @@ function makeHarness(overrides: Partial<{ planId: string; pollIntervalMs: number
   const deps: ClaimSchedulerDeps = {
     getJwt: () => Promise.resolve(h.jwt),
     createClient: () => ({
-      getPreviews: () => (h.previewError ? Promise.reject(h.previewError) : Promise.resolve(h.plans)),
+      listPlans: () => (h.previewError ? Promise.reject(h.previewError) : Promise.resolve(h.plans)),
       claim: (planId, captcha) => {
         h.claimCalls.push({ planId, captcha });
         return h.claimOutcome instanceof Error ? Promise.reject(h.claimOutcome) : Promise.resolve(h.claimOutcome);
@@ -229,7 +229,7 @@ describe("ClaimScheduler — 3.16.3 configs.captcha gate", () => {
     const scheduler = new ClaimScheduler({
       getJwt: () => Promise.resolve("jwt-1"),
       createClient: () => ({
-        getPreviews: () => Promise.resolve(plans),
+        listPlans: () => Promise.resolve(plans),
         claim: (planId, captcha) => {
           h.claimCalls.push({ planId, captcha });
           return Promise.resolve({ ok: true, planId } as ClaimOutcome);
@@ -274,7 +274,7 @@ describe("ClaimScheduler — 3.16.3 gate true keeps the solve (default-equivalen
     const scheduler = new ClaimScheduler({
       getJwt: () => Promise.resolve("jwt-1"),
       createClient: () => ({
-        getPreviews: () => Promise.resolve(plans),
+        listPlans: () => Promise.resolve(plans),
         claim: (planId, captcha) => {
           claimCalls.push({ planId, captcha });
           return Promise.resolve({ ok: true, planId } as ClaimOutcome);

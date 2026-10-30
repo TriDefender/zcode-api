@@ -32,6 +32,10 @@ export interface ClaimablePlan {
   entitlements: PlanEntitlement[];
   startsAt?: number;
   endsAt?: number;
+  /** Enumeration face that surfaced the plan (billing preview vs marketing banner). */
+  source?: "preview" | "banner";
+  /** Marketing campaign id (banner-sourced plans only). */
+  campaignId?: string;
 }
 
 export type ClaimFailureKind =

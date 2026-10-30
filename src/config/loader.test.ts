@@ -436,7 +436,7 @@ identity:
   refererOrigin: "https://example.com"
 `);
     const cfg = loadConfig(path);
-    expect(cfg.identity.appVersion).toBe("3.16.3");
+    expect(cfg.identity.appVersion).toBe("3.17.1");
     expect(cfg.identity.sourceTitle).toBe("electron");
     expect(cfg.identity.refererOrigin).toBe("https://example.com");
   });

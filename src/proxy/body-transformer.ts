@@ -22,8 +22,7 @@
  * @see _reverse/NOTEPAD.md "How Credential is Used for LLM Calls"
  */
 import type { Format } from "../translator/types.js";
-import { buildStartPlanSystem, buildContextPrefixMessage } from "./system-prompt.js";
-import { resolveEnvPromptInfo } from "./identity.js";
+import { buildStartPlanSystem, buildCurrentDateMessage } from "./system-prompt.js";
 
 interface TransformContext {
   format: Format;
@@ -63,14 +62,14 @@ export function transformRequestBody(body: string | undefined, ctx: TransformCon
 
   if (ctx.format === "openai") {
     if (ctx.startPlan) {
-      modified = applyStartPlanOpenAISystem(parsed as Record<string, unknown>, ctx.provider) || modified;
+      modified = applyStartPlanOpenAISystem(parsed as Record<string, unknown>) || modified;
     }
     modified = applyStreamOptionsIncludeUsage(parsed as Record<string, unknown>) || modified;
   }
   if (ctx.format === "anthropic") {
     const obj = parsed as Record<string, unknown>;
     if (ctx.startPlan) {
-      modified = applyStartPlanSystem(obj, ctx.provider) || modified;
+      modified = applyStartPlanSystem(obj) || modified;
     }
     modified = applyAnthropicCacheControl(obj) || modified;
     if (ctx.metadataUserId) {
@@ -182,19 +181,18 @@ function applyAnthropicUserId(body: Record<string, unknown>, userId: string): bo
 /**
  * start-plan: prepend ZCode gateway system blocks (ContextBuilder mirror —
  * see system-prompt.ts). The gateway rejects requests without these identity
- * blocks with 3012 "method not allowed". Forwards `body.model` so
- * `buildStartPlanSystem` can emit the dynamic "You are powered by the model
- * named ${model}." line inside the Environment section, and attaches the
- * meta_user context_prefix (currentDate `<system-reminder>` user turn) that
- * every real client request carries. Client `cache_control` on tools is
- * stripped: official blocks (3) + last-message marker (1) already fill
- * Anthropic's 4-breakpoint cache budget.
+ * blocks with 3012 "method not allowed". Since 3.17.1 the system blocks carry
+ * no Environment/powered-by content (the client moved those to meta_user
+ * attachments), so `body.model` no longer feeds the assembly; the meta_user
+ * "date" attachment (`Today's date is …` `<system-reminder>` user turn) that
+ * every real client request carries is attached instead. Client
+ * `cache_control` on tools is stripped: official blocks (3) + last-message
+ * marker (1) already fill Anthropic's 4-breakpoint cache budget.
  */
-function applyStartPlanSystem(body: Record<string, unknown>, provider?: "zai" | "bigmodel"): boolean {
-  const model = typeof body.model === "string" ? body.model : undefined;
-  body.system = buildStartPlanSystem(body.system, model, resolveEnvPromptInfo(), provider);
+function applyStartPlanSystem(body: Record<string, unknown>): boolean {
+  body.system = buildStartPlanSystem(body.system);
   if (Array.isArray(body.messages) && body.messages.length > 0) {
-    body.messages = [buildContextPrefixMessage() as unknown, ...body.messages];
+    body.messages = [buildCurrentDateMessage() as unknown, ...body.messages];
   }
   if (Array.isArray(body.tools)) {
     for (const tool of body.tools) {
@@ -206,12 +204,11 @@ function applyStartPlanSystem(body: Record<string, unknown>, provider?: "zai" | 
   return true;
 }
 
-function applyStartPlanOpenAISystem(body: Record<string, unknown>, provider?: "zai" | "bigmodel"): boolean {
+function applyStartPlanOpenAISystem(body: Record<string, unknown>): boolean {
   const messages = body.messages;
   if (!Array.isArray(messages)) return false;
 
-  const model = typeof body.model === "string" ? body.model : undefined;
-  const official = buildStartPlanSystem(undefined, model, resolveEnvPromptInfo(), provider).map((block) => ({
+  const official = buildStartPlanSystem(undefined).map((block) => ({
     role: "system",
     content: typeof block === "object" && block !== null && "text" in block ? String(block.text) : "",
   }));

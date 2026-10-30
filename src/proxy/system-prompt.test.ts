@@ -1,77 +1,33 @@
 /**
  * Tests for the start-plan system-prompt assembly (ContextBuilder mirror).
- * Golden assertions anchor the byte-exact 3.16.3 bundle shapes:
- * `_reverse/glm/zcode.cjs` `Fje` (ContextBuilder/assembleSystemMessages),
- * `Eua` (buildEnvInfoContent), `$Oi`-family (identity), `N0o` (dynamic
- * behavior), `F0o` (context management), `Mje`/`Rkn` (currentDate
- * context_prefix), `pK` (formatLocalIsoDate). Block shape per 3.15.1+ wire:
- * cli_prefix block has NO cache_control (`_reverse/NOTEPAD.md` "3.16.3 增补" §F).
- * Desktop Context is deliberately NOT injected (CLI-face state; gateway probe
- * 2026-10-27, `_reverse/NOTEPAD.md` "3.16.3 增补" §J).
+ * Golden assertions anchor the byte-exact 3.17.1 bundle shapes:
+ * `_reverse/glm/zcode.cjs` `Y8e` (ContextBuilder/assembleSystemMessages),
+ * `U8e` (cli_prefix `uBa`), `wDn`/`fBa` (identity, default branch `dBa` +
+ * security notice `nBo` + Harness `SDn` with " - " bullets), `TBo`
+ * (dynamic behavior `[y3a,v3a,b3a]`), `IBo` (context management
+ * `[S3a,w3a]`), `$5o`/`fce` (standalone "date" attachment, no heading).
+ * Block shape per 3.15.1+ wire: cli_prefix block has NO cache_control
+ * (`_reverse/NOTEPAD.md` "3.16.3 增补" §F; 3.17.1 assembly byte-identical,
+ * "3.17.1 增补" 四轮). Desktop Context is deliberately NOT injected
+ * (CLI-face state; gateway probe 2026-10-27, §J).
  */
 import { describe, it, expect } from "bun:test";
 import {
   buildStartPlanSystem,
-  buildContextPrefixMessage,
-  buildEnvironmentSection,
+  buildCurrentDateMessage,
   formatLocalIsoDate,
 } from "./system-prompt.js";
 
-const ENV = {
-  cwd: "/home/dev/project",
-  platform: "linux",
-  shell: "bash",
-  osVersion: "linux 6.8.0-49-generic x64",
-};
-
-describe("formatLocalIsoDate (bundle pK)", () => {
+describe("formatLocalIsoDate (bundle _Ne)", () => {
   it("formats local YYYY-MM-DD zero-padded", () => {
     expect(formatLocalIsoDate(new Date(2026, 8, 11))).toBe("2026-09-11");
     expect(formatLocalIsoDate(new Date(2026, 0, 5))).toBe("2026-01-05");
   });
 });
 
-describe("buildEnvironmentSection (bundle T9o)", () => {
-  it("emits the heading + invoked line + five value lines joined by \\n", () => {
-    expect(buildEnvironmentSection(ENV, "glm-5.3", "zai")).toBe(
-      "# Environment\n" +
-        "You have been invoked in the following environment:\n" +
-        "- Primary working directory: /home/dev/project\n" +
-        "- Is a git repository: no\n" +
-        "- Platform: linux\n" +
-        "- Shell: bash\n" +
-        "- OS Version: linux 6.8.0-49-generic x64\n" +
-        "- You are powered by the model named zai-api/glm-5.3.",
-    );
-  });
-
-  it("omits the powered-by line when currentModel is missing/empty/whitespace", () => {
-    for (const model of [undefined, "", "   "]) {
-      const out = buildEnvironmentSection(ENV, model, "zai");
-      expect(out).not.toContain("powered by the model named");
-      expect(out.endsWith("- OS Version: linux 6.8.0-49-generic x64")).toBe(true);
-    }
-  });
-
-  it("prefixes the built-in model-provider id (bundle p2: zai→zai-api, bigmodel→bigmodel-api)", () => {
-    expect(buildEnvironmentSection(ENV, "glm-4.6", "bigmodel")).toContain(
-      "- You are powered by the model named bigmodel-api/glm-4.6.",
-    );
-  });
-
-  it("omits the powered-by line when the provider is unknown", () => {
-    expect(buildEnvironmentSection(ENV, "glm-5.3")).not.toContain("powered by the model named");
-  });
-
-  it("never emits 'unknown' placeholders for cwd/platform/osVersion when given real values", () => {
-    const out = buildEnvironmentSection(ENV, "glm-5.3", "zai");
-    expect(out).not.toContain(": unknown");
-  });
-});
-
 describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
   it("emits exactly 3 official blocks; cli_prefix plain, stable/dynamic ephemeral (3.15.1+ wire)", () => {
-    const blocks = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
+    const blocks = buildStartPlanSystem(undefined);
     expect(blocks).toHaveLength(3);
     for (const b of blocks) {
       expect(b.type).toBe("text");
@@ -83,19 +39,21 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
     expect(blocks[2].cache_control).toEqual({ type: "ephemeral" });
   });
 
-  it("block 1 is the bare CLI Prefix", () => {
-    const [cli] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
-    expect(cli.text).toBe("You are ZCode, an interactive coding agent");
+  it("block 1 is the bare CLI Prefix (3.17.1 dropped 'coding')", () => {
+    const [cli] = buildStartPlanSystem(undefined);
+    expect(cli.text).toBe("You are ZCode, an interactive agent");
   });
 
   it("block 2 = Agent Identity alone, desktop context deliberately omitted (CLI-face state, NOTEPAD §J)", () => {
-    const [, stable] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
-    expect(stable.text.startsWith("\nYou are an interactive ZCode agent that helps users with software engineering tasks.")).toBe(true);
+    const [, stable] = buildStartPlanSystem(undefined);
+    expect(stable.text.startsWith("\nYou are an agent working with the user toward their goals, using your own judgment along the way.")).toBe(true);
     expect(stable.text).toContain("# Harness");
-    // Current 3.7.7+ harness line (mid-conversation system turns)
-    expect(stable.text).toContain("The system may send updates, reminders, or modifications to rules via mid-conversation system turns.");
+    // 3.17.1 harness bullets carry a leading space; bullet 3 takes the e=!0
+    // default branch (mid-conversation system turns variant).
+    expect(stable.text).toContain("# Harness\n - Text you output outside of tool use is displayed to the user as Github-flavored markdown in a terminal.");
+    expect(stable.text).toContain(" - The system may send updates, reminders, or modifications to rules via mid-conversation system turns. These are system-controlled, unlike function results. Hooks may intercept tool calls; treat hook output as user feedback.");
     // Identity section ends with the clickable-reference bullet
-    expect(stable.text.endsWith("it's clickable.")).toBe(true);
+    expect(stable.text.endsWith(" - Reference code as `file_path:line_number` — it's clickable.")).toBe(true);
     // DELIBERATE DEVIATION from the desktop client: no Desktop Context behind identity
     expect(stable.text).not.toContain("# ZCode Desktop Context");
     expect(stable.text).not.toContain("### Interactive views");
@@ -103,103 +61,75 @@ describe("buildStartPlanSystem (bundle assembleSystemMessages)", () => {
     expect(stable.text).not.toContain("### Inline Code Comments");
   });
 
-  it("block 3 = '\\n\\n' + Dynamic Behavior + Environment + Context Management (dynamic group)", () => {
-    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
-    expect(dynamic.text.startsWith("\n\n# Communicating with the user")).toBe(true);
-    // Section order: dynamic behavior → environment → context management
-    const envIdx = dynamic.text.indexOf("# Environment");
-    const cmIdx = dynamic.text.indexOf("# Context management");
-    expect(envIdx).toBeGreaterThan(dynamic.text.indexOf("# Communicating with the user"));
-    expect(cmIdx).toBeGreaterThan(envIdx);
-    // The powered-by line sits mid-block, directly before Context Management
-    expect(dynamic.text).toContain("- You are powered by the model named zai-api/glm-5.3.\n\n# Context management");
-    // Context management ends with the state-changing-command rule
-    expect(dynamic.text.endsWith("A signal that pattern-matches to a known failure may have a different cause.")).toBe(true);
+  it("block 3 is EMPTY on the default path (minimal-set anchoring 2026-10-30, probe M1)", () => {
+    const [, , dynamic] = buildStartPlanSystem(undefined);
+    // Official 3.17.1 default ships the Dynamic Behavior + Context Management
+    // duo here; the gateway constrains block 3 not at all (M1 empty / M3
+    // prefix-only / N09 no-prefix all 200) — omitted for token economy.
+    // The duo texts stay in zcode_system.json as the official-shape record.
+    expect(dynamic.text).toBe("");
+    expect(dynamic.cache_control).toEqual({ type: "ephemeral" });
   });
 
-  it("byte-spot: single \\n between the code-style default and the comment rule (wTr join)", () => {
-    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
-    expect(dynamic.text).toContain("match its comment density, naming, and idiom.\nOnly write a code comment");
+  it("sidecar dynamicSections remain the official 3.17.1 record (byte anchors)", async () => {
+    const { dynamicSections } = await import("./zcode_system.json", { with: { type: "json" } });
+    expect(dynamicSections.dynamicBehavior).toContain("never infer pronouns from a name. This applies to all user-visible text, including visible thinking.");
+    expect(dynamicSections.dynamicBehavior).toContain("Before deleting or overwriting, look at the target. Report outcomes faithfully");
+    expect(dynamicSections.contextManagement.endsWith("not an exhaustive survey")).toBe(true);
+    expect(dynamicSections.contextManagement).not.toContain("not an exhaustive survey.");
   });
 
-  it("byte-spot: 'exhaustive survey' has no trailing period (xTr literal)", () => {
-    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
-    expect(dynamic.text).toContain("not an exhaustive survey\n\n");
-    expect(dynamic.text).not.toContain("not an exhaustive survey.");
-  });
-
-  it("environment lines carry the resolved env values", () => {
-    const [, , dynamic] = buildStartPlanSystem(undefined, "glm-5.3", ENV, "zai");
-    expect(dynamic.text).toContain("- Primary working directory: /home/dev/project");
-    expect(dynamic.text).toContain("- Platform: linux");
-    expect(dynamic.text).toContain("- Shell: bash");
-    expect(dynamic.text).toContain("- OS Version: linux 6.8.0-49-generic x64");
-    expect(dynamic.text).toContain("- Is a git repository: no");
-  });
-
-  it("client system keeps the 3-block shape; text becomes block 3 (C1: replaces the dynamic trio, §J live-proven)", () => {
-    const blocks = buildStartPlanSystem(
-      [
-        { type: "text", text: "User rule", cache_control: { type: "ephemeral" } },
-        { type: "text", text: "" }, // dropped
-        "raw string block", // joined
-      ],
-      "glm-5.3",
-      ENV,
-      "zai",
-    );
+  it("client system keeps the 3-block shape; text becomes block 3 (C1: replaces the dynamic duo, §J live-proven)", () => {
+    const blocks = buildStartPlanSystem([
+      { type: "text", text: "User rule", cache_control: { type: "ephemeral" } },
+      { type: "text", text: "" }, // dropped
+      "raw string block", // joined
+    ]);
     // §J unified rules (2026-10-27): block 3 is unconstrained and block 2 must
     // only OPEN with the full stable text — the C1 form puts the client text
     // in block 3 so block 2 stays byte-exact pure stable (tightening-immune).
     expect(blocks).toHaveLength(3);
-    expect(blocks[0]).toEqual({ type: "text", text: "You are ZCode, an interactive coding agent" });
+    expect(blocks[0]).toEqual({ type: "text", text: "You are ZCode, an interactive agent" });
     expect(blocks[1].cache_control).toEqual({ type: "ephemeral" });
     // Block 2 = pure stable text; the client text does NOT touch it.
-    expect(blocks[1].text.endsWith("it's clickable.")).toBe(true);
-    expect(blocks[1].text).toContain("interactive ZCode agent");
+    expect(blocks[1].text.endsWith(" - Reference code as `file_path:line_number` — it's clickable.")).toBe(true);
+    expect(blocks[1].text).toContain("working with the user toward their goals");
     expect(blocks[1].text).not.toContain("User rule");
     expect(blocks[1].text).not.toContain("# ZCode Desktop Context");
-    // Block 3 = "\n\n" + client text alone; the dynamic trio is replaced.
+    // Block 3 = "\n\n" + client text alone; the dynamic duo is replaced.
     expect(blocks[2].text).toBe("\n\nUser rule\n\nraw string block");
     expect(blocks[2].cache_control).toEqual({ type: "ephemeral" });
   });
 
-  it("whitespace-only / absent client system keeps the default 3-block identity chain", () => {
+  it("whitespace-only / absent client system keeps the default 3-block identity chain (empty block 3)", () => {
     for (const system of [undefined, null, "", "   ", [], [{ type: "text", text: "  " }]]) {
-      const blocks = buildStartPlanSystem(system, "glm-5.3", ENV, "zai");
+      const blocks = buildStartPlanSystem(system);
       expect(blocks).toHaveLength(3);
-      expect(blocks[1].text).toContain("interactive ZCode agent");
-      expect(blocks[2].text).toContain("# Environment");
+      expect(blocks[1].text).toContain("working with the user toward their goals");
+      expect(blocks[2].text).toBe("");
     }
   });
 
   it("returns only the 3 official blocks for absent system", () => {
-    expect(buildStartPlanSystem(undefined, undefined, ENV, undefined)).toHaveLength(3);
-    expect(buildStartPlanSystem(null, undefined, ENV, undefined)).toHaveLength(3);
+    expect(buildStartPlanSystem(undefined)).toHaveLength(3);
+    expect(buildStartPlanSystem(null)).toHaveLength(3);
   });
 });
 
-describe("buildContextPrefixMessage (bundle tct + Vre + blt)", () => {
-  it("emits a user turn wrapping the currentDate section in a system-reminder, exact tct shape", () => {
-    const msg = buildContextPrefixMessage(new Date(2026, 8, 11));
+describe("buildCurrentDateMessage (bundle $5o + fce: standalone date attachment)", () => {
+  it("emits a user turn wrapping the bare date line in a system-reminder (no heading since 3.17.1)", () => {
+    const msg = buildCurrentDateMessage(new Date(2026, 8, 11));
     expect(msg.role).toBe("user");
     expect(msg.content).toEqual([
       {
         type: "text",
-        text:
-          "<system-reminder>" +
-          "As you answer the user's questions, you can use the following context:\n" +
-          "# currentDate\n" +
-          "Today's date is 2026-09-11.\n" +
-          "\n" +
-          "      IMPORTANT: this context may or may not be relevant to your tasks. You should not respond to this context unless it is highly relevant to your task." +
-          "</system-reminder>",
+        text: "<system-reminder>Today's date is 2026-09-11.</system-reminder>",
       },
     ]);
   });
 
   it("carries no cache_control (attachments never get breakpoints)", () => {
-    const msg = buildContextPrefixMessage(new Date(2026, 8, 11));
+    const msg = buildCurrentDateMessage(new Date(2026, 8, 11));
     expect(msg.content[0].cache_control).toBeUndefined();
   });
 });

@@ -96,13 +96,123 @@ describe("createClaimClient — getPreviews", () => {
     expect(auths[1]).toBeNull();
   });
 
-  it("throws on non-zero biz code and missing data", async () => {
+  it("throws on non-zero biz code; code 0 + missing data enumerates as empty (wk-1030 shape)", async () => {
     const fetchImpl = makeMockFetch(() => Promise.resolve(jsonResp({ code: 1002, msg: "campaign ended" })));
     const client = createClaimClient({ origin: "https://zcode.z.ai", appVersion: "3.11.2", platform: "win32-x64", fetchImpl });
     await expect(client.getPreviews()).rejects.toThrow("1002");
-    const fetchNoData = makeMockFetch(() => Promise.resolve(jsonResp({ code: 0 })));
+    // 2026-10-30 live shape: the billing preview returns code 0 with NO data
+    // field when the campaign is banner-distributed — the desktop client
+    // throws `manual_claim_preview_missing_data`, we enumerate it as empty so
+    // the marketing fallback can supply the plans (see getMarketingPlans).
+    const fetchNoData = makeMockFetch(() => Promise.resolve(jsonResp({ code: 0, msg: "", logid: "x" })));
     const client2 = createClaimClient({ origin: "https://zcode.z.ai", appVersion: "3.11.2", platform: "win32-x64", fetchImpl: fetchNoData });
-    await expect(client2.getPreviews()).rejects.toThrow("preview failed");
+    expect(await client2.getPreviews()).toEqual([]);
+  });
+});
+
+describe("createClaimClient — marketing/touch enumeration (wk-1030)", () => {
+  const MARKETING_BODY = {
+    code: 0,
+    msg: "",
+    data: {
+      server_time: 1793364305,
+      deliveries: [
+        {
+          campaign_id: "2101141259813175296",
+          resource_position: "banner",
+          banner: {
+            buttons: [
+              { text: { content: "" }, action: { type: "close", args: null } },
+              { text: { content: "" }, action: { type: "claim_zcode_plan", args: { plan_id: "zcode-v3-start-plan-1030-wk" } } },
+            ],
+            background: {
+              type: "bundle",
+              bundle: { bundle: { src: "https://cdn-zcode.z.ai/x.zip", sha256: "aa" }, entry: "index.html" },
+              args: {
+                zcode_plan: {
+                  plan_id: "zcode-v3-start-plan-1030-wk",
+                  name: "ZCODE WEEKEND BUILD",
+                  priority: 101,
+                  starts_at: 1793358000,
+                  ends_at: 1793581200,
+                  entitlements: [
+                    { entitlement_id: "ent-1", show_name: "GLM-5.3-Flash", meter: "model_usage", unit_type: "requests", capabilities: ["chat"], grant_units: 500000000, period: "weekly", priority: 1 },
+                  ],
+                },
+              },
+            },
+          },
+        },
+        {
+          campaign_id: "other",
+          resource_position: "popup",
+          popup: { buttons: [{ action: { type: "open_url", args: { url: "https://x" } } }] },
+        },
+      ],
+    },
+  };
+
+  it("surfaces claim_zcode_plan banners with the enriched zcode_plan payload", async () => {
+    const seen: Array<{ path: string; seq: string | null; dm: string | null; lang: string | null; ver: string | null; auth: string | null }> = [];
+    const fetchImpl = makeMockFetch((req) => {
+      const u = new URL(req.url);
+      seen.push({ path: u.pathname, seq: u.searchParams.get("seq"), dm: req.headers.get("x-device-mid"), lang: req.headers.get("x-client-language"), ver: req.headers.get("x-zcode-app-version"), auth: req.headers.get("authorization") });
+      return Promise.resolve(jsonResp(MARKETING_BODY));
+    });
+    const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "jwt-9", appVersion: "3.17.1", platform: "win32-x64", marketingDeviceMid: "11111111-2222-4333-8444-555555555555", fetchImpl });
+    const plans = await client.getMarketingPlans();
+
+    expect(seen[0].path).toBe("/api/v1/marketing/touch");
+    expect(seen[0].seq).toBe("0"); // seq counter starts at 0
+    expect(seen[0].dm).toBe("11111111-2222-4333-8444-555555555555");
+    expect(seen[0].lang).toBe("zh-CN");
+    expect(seen[0].ver).toBe("3.17.1");
+    expect(seen[0].auth).toBe("Bearer jwt-9");
+
+    expect(plans).toHaveLength(1);
+    const p = plans[0];
+    expect(p.planId).toBe("zcode-v3-start-plan-1030-wk");
+    expect(p.name).toBe("ZCODE WEEKEND BUILD");
+    expect(p.source).toBe("banner");
+    expect(p.campaignId).toBe("2101141259813175296");
+    expect(p.startsAt).toBe(1793358000);
+    expect(p.entitlements[0].grantUnits).toBe(500000000);
+  });
+
+  it("returns [] without marketingDeviceMid and swallows marketing errors", async () => {
+    const fetchImpl = makeMockFetch(() => Promise.resolve(new Response("{}", { status: 500 })));
+    const client = createClaimClient({ origin: "https://zcode.z.ai", appVersion: "3.17.1", platform: "win32-x64", fetchImpl });
+    expect(await client.getMarketingPlans()).toEqual([]);
+    const errClient = createClaimClient({ origin: "https://zcode.z.ai", appVersion: "3.17.1", platform: "win32-x64", marketingDeviceMid: "11111111-2222-4333-8444-555555555555", fetchImpl });
+    expect(await errClient.getMarketingPlans()).toEqual([]);
+  });
+
+  it("listPlans merges preview + banner, deduped by planId (preview wins)", async () => {
+    const fetchImpl = makeMockFetch((req) => {
+      const path = new URL(req.url).pathname;
+      if (path.endsWith("/billing/preview")) {
+        return Promise.resolve(jsonResp({ code: 0, data: { plans: [{ plan_id: "preview-plan", name: "Preview Plan", priority: 5 }] } }));
+      }
+      return Promise.resolve(jsonResp(MARKETING_BODY));
+    });
+    const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "j", appVersion: "3.17.1", platform: "win32-x64", marketingDeviceMid: "11111111-2222-4333-8444-555555555555", fetchImpl });
+    const plans = await client.listPlans();
+    expect(plans.map((p) => p.planId)).toEqual(["preview-plan", "zcode-v3-start-plan-1030-wk"]);
+    expect(plans[0].source ?? "preview").toBe("preview");
+    expect(plans[1].source).toBe("banner");
+  });
+
+  it("listPlans falls back to banner plans when preview is empty-no-data", async () => {
+    const fetchImpl = makeMockFetch((req) => {
+      const path = new URL(req.url).pathname;
+      if (path.endsWith("/billing/preview")) {
+        return Promise.resolve(jsonResp({ code: 0, msg: "", logid: "l" })); // wk-1030 live shape
+      }
+      return Promise.resolve(jsonResp(MARKETING_BODY));
+    });
+    const client = createClaimClient({ origin: "https://zcode.z.ai", jwt: "j", appVersion: "3.17.1", platform: "win32-x64", marketingDeviceMid: "11111111-2222-4333-8444-555555555555", fetchImpl });
+    const plans = await client.listPlans();
+    expect(plans.map((p) => p.planId)).toEqual(["zcode-v3-start-plan-1030-wk"]);
   });
 });
 

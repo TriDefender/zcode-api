@@ -13,10 +13,23 @@ import { ClaimScheduler } from "./scheduler.js";
 import { getCaptchaToken } from "../proxy/captcha.js";
 import { loadCredential } from "../auth/store.js";
 import { getDefaultEndpointRouting, requiresClaimCaptcha } from "../proxy/endpoint-routing.js";
+import { createHash } from "node:crypto";
+import { homedir } from "node:os";
 
 /** `${process.platform}-${process.arch}` — mirrors the client's `TH()`. */
 function claimPlatform(): string {
   return `${process.platform}-${process.arch}`;
+}
+
+/**
+ * Stable UUID for the marketing face (`marketing/touch` uuid.parse's the
+ * X-Device-Mid header — required there even with the billing campaign gate
+ * off). Derived deterministically from the home dir so it survives restarts
+ * (fingerprint stability: never randomized per request/run).
+ */
+function stableMarketingDeviceMid(): string {
+  const h = createHash("sha256").update(`${homedir()}|zcode-proxy|marketing-device-mid`).digest("hex");
+  return [h.slice(0, 8), h.slice(8, 12), "4" + h.slice(13, 16), "8" + h.slice(17, 20), h.slice(20, 32)].join("-");
 }
 
 function claimCaptchaRequired(config: ProxyConfig, resolveCredential: () => Promise<Credential | null>): Promise<boolean> {
@@ -47,6 +60,7 @@ export function startAutoClaim(config: ProxyConfig, auth: AuthManager): ClaimSch
         appVersion: config.identity.appVersion,
         platform: claimPlatform(),
         deviceMid: config.identity.deviceMid,
+        marketingDeviceMid: config.identity.deviceMid ?? stableMarketingDeviceMid(),
       }),
     getCaptcha: async () => {
       const token = await getCaptchaToken(config.identity.appVersion);
@@ -99,11 +113,12 @@ export async function runClaimCli(config: ProxyConfig, mode: "list" | "now"): Pr
     appVersion: config.identity.appVersion,
     platform: claimPlatform(),
     deviceMid: config.identity.deviceMid,
+    marketingDeviceMid: config.identity.deviceMid ?? stableMarketingDeviceMid(),
   });
 
   let plans: ClaimablePlan[];
   try {
-    plans = await client.getPreviews();
+    plans = await client.listPlans();
   } catch (err) {
     if (err instanceof ClaimPreviewError && err.status === 404) {
       console.log("No claimable plans: the campaign endpoint is not deployed yet (404).");
@@ -145,7 +160,8 @@ function printPlans(plans: ClaimablePlan[]): void {
   console.log(`Claimable plans (${plans.length}):`);
   for (const p of plans) {
     const window = [fmtTime(p.startsAt), fmtTime(p.endsAt)].filter(Boolean).join(" → ");
-    console.log(`  - ${p.planId}  "${p.name}"  priority=${p.priority}${window ? `  ${window}` : ""}`);
+    const source = p.source === "banner" ? "  [banner]" : "";
+    console.log(`  - ${p.planId}  "${p.name}"  priority=${p.priority}${window ? `  ${window}` : ""}${source}`);
     for (const e of p.entitlements) {
       const quota = e.grantUnits > 0 ? ` ${e.grantUnits} ${e.unitType}` : "";
       const activate = e.effectiveAt !== undefined ? ` (activates ${new Date(e.effectiveAt * 1000).toISOString()})` : "";
