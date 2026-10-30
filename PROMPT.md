@@ -279,7 +279,7 @@ Today's date is {date}.
 2. **块 2 = 其余 system stable sections，`\n\n` join（ephemeral）**：Agent Identity（首字符 `\n`）→ ZCode Desktop Context
 3. **块 3 = 全部 system dynamic sections，`\n\n` join，块文本整体加 `\n\n` 前缀（ephemeral）**：Dynamic Behavior → Session Guidance → Memory → Context Management（**3.17.1 起不含 Environment / Output Style / Git Context**）
 
-> **代理出线（最小集，2026-10-30 锚定）**：网关对块 3 完全无约束（live 矩阵 M1 空串/M3 仅前缀/N09 无前缀全 200），`buildStartPlanSystem` 默认路径**块 3 = 空串**（保 3 块结构+ephemeral），官方默认二连仅存于 sidecar 作形态记录——默认路径每请求省 ~440 token（deliberate deviation，NOTEPAD「3.17.1 增补」六轮）。
+> **代理出线（最小集，2026-10-30 锚定）**：网关对块 3 完全无约束（live 矩阵 M1 空串/M3 仅前缀/N09 无前缀全 200），`buildStartPlanSystem` 默认路径**块 3 = 空串**（保 3 块结构+ephemeral），官方默认二连仅存于 sidecar 作形态记录——默认路径每请求省 **322 token**（实测 duo 584 vs empty 262 input_tokens，cache-miss 态；wire 差 1555B）（deliberate deviation，NOTEPAD「3.17.1 增补」六/七轮）。
 
 meta_user 侧（`GDn` 构建 + `$5o`/`W5o` 请求期补推）：skills_listing → context_prefix → session_context 组包裹 + env/model/date 独立附件，挂为首个 user turn（见 §12）。wire 序列化器把首个 system 组映射为顶层 `system` 字段，后续 system 组落为 mid-conversation system 消息。
 

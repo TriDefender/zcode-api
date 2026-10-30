@@ -95,7 +95,9 @@ export function formatLocalIsoDate(d: Date): string {
  * to a prefix→exact gateway tightening, and the client text rides the
  * loosest-validated block. Client system ABSENT → EMPTY block 3 (the
  * 2026-10-30 "minimal set" anchoring: official-default duo deliberately NOT
- * mirrored, saving ~450 tokens/request; live matrix M1/M3/N09 prove block 3
+ * mirrored, saving 322 tokens/request (measured 2026-10-30: duo 584 vs
+ * empty 262 input_tokens on the cache-miss stateless path); live matrix
+ * M1/M3/N09 prove block 3
  * carries no constraints — see NOTEPAD "3.17.1 增补" 六轮).
  * Multiple client text blocks are `\n\n`-joined into one string; client
  * `cache_control` is dropped (the stable block owns its single ephemeral
@@ -107,12 +109,13 @@ export function buildStartPlanSystem(existingSystem: unknown): SystemBlock[] {
   // C1: client text replaces the dynamic duo as block-3 content. Default
   // (no client system) path ships an EMPTY block 3 — the gateway-anchored
   // minimal set (2026-10-30 probe M1: block 3 is entirely unconstrained;
-  // official-default duo omitted as a deliberate deviation, ~450 tokens
-  // saved per request on the cache-miss-heavy stateless proxy traffic).
-  // Empty block 3 is indistinguishable from a C1 client with an empty
-  // custom system — a shape the live matrix proves passes. The duo texts
-  // stay in zcode_system.json as the official-shape record for PROMPT.md
-  // and future re-mirroring.
+  // official-default duo omitted as a deliberate deviation, 322 tokens
+  // saved per request — measured duo 584 vs empty 262 input_tokens,
+  // cache-miss stateless path). Empty block 3 is indistinguishable from a
+  // C1 client with an empty custom system — a shape the live matrix proves
+  // passes (and the 9.5KB real opencode prompt rides the same C1 slot,
+  // docker e2e 2026-10-30). The duo texts stay in zcode_system.json as the
+  // official-shape record for PROMPT.md and future re-mirroring.
   const dynamic = custom !== undefined ? custom : "";
   return [
     { type: "text", text: data.cliPrefix },
