@@ -28,6 +28,8 @@ interface ResponsesReasoning {
 export interface ResponsesContentPart {
   type: "input_text" | "output_text" | "text" | "input_image" | "image_url" | "summary_text" | "input_video" | "video_url" | "input_file" | "file";
   text?: string;
+  /** Output-text annotations — required (empty array) on the wire for output parts. */
+  annotations?: unknown[];
   image_url?: string | { url: string; detail?: string };
   /** Video part (`input_video`/`video_url`): data URL or http(s) URL. */
   video_url?: string | { url: string };
@@ -97,10 +99,12 @@ export interface ResponsesRequest {
 
 export interface ResponsesUsage {
   input_tokens: number;
+  // Required on the wire: the Responses client treats both detail objects as
+  // mandatory (serde `missing field` otherwise) — always emit them.
+  input_tokens_details: { cached_tokens?: number };
   output_tokens: number;
+  output_tokens_details: { reasoning_tokens?: number };
   total_tokens: number;
-  input_tokens_details?: { cached_tokens?: number };
-  output_tokens_details?: { reasoning_tokens?: number };
 }
 
 interface ResponsesIncompleteDetails {
