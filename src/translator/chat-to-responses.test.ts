@@ -53,7 +53,7 @@ describe("chatCompletionsToResponses (batch)", () => {
     const r = chatCompletionsToResponses(chatResp(), "glm-5.2");
     expect(r.status).toBe("completed");
     expect(r.output[0].type).toBe("message");
-    expect((r.output[0] as { content: { type: string; text: string }[] }).content[0]).toEqual({ type: "output_text", text: "hello" });
+    expect((r.output[0] as { content: { type: string; text: string }[] }).content[0]).toEqual({ type: "output_text", text: "hello", annotations: [] });
   });
 
   it("carries cache-inclusive Chat usage into the Responses usage details", () => {
@@ -68,9 +68,25 @@ describe("chatCompletionsToResponses (batch)", () => {
 
     expect(r.usage).toEqual({
       input_tokens: 1224,
-      output_tokens: 3,
-      total_tokens: 1227,
       input_tokens_details: { cached_tokens: 1216 },
+      output_tokens: 3,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: 1227,
+    });
+  });
+
+  it("always emits both usage detail objects even when the Chat usage omits them", () => {
+    // The Responses client requires input_tokens_details / output_tokens_details
+    // on the wire — omitting them fails the turn with a serde `missing field`.
+    const r = chatCompletionsToResponses(chatResp({
+      usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+    }), "glm-5.2");
+    expect(r.usage).toEqual({
+      input_tokens: 10,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 5,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: 15,
     });
   });
 
@@ -332,5 +348,102 @@ describe("streaming", () => {
         expect(terminal.response.output[e.output_index].id).toBe(e.item.id);
       }
     }
+  });
+});
+
+// ─────────────────────────────────────────────
+// Client-required field audit (async-openai ResponseUsage / OutputTextContent /
+// ReasoningItem / SummaryTextContent / FunctionToolCall). Every field checked
+// here is deserialized WITHOUT a serde default by the Responses client: an
+// absent field fails the whole turn (`missing field \`x\``). Keep these in
+// sync with the wire contract the client enforces.
+// ─────────────────────────────────────────────
+describe("client-required wire fields", () => {
+  it("stream: every output_text part carries text and annotations", () => {
+    const state = newResponsesStreamState("glm-5.2");
+    const events = [
+      ...chatChunkToResponsesEvents(chunk({ choices: [{ index: 0, delta: { content: "hi" } }] }), state),
+      ...finalizeResponsesStream(state),
+    ];
+    for (const e of events) {
+      if (e.type === "response.output_item.added" || e.type === "response.output_item.done") {
+        if (e.item.type !== "message") continue;
+        for (const part of (e.item as { content: Record<string, unknown>[] }).content) {
+          expect(part).toHaveProperty("text");
+          expect(part).toHaveProperty("annotations");
+        }
+      }
+      if (e.type === "response.content_part.added" || e.type === "response.content_part.done") {
+        expect(e.part).toHaveProperty("text");
+        expect(e.part).toHaveProperty("annotations");
+      }
+    }
+  });
+
+  it("stream: reasoning item always carries summary, summary parts always carry text", () => {
+    const state = newResponsesStreamState("glm-5.2");
+    const events = [
+      ...chatChunkToResponsesEvents(chunk({ choices: [{ index: 0, delta: { reasoning_content: "thinking" } }] }), state),
+      ...chatChunkToResponsesEvents(chunk({ choices: [{ index: 0, delta: { content: "done" }, finish_reason: "stop" }] }), state),
+      ...finalizeResponsesStream(state),
+    ];
+    for (const e of events) {
+      if (e.type === "response.output_item.added" || e.type === "response.output_item.done") {
+        if (e.item.type !== "reasoning") continue;
+        expect((e.item as { summary?: unknown[] }).summary).toBeInstanceOf(Array);
+      }
+      if (e.type === "response.reasoning_summary_part.added" || e.type === "response.reasoning_summary_part.done") {
+        expect(e.part).toHaveProperty("text");
+      }
+    }
+  });
+
+  it("stream: function_call items always carry arguments", () => {
+    const state = newResponsesStreamState("glm-5.2");
+    const events = [
+      ...chatChunkToResponsesEvents(chunk({ choices: [{ index: 0, delta: { tool_calls: [
+        { index: 0, id: "c0", function: { name: "fn", arguments: "{\"a\":1}" } },
+      ] } }] }), state),
+      ...finalizeResponsesStream(state),
+    ];
+    for (const e of events) {
+      if (e.type === "response.output_item.added" || e.type === "response.output_item.done") {
+        if (e.item.type !== "function_call") continue;
+        expect((e.item as { arguments?: string }).arguments).toBeTypeOf("string");
+      }
+    }
+  });
+
+  it("stream: terminal usage always carries both detail objects", () => {
+    const state = newResponsesStreamState("glm-5.2");
+    // Upstream Chat usage WITHOUT any details — the shape that used to fail.
+    const usage = { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 };
+    chatChunkToResponsesEvents(chunk({ usage, choices: [] }), state);
+    const terminal = finalizeResponsesStream(state).find(e => e.type === "response.completed");
+    if (terminal?.type !== "response.completed") throw new Error("missing completed event");
+    expect(terminal.response.usage).toEqual({
+      input_tokens: 7,
+      input_tokens_details: { cached_tokens: 0 },
+      output_tokens: 3,
+      output_tokens_details: { reasoning_tokens: 0 },
+      total_tokens: 10,
+    });
+  });
+
+  it("batch: reasoning + message + usage fields satisfy the client contract", () => {
+    const r = chatCompletionsToResponses({
+      id: "c", object: "chat.completion", model: "glm-5.2",
+      choices: [{ index: 0, finish_reason: "stop", message: {
+        role: "assistant", content: "answer", reasoning_content: "why",
+      } }],
+      usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
+    }, "glm-5.2");
+    const reasoning = r.output.find(i => i.type === "reasoning") as { summary: Record<string, unknown>[] };
+    expect(reasoning.summary[0]).toHaveProperty("text");
+    const message = r.output.find(i => i.type === "message") as { content: Record<string, unknown>[] };
+    expect(message.content[0]).toHaveProperty("annotations");
+    expect(message.content[0]).toHaveProperty("text");
+    expect(r.usage?.input_tokens_details).toEqual({ cached_tokens: 0 });
+    expect(r.usage?.output_tokens_details).toEqual({ reasoning_tokens: 0 });
   });
 });
