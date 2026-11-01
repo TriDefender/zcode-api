@@ -124,7 +124,7 @@ interface ResponsesIncompleteDetails {
 
 /** An output item in a completed Responses payload. */
 export type ResponsesOutputItem =
-  | { type: "message"; id?: string; role: "assistant"; content: ResponsesContentPart[]; status?: string; [k: string]: unknown }
+  | { type: "message"; id?: string; role: "assistant"; content: ResponsesOutputTextPart[]; status?: string; [k: string]: unknown }
   | { type: "reasoning"; id?: string; summary?: ResponsesContentPart[]; content?: ResponsesContentPart[]; status?: string; [k: string]: unknown }
   | { type: "function_call"; id?: string; call_id: string; name: string; arguments: string; status?: string; namespace?: string; [k: string]: unknown }
   | { type: "custom_tool_call"; id?: string; call_id: string; name: string; input: string; status?: string; [k: string]: unknown }
