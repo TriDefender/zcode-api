@@ -120,7 +120,7 @@ function chatChoiceToOutputItems(
       type: "message",
       id: generateItemId(),
       role: "assistant",
-      content: [{ type: "output_text", text }],
+      content: [{ type: "output_text", text, annotations: [] }],
       status: "completed",
     });
   }
@@ -194,7 +194,7 @@ function emptyMessageOutput(): ResponsesOutputItem {
     type: "message",
     id: generateItemId(),
     role: "assistant",
-    content: [{ type: "output_text", text: "" }],
+    content: [{ type: "output_text", text: "", annotations: [] }],
     status: "completed",
   };
 }
@@ -228,12 +228,26 @@ export function extractCustomToolInput(rawArgs: string): string {
 }
 
 function chatUsageToResponsesUsage(u: OpenAIUsage): ResponsesUsage {
+  // The Responses client (async-openai) deserializes ResponseUsage with ALL
+  // five fields required — an absent `input_tokens_details` / `output_tokens_details`
+  // fails the whole turn with `missing field \`input_tokens_details\``. Both detail
+  // objects (and their inner counts) are therefore always emitted.
+  //
+  // SEMANTICS OF 0: an emitted `cached_tokens: 0` / `reasoning_tokens: 0`
+  // means "upstream did not report this breakdown", NOT a measured zero.
+  // The Anthropic translation layer only reports cache buckets when the
+  // upstream sends them and never reports reasoning tokens, so responses
+  // containing reasoning can legitimately show `reasoning_tokens: 0`.
+  // This fallback keeps the three known totals (input/output/total) instead
+  // of omitting the whole usage object — a deliberate tradeoff, and a
+  // semantic change from "field absent" to "field present with 0" for
+  // clients that consume these numbers.
   return {
     input_tokens: u.prompt_tokens ?? 0,
+    input_tokens_details: { cached_tokens: u.prompt_tokens_details?.cached_tokens ?? 0 },
     output_tokens: u.completion_tokens ?? 0,
+    output_tokens_details: { reasoning_tokens: u.completion_tokens_details?.reasoning_tokens ?? 0 },
     total_tokens: u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0),
-    ...(u.prompt_tokens_details?.cached_tokens ? { input_tokens_details: { cached_tokens: u.prompt_tokens_details.cached_tokens } } : {}),
-    ...(u.completion_tokens_details?.reasoning_tokens !== undefined ? { output_tokens_details: { reasoning_tokens: u.completion_tokens_details.reasoning_tokens } } : {}),
   };
 }
 
@@ -450,6 +464,8 @@ function toolCallAddedItem(
       call_id: entry.id,
       name: ns.name,
       namespace: ns.namespace,
+      // arguments is required on FunctionToolCall; deltas stream afterwards.
+      arguments: "",
       status: "in_progress",
     };
   }
@@ -458,6 +474,7 @@ function toolCallAddedItem(
     id: entry.itemId,
     call_id: entry.id,
     name: entry.name,
+    arguments: "",
     status: "in_progress",
   };
 }
@@ -563,14 +580,18 @@ function ensureReasoningItem(state: ResponsesStreamState): ResponsesStreamEvent[
     seq(state, {
       type: "response.output_item.added",
       output_index: state.reasoningIndex,
-      item: { type: "reasoning", id: state.reasoningItemId, status: "in_progress" },
+      // `summary` is required on ReasoningItem (async-openai deserializes it
+      // with no default) — emit an empty list until the part closes.
+      item: { type: "reasoning", id: state.reasoningItemId, summary: [], status: "in_progress" },
     }),
     seq(state, {
       type: "response.reasoning_summary_part.added",
       output_index: state.reasoningIndex,
       summary_index: 0,
       item_id: state.reasoningItemId,
-      part: { type: "summary_text" },
+      // SummaryTextContent.text is required — the part opens with "" and the
+      // text arrives via reasoning_summary_text.delta.
+      part: { type: "summary_text", text: "" },
     }),
   ];
 }
@@ -645,7 +666,7 @@ function ensureMessageItem(state: ResponsesStreamState): ResponsesStreamEvent[] 
       id: state.messageItemId,
       role: "assistant",
       status: "in_progress",
-      content: [{ type: "output_text" }],
+      content: [{ type: "output_text", text: "", annotations: [] }],
     },
   })];
 }
@@ -658,7 +679,7 @@ function ensureTextPart(state: ResponsesStreamState): ResponsesStreamEvent[] {
     output_index: state.messageIndex,
     content_index: 0,
     item_id: state.messageItemId,
-    part: { type: "output_text", text: "" },
+    part: { type: "output_text", text: "", annotations: [] },
   })];
 }
 
@@ -678,7 +699,7 @@ function closeMessageItem(state: ResponsesStreamState): ResponsesStreamEvent[] {
       output_index: state.messageIndex,
       content_index: 0,
       item_id: state.messageItemId,
-      part: { type: "output_text", text: state.text },
+      part: { type: "output_text", text: state.text, annotations: [] },
     }));
   }
   events.push(seq(state, {
@@ -689,7 +710,7 @@ function closeMessageItem(state: ResponsesStreamState): ResponsesStreamEvent[] {
       id: state.messageItemId,
       role: "assistant",
       status: "completed",
-      content: [{ type: "output_text", text: state.text }],
+      content: [{ type: "output_text", text: state.text, annotations: [] }],
     },
   }));
   return events;
@@ -811,7 +832,7 @@ function buildFinalOutput(state: ResponsesStreamState): ResponsesOutputItem[] {
       type: "message",
       id: state.messageItemId ?? generateItemId(),
       role: "assistant",
-      content: [{ type: "output_text", text: state.text }],
+      content: [{ type: "output_text", text: state.text, annotations: [] }],
       status: "completed",
     });
   }

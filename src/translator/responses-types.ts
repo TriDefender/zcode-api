@@ -39,6 +39,17 @@ export interface ResponsesContentPart {
   filename?: string;
 }
 
+/**
+ * An `output_text` part inside a Responses output message. `annotations` is
+ * required on the wire (the Responses client deserializes OutputTextContent
+ * with no serde default) — always emit it, as `[]` when empty.
+ */
+export interface ResponsesOutputTextPart {
+  type: "output_text";
+  text: string;
+  annotations: unknown[];
+}
+
 /** Tool definitions on a Responses request. */
 export type ResponsesTool =
   | { type: "function"; name: string; description?: string; parameters?: Record<string, unknown>; strict?: boolean }
@@ -97,10 +108,14 @@ export interface ResponsesRequest {
 
 export interface ResponsesUsage {
   input_tokens: number;
+  // Required on the wire: the Responses client treats both detail objects —
+  // and their inner token counts — as mandatory (serde `missing field`
+  // otherwise) — always emit them. `0` means "absent upstream", not a
+  // measured count (see chatUsageToResponsesUsage).
+  input_tokens_details: { cached_tokens: number };
   output_tokens: number;
+  output_tokens_details: { reasoning_tokens: number };
   total_tokens: number;
-  input_tokens_details?: { cached_tokens?: number };
-  output_tokens_details?: { reasoning_tokens?: number };
 }
 
 interface ResponsesIncompleteDetails {
@@ -109,7 +124,7 @@ interface ResponsesIncompleteDetails {
 
 /** An output item in a completed Responses payload. */
 export type ResponsesOutputItem =
-  | { type: "message"; id?: string; role: "assistant"; content: ResponsesContentPart[]; status?: string; [k: string]: unknown }
+  | { type: "message"; id?: string; role: "assistant"; content: ResponsesOutputTextPart[]; status?: string; [k: string]: unknown }
   | { type: "reasoning"; id?: string; summary?: ResponsesContentPart[]; content?: ResponsesContentPart[]; status?: string; [k: string]: unknown }
   | { type: "function_call"; id?: string; call_id: string; name: string; arguments: string; status?: string; namespace?: string; [k: string]: unknown }
   | { type: "custom_tool_call"; id?: string; call_id: string; name: string; input: string; status?: string; [k: string]: unknown }
