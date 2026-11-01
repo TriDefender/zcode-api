@@ -173,7 +173,62 @@ const _memCdnCache = new Map();
 // multi-hundred-KB body for the process lifetime (issue #50). Insertion-ordered
 // FIFO -- the oldest rotation ages out first; disk cache still serves re-reads.
 const MEM_CDN_CACHE_CAP = 16;
+
+// -- AliyunCaptcha.js / pe bundle XHR-timeout patch --------------------------
+// The captcha frontend hardcodes a 5s default XHR timeout for the requests it
+// issues — including the traceless verify POST (`arguments[4]?arguments[4]:
+// 5e3`, single occurrence per bundle, feeding both xhr.timeout and the
+// Promise.race rejector). The helper exists in TWO bundles: AliyunCaptcha.js
+// (`...:5e3;return e.timeout=i`) and the rotated pe VM bundles
+// (`...:5e3,o=...;return r.timeout=a`) — the VERIFY POST goes through the pe
+// copy, so both must be patched. On mobile networks the verify POST routinely
+// exceeds 5s: the SDK times out and RE-SUBMITS the same certifyId (same host,
+// then the -b failover host, then a config re-init + PUZZLE fallback). The
+// first submit had already consumed the certifyId, so every retry reply F008
+// (duplicate verify) — surfaced as "verify rejected {verifyCode:F008}" and,
+// with deterministic mobile latency, all solveRetries attempts fail
+// identically ("captcha failed after 4 attempts: duplicate certifyId (F008)",
+// Android 2026-11-01). Raising the default to 30s (the solve deadline) lets
+// the first submit complete: live repro with a 5.3s verify delay went from
+// F008 + failover cascade to T001.
+// Applied at every body entry point: rememberCdnBody (cache funnel: prewarm,
+// disk refill), the async passthrough (pe bundles are NEVER cached — they
+// rotate and flow straight back to happy-dom from solveFetch), and the sync
+// passthrough. Fail-open: pattern absent (SDK update) logs once and serves
+// unpatched; already-patched bodies pass through.
+const SDK_XHR_TIMEOUT_PATTERN = "arguments[4]?arguments[4]:5e3";
+const SDK_XHR_TIMEOUT_REPLACEMENT = "arguments[4]?arguments[4]:30e3";
+// AliyunCaptcha.js + the rotated pe VM bundles only. FeiLin (fingerprint SDK)
+// shares the /captcha-frontend/ prefix but has no xhr helper (verified 1.5.2)
+// — including it would burn the once-per-process "pattern not found" warn on
+// every solve and mask a real SDK drift.
+const CAPTCHA_SCRIPT_PATCH_RE =
+  /^https?:\/\/[^/]*alicdn\.com\/captcha-frontend\/(aliyunCaptcha\/AliyunCaptcha\.js|dynamicJS\/[^?]*\/pe\.\d+\.[^?]*\.js)(\?|$)/i;
+let _sdkTimeoutPatchWarned = false;
+export function __patchSdkXhrTimeout(body) {
+  try {
+    const src = typeof body === "string" ? body : body.toString("utf8");
+    if (src.includes(SDK_XHR_TIMEOUT_REPLACEMENT)) return body;
+    if (!src.includes(SDK_XHR_TIMEOUT_PATTERN)) {
+      if (!_sdkTimeoutPatchWarned) {
+        _sdkTimeoutPatchWarned = true;
+        process.stderr.write(
+          "[captcha] captcha-frontend js xhr-timeout pattern not found (SDK updated?) -- serving unpatched\n",
+        );
+      }
+      return body;
+    }
+    return Buffer.from(
+      src.split(SDK_XHR_TIMEOUT_PATTERN).join(SDK_XHR_TIMEOUT_REPLACEMENT),
+      "utf8",
+    );
+  } catch (_) {
+    return body;
+  }
+}
+
 function rememberCdnBody(url, body) {
+  if (CAPTCHA_SCRIPT_PATCH_RE.test(String(url))) body = __patchSdkXhrTimeout(body);
   _memCdnCache.set(url, body);
   if (_memCdnCache.size > MEM_CDN_CACHE_CAP) {
     for (const key of _memCdnCache.keys()) {
@@ -440,39 +495,61 @@ function storeSetCookies(res, url) {
 
 // -- The interceptor: replaces happy-dom's network layer completely ---------
 // All frame requests (scripts, XHR, fetch, images) funnel through here.
+// In-flight tracking for the stall detector: a slow-but-alive request (mobile
+// verify/config POSTs run 5-10s cross-border) must not read as a stall — the
+// whole request duration sits inside this async handler, so try/finally
+// around the body is an accurate counter. A permanently hung request only
+// delays the stall verdict to the 30s solve deadline, which is the same
+// outcome the detector was accelerating.
+let _asyncRequestsInFlight = 0;
 function makeInterceptor(bypassPeCache = false) {
   const skipPeCache = (url) => bypassPeCache && /dynamicJS\/.*\/pe\.\d+\./.test(url);
   return {
     async beforeAsyncRequest({ request, window: w }) {
-      const url = request.url;
-      noteRequest({ at: Date.now(), method: request.method, url });
-      injectRequestHeaders(request);
-      if (/\balicdn\.com/i.test(url)) {
-        let body = skipPeCache(url) ? null : getCachedBody(url);
-        if (body && /\.js(\?|$)/i.test(url)) {
-          try {
-            new Function(body.toString("utf8"));
-          } catch (parseErr) {
-            process.stderr.write(`[cache-bad-js] ${url} len=${body.length} ${parseErr.message} -- refetch fresh\n`);
-            _memCdnCache.delete(url);
-            try { fs.unlinkSync(diskPathFor(url)); } catch (_) {}
-            body = null;
-          }
-        }
-        // sync interceptor serves only from cache; the async interceptor
-        // above warms the cache on first load, so misses fall through to
-        // the async fetch path handled by happy-dom.
-        if (body) {
-          if (/dynamicJS\/[^/]*\/pe\.\d+\./.test(url)) {
-            try { w.__lastPeUrl = url; } catch (_) {}
-          }
-          return new w.Response(patchPeBundle(Buffer.from(body), url), {
-            status: 200,
-            statusText: "OK",
-            headers: { "content-type": sniffMime(url) },
-          });
+      _asyncRequestsInFlight += 1;
+      try {
+        return await handleAsyncRequest({ request, window: w, skipPeCache });
+      } finally {
+        _asyncRequestsInFlight -= 1;
+      }
+    },
+    beforeSyncRequest(opts) {
+      return handleSyncRequest({ ...opts, skipPeCache });
+    },
+  };
+}
+
+async function handleAsyncRequest({ request, window: w, skipPeCache }) {
+  {
+    const url = request.url;
+    noteRequest({ at: Date.now(), method: request.method, url });
+    injectRequestHeaders(request);
+    if (/\balicdn\.com/i.test(url)) {
+      let body = skipPeCache(url) ? null : getCachedBody(url);
+      if (body && /\.js(\?|$)/i.test(url)) {
+        try {
+          new Function(body.toString("utf8"));
+        } catch (parseErr) {
+          process.stderr.write(`[cache-bad-js] ${url} len=${body.length} ${parseErr.message} -- refetch fresh\n`);
+          _memCdnCache.delete(url);
+          try { fs.unlinkSync(diskPathFor(url)); } catch (_) {}
+          body = null;
         }
       }
+      // sync interceptor serves only from cache; the async interceptor
+      // above warms the cache on first load, so misses fall through to
+      // the async fetch path handled by happy-dom.
+      if (body) {
+        if (/dynamicJS\/[^/]*\/pe\.\d+\./.test(url)) {
+          try { w.__lastPeUrl = url; } catch (_) {}
+        }
+        return new w.Response(patchPeBundle(Buffer.from(body), url), {
+          status: 200,
+          statusText: "OK",
+          headers: { "content-type": sniffMime(url) },
+        });
+      }
+    }
       // Passthrough via global fetch (undici; honors global ProxyAgent).
       try {
         const init = { method: request.method, headers: {} };
@@ -495,7 +572,11 @@ function makeInterceptor(bypassPeCache = false) {
         // solveFetch: Happy Eyeballs when direct (IPv6-blackhole-safe), plain
         // global fetch keeps ProxyAgent semantics when a proxy is set.
         const res = await solveFetch(url, init);
-        const buf = Buffer.from(await res.arrayBuffer());
+        let buf = Buffer.from(await res.arrayBuffer());
+        // pe bundles reach the page ONLY through this passthrough (they rotate
+        // and are never cached), so the xhr-timeout patch must hook here — the
+        // cached-serve path is covered by rememberCdnBody.
+        if (CAPTCHA_SCRIPT_PATCH_RE.test(url)) buf = __patchSdkXhrTimeout(buf);
         storeSetCookies(res, url);
         if (_DEBUG && /captcha-open|verify\.|device\.saf|cloudauth-device|upload\./i.test(url) && buf.length && buf.length < 4096) {
           try {
@@ -519,8 +600,10 @@ function makeInterceptor(bypassPeCache = false) {
         if (_DEBUG) process.stderr.write(`[xhr-err] ${url}: ${err.message}\n`);
         return new w.Response("", { status: 503, statusText: "passthrough failed" });
       }
-    },
-    beforeSyncRequest({ request, window: w }) {
+  }
+}
+
+function handleSyncRequest({ request, window: w, skipPeCache }) {
       const url = request.url;
       noteRequest({ at: Date.now(), method: request.method, url, sync: true });
       injectRequestHeaders(request);
@@ -616,11 +699,9 @@ function makeInterceptor(bypassPeCache = false) {
         url,
         redirected: false,
         headers: new w.Headers(hdrs),
-        body: Buffer.from(res.body),
+        body: CAPTCHA_SCRIPT_PATCH_RE.test(url) ? __patchSdkXhrTimeout(Buffer.from(res.body)) : Buffer.from(res.body),
         [PropertySymbol.virtualServerFile]: null,
       };
-    },
-  };
 }
 
 // -- Lexical guest scope: timer OWNERSHIP, not caller guessing --------------
@@ -2606,18 +2687,24 @@ async function solveTraceless(opts) {
           .map((r) => `${(r.at - solveStart)}ms ${r.method} ${String(r.url).replace(/^https?:\/\//, "").slice(0, 60)}`)
           .slice(-12);
         reject(new Error(`captcha solve timeout pe=${peUrl.split("/").pop() || peUrl} reqs=${JSON.stringify(reqs)}`));
-      }, timeoutMs);      // Fail-fast stall detector: healthy solves keep firing XHRs until verify
-      // (~3s). If no XHR for stallMs and none pending, this pe-VM variant
-      // stalled (seen across rotated pe.0xx versions) -- abort early so the
-      // caller can retry with a fresh InitCaptchaV3 (new pe version).
-      // Fail-fast stall detector: healthy solves keep firing XHRs until
-      // verify (~3s, gaps <2s). If no XHR for 6s, this pe-VM variant stalled
-      // (seen across rotated pe.0xx versions) -- abort early so the caller
-      // can retry with a fresh InitCaptchaV3 (new pe version).
-      const stallMs = opts.stallMs ?? Number(process.env.CAPTCHA_STALL_MS || 6_000);
+      }, timeoutMs);      // Fail-fast stall detector: healthy solves keep firing XHRs until
+      // verify (~3s, gaps <2s). If no XHR starts for stallMs (12s default,
+      // was 6s) and none are in flight, this pe-VM variant stalled (seen
+      // across rotated pe.0xx versions) -- abort early so the caller can
+      // retry with a fresh InitCaptchaV3 (new pe version).
+      // 12s (was 6s): the detector keys on request STARTS, and the pe VM
+      // legitimately chews CPU for >6s between XHRs on slow machines/mobile
+      // (obfuscated 450KB VM + fingerprint) — those false stalls burned a
+      // solve attempt for a healthy flow. In-flight requests skip the check
+      // (a slow-but-alive mobile POST is progress, not a stall); this covers
+      // the CPU-bound gap. A real stall now costs 12s of the 30s deadline
+      // instead of 6s — acceptable vs burning attempts.
+      const stallMs = opts.stallMs ?? Number(process.env.CAPTCHA_STALL_MS || 12_000);
       const stallTimer = setInterval(() => {
         const last = _requestLog[_requestLog.length - 1];
-        if (last && Date.now() - last.at > stallMs) {
+        // Skip while a request is in flight: a slow-but-alive mobile POST
+        // (5-10s cross-border) is progress, not a stall (see makeInterceptor).
+        if (last && Date.now() - last.at > stallMs && _asyncRequestsInFlight === 0) {
           const peUrl = (() => { try { return w.__lastPeUrl || "?"; } catch (_) { return "?"; } })();
           noteStallAndMaybeEvict(peUrl);
           const reqs = _requestLog
@@ -2732,3 +2819,8 @@ export function __captchaMemStats() {
 }
 
 export { solveTraceless, createDom, destroyDom, noteRequest, rememberCdnBody, reclaimCaptchaHeap };
+
+/** Test seam: read the mem CDN cache (patched-body verification). */
+export function __cdnCacheGet(url) {
+  return _memCdnCache.get(url);
+}

@@ -22,7 +22,7 @@ body:
         .\zcode-proxy serve debug config.yaml
         ```
 
-        每个 request 会产生 4 行 JSONL（client_in / upstream_out / upstream_in / upstream_stream_summary），按 `reqId` 配对。dump 自动脱敏 API key / JWT / proxy key，**但仍请检查一遍再粘贴**。
+        每个 request 会产生 5 行 JSONL（client_in / upstream_out / wire_out / upstream_in / upstream_stream_summary），按 `reqId` 配对。dump 自动脱敏 API key / JWT / proxy key，**但仍请检查一遍再粘贴**。
 
   - type: checkboxes
     id: prerequisites
@@ -181,7 +181,7 @@ body:
       label: 复现步骤
       description: 越具体越好，最好别人照着步骤能直接复现
       placeholder: |
-        1. config.yaml 设置 provider: zai, plan: start-plan, auth: oauth
+        1. config.yaml 设置 provider: zai, plan: start-plan（凭据来自 auth login）
         2. 启动：`bun run src/index.ts serve debug config.yaml`
         3. 用 Claude Code 发一个普通对话请求：……（贴请求命令或客户端配置）
         4. 上游返回 200，但 SSE 流到一半中断，客户端报……
@@ -213,11 +213,12 @@ body:
 
         至少提供 `serve debug` 模式的日志。**强烈建议同时提供 `ZCODE_DUMP_UPSTREAM` 的 trace**，能直接看到 zcode-proxy 实际发什么 body、上游返回什么 headers / stream，定位效率提升 10 倍。
 
-        dump 文件每行是一个 JSON 对象，按 `reqId` 配对 4 个 phase：
+        dump 文件每行是一个 JSON 对象，按 `reqId` 配对 5 个 phase：
 
         ```
         {"reqId":"#001","phase":"client_in",...}      ← 客户端打到 zcode-proxy 的原始请求
-        {"reqId":"#001","phase":"upstream_out",...}   ← zcode-proxy 实际发给上游的（核心）
+        {"reqId":"#001","phase":"upstream_out",...}   ← 路由/签名前的出线视图
+        {"reqId":"#001","phase":"wire_out",...}       ← 实际发给上游的（路由后 URL + 签名后头，核心）
         {"reqId":"#001","phase":"upstream_in",...}    ← 上游响应 status + headers
         {"reqId":"#001","phase":"upstream_stream_summary",...}  ← 流总字节 + 首 4KB 抽样
         ```
@@ -242,6 +243,7 @@ body:
       placeholder: |
         {"ts":"2026-07-31T13:00:00.000Z","reqId":"#001","phase":"client_in","method":"POST","url":"http://localhost:8080/v1/chat/completions","headers":{...},"body":{...}}
         {"ts":"2026-07-31T13:00:00.100Z","reqId":"#001","phase":"upstream_out","method":"POST","url":"https://api.z.ai/api/coding/paas/v4/chat/completions","headers":{...},"body":{...},"upstreamFormat":"openai","translateMode":false,"startPlan":false}
+        {"ts":"2026-07-31T13:00:00.150Z","reqId":"#001","phase":"wire_out","url":"https://zcode.z.ai/api/v1/ultra-zai/chat/completions","signed":true,"headers":{...}}
         {"ts":"2026-07-31T13:00:01.000Z","reqId":"#001","phase":"upstream_in","status":200,"statusText":"OK","headers":{...},"isSSE":true,"ttfbMs":900}
         {"ts":"2026-07-31T13:00:05.000Z","reqId":"#001","phase":"upstream_stream_summary","status":200,"contentEncoding":null,"compressed":false,"totalBytes":12345,"tokensObserved":42,"firstBytesSample":"data: {...}\n\n"}
 
@@ -255,15 +257,14 @@ body:
     id: config
     attributes:
       label: config.yaml 关键片段（脱敏）
-      description: 只贴影响行为的字段（auth.mode / provider / plan / identity / clientIdentity 等）；**API key / proxy key / JWT 必须替换为 `<redacted>`**
+      description: 只贴影响行为的字段（auth.proxyApiKey / provider / plan / identity / clientIdentity 等）；**API key / proxy key / JWT 必须替换为 `<redacted>`**
       render: yaml
       placeholder: |
         auth:
-          mode: apikey   # 或 oauth
+          proxyApiKey: <redacted>   # 可选；不设则客户端免密
         provider: zai
         plan: start-plan   # 或 coding-plan
         identity:
-          appVersion: "3.3.3"
           sourceTitle: cli
           refererOrigin: https://zcode.z.ai
         # clientIdentity:  # 仅在用了 session affinity 时贴
@@ -275,7 +276,7 @@ body:
       label: 是否使用了 clientIdentity（session affinity）？
       description: 这会影响是否走 ordered-transport（raw TCP 保序）路径
       options:
-        - 未使用（默认 off）
+        - 未改动（默认 enforce）
         - observe 模式
         - enforce 模式（用 raw TCP）
         - 不确定
@@ -310,7 +311,6 @@ body:
 
         ⚠️ **再次检查脱敏**。提交前请确认：
 
-        - `auth.apiKey` / `providers.<p>.credential` → `<redacted>`
         - `auth.proxyApiKey` → `<redacted>`
         - dump 之外的客户端 raw 日志里 `Authorization: Bearer xxx` / `x-api-key: xxx` → `<redacted>`
         - OAuth JWT / refresh token → `<redacted>`

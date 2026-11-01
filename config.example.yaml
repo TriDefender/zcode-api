@@ -137,9 +137,12 @@ async:
 
 # Manual claim ("weekend plan") — mirrors the ZCode 3.10 desktop client's
 # manualClaimPlan feature. When enabled, the proxy periodically lists claimable
-# trial plans ({origin}/api/v1/zcode-plan/billing/preview) and auto-claims the
-# highest-priority one ({origin}/api/v1/zcode-plan/billing/claim) using the
-# OAuth JWT + an Aliyun captcha token (same solver as start-plan). Weekend
+# trial plans from both faces — {origin}/api/v1/zcode-plan/billing/preview
+# merged with marketing-banner plans ({origin}/api/v1/marketing/touch; deduped
+# by planId, preview wins) — and auto-claims the highest-priority one
+# ({origin}/api/v1/zcode-plan/billing/claim) using the OAuth JWT plus an
+# Aliyun captcha token when the campaign config requires one (same solver as
+# start-plan). Weekend
 # campaigns are quota-limited first-come-first-served; claimed plans activate
 # at the campaign's `starts_at` and land as Start-Plan quota.
 #
@@ -147,14 +150,15 @@ async:
 # `auth login`), and identity.appVersion must be >= the campaign's minimum
 # client version or the server rejects with `ineligible` — an app_version
 # below the floor can also surface as a silently empty preview list
-  # (measured floor 3.14.0 for the 2026-09 campaign; the built-in appVersion
-  # "3.16.3" satisfies it).
+# (measured floor 3.14.0 for the 2026-09 campaign; the built-in appVersion
+# "3.17.1" satisfies it).
 #
 # Env overrides: ZCODE_CLAIM_ENABLED, ZCODE_CLAIM_AUTO, ZCODE_CLAIM_ORIGIN,
 # ZCODE_CLAIM_POLL_INTERVAL_MS.
 claim:
-  # On by default: the scheduler polls the preview endpoint every 5 min and
-  # idles until a campaign goes live (404 preview = nothing to claim).
+  # On by default: the scheduler polls the merged plan list (billing preview +
+  # marketing banner) every 5 min and idles until a campaign goes live
+  # (404 preview = nothing to claim).
   # `false` = CLI-only (`zcode-proxy claim [list|now]` still works).
   enabled: true
   # Auto-claim in the background while serving. `false` = CLI-only

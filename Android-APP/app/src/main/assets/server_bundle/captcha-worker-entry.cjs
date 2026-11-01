@@ -95717,7 +95717,33 @@ function shutdownSyncFetchWorker() {
 var CDN_CACHE_DIR = import_node_path.default.join(import_node_os.default.homedir(), ".zcode-captcha-cdn-cache");
 var _memCdnCache = /* @__PURE__ */ new Map();
 var MEM_CDN_CACHE_CAP = 16;
+var SDK_XHR_TIMEOUT_PATTERN = "arguments[4]?arguments[4]:5e3";
+var SDK_XHR_TIMEOUT_REPLACEMENT = "arguments[4]?arguments[4]:30e3";
+var CAPTCHA_SCRIPT_PATCH_RE = /^https?:\/\/[^/]*alicdn\.com\/captcha-frontend\/(aliyunCaptcha\/AliyunCaptcha\.js|dynamicJS\/[^?]*\/pe\.\d+\.[^?]*\.js)(\?|$)/i;
+var _sdkTimeoutPatchWarned = false;
+function __patchSdkXhrTimeout(body2) {
+  try {
+    const src = typeof body2 === "string" ? body2 : body2.toString("utf8");
+    if (src.includes(SDK_XHR_TIMEOUT_REPLACEMENT)) return body2;
+    if (!src.includes(SDK_XHR_TIMEOUT_PATTERN)) {
+      if (!_sdkTimeoutPatchWarned) {
+        _sdkTimeoutPatchWarned = true;
+        process.stderr.write(
+          "[captcha] captcha-frontend js xhr-timeout pattern not found (SDK updated?) -- serving unpatched\n"
+        );
+      }
+      return body2;
+    }
+    return Buffer.from(
+      src.split(SDK_XHR_TIMEOUT_PATTERN).join(SDK_XHR_TIMEOUT_REPLACEMENT),
+      "utf8"
+    );
+  } catch (_) {
+    return body2;
+  }
+}
 function rememberCdnBody(url2, body2) {
+  if (CAPTCHA_SCRIPT_PATCH_RE.test(String(url2))) body2 = __patchSdkXhrTimeout(body2);
   _memCdnCache.set(url2, body2);
   if (_memCdnCache.size > MEM_CDN_CACHE_CAP) {
     for (const key of _memCdnCache.keys()) {
@@ -95917,112 +95943,42 @@ function storeSetCookies(res, url2) {
   } catch (_) {
   }
 }
+var _asyncRequestsInFlight = 0;
 function makeInterceptor(bypassPeCache = false) {
   const skipPeCache = (url2) => bypassPeCache && /dynamicJS\/.*\/pe\.\d+\./.test(url2);
   return {
     async beforeAsyncRequest({ request, window: w2 }) {
-      const url2 = request.url;
-      noteRequest({ at: Date.now(), method: request.method, url: url2 });
-      injectRequestHeaders(request);
-      if (/\balicdn\.com/i.test(url2)) {
-        let body2 = skipPeCache(url2) ? null : getCachedBody(url2);
-        if (body2 && /\.js(\?|$)/i.test(url2)) {
-          try {
-            new Function(body2.toString("utf8"));
-          } catch (parseErr) {
-            process.stderr.write(`[cache-bad-js] ${url2} len=${body2.length} ${parseErr.message} -- refetch fresh
-`);
-            _memCdnCache.delete(url2);
-            try {
-              import_node_fs.default.unlinkSync(diskPathFor(url2));
-            } catch (_) {
-            }
-            body2 = null;
-          }
-        }
-        if (body2) {
-          if (/dynamicJS\/[^/]*\/pe\.\d+\./.test(url2)) {
-            try {
-              w2.__lastPeUrl = url2;
-            } catch (_) {
-            }
-          }
-          return new w2.Response(patchPeBundle(Buffer.from(body2), url2), {
-            status: 200,
-            statusText: "OK",
-            headers: { "content-type": sniffMime(url2) }
-          });
-        }
-      }
+      _asyncRequestsInFlight += 1;
       try {
-        const init = { method: request.method, headers: {} };
-        request.headers.forEach((value2, key) => {
-          init.headers[key] = value2;
-        });
-        const bs = new URL(url2);
-        const cookie = cookieHeader(request, w2, global.__browserFrame);
-        if (cookie) init.headers.cookie = cookie;
-        let hasBody = false;
-        try {
-          if (request.body) {
-            const ab = await request.arrayBuffer();
-            if (ab && ab.byteLength > 0) {
-              init.body = ab;
-              hasBody = true;
-            }
-          }
-        } catch (_) {
-        }
-        const res = await solveFetch(url2, init);
-        const buf = Buffer.from(await res.arrayBuffer());
-        storeSetCookies(res, url2);
-        if (_DEBUG && /captcha-open|verify\.|device\.saf|cloudauth-device|upload\./i.test(url2) && buf.length && buf.length < 4096) {
-          try {
-            process.stderr.write(`[xhr-body] ${request.method} ${bs.hostname}${bs.pathname}-> ${res.status} ${buf.toString("utf8").slice(0, 1200)}
-`);
-          } catch (_) {
-          }
-        }
-        const headers2 = {};
-        const ct = res.headers.get("content-type");
-        if (ct) headers2["content-type"] = ct;
-        const logHost = bs.hostname;
-        if (_DEBUG)
-          process.stderr.write(
-            `[xhr] ${request.method} ${logHost}${bs.pathname} -> ${res.status} (${buf.length}b)
-`
-          );
-        return new w2.Response(buf, {
-          status: res.status,
-          statusText: res.statusText || "",
-          headers: headers2
-        });
-      } catch (err) {
-        if (_DEBUG) process.stderr.write(`[xhr-err] ${url2}: ${err.message}
-`);
-        return new w2.Response("", { status: 503, statusText: "passthrough failed" });
+        return await handleAsyncRequest({ request, window: w2, skipPeCache });
+      } finally {
+        _asyncRequestsInFlight -= 1;
       }
     },
-    beforeSyncRequest({ request, window: w2 }) {
-      const url2 = request.url;
-      noteRequest({ at: Date.now(), method: request.method, url: url2, sync: true });
-      injectRequestHeaders(request);
-      let body2 = null;
-      if (/\balicdn\.com/i.test(url2)) {
-        body2 = skipPeCache(url2) ? null : getCachedBody(url2);
-        if (body2 && /\.js(\?|$)/i.test(url2)) {
-          try {
-            new Function(body2.toString("utf8"));
-          } catch (parseErr) {
-            process.stderr.write(`[cache-bad-js:sync] ${url2} len=${body2.length} ${parseErr.message} -- refetch fresh
+    beforeSyncRequest(opts) {
+      return handleSyncRequest({ ...opts, skipPeCache });
+    }
+  };
+}
+async function handleAsyncRequest({ request, window: w2, skipPeCache }) {
+  {
+    const url2 = request.url;
+    noteRequest({ at: Date.now(), method: request.method, url: url2 });
+    injectRequestHeaders(request);
+    if (/\balicdn\.com/i.test(url2)) {
+      let body2 = skipPeCache(url2) ? null : getCachedBody(url2);
+      if (body2 && /\.js(\?|$)/i.test(url2)) {
+        try {
+          new Function(body2.toString("utf8"));
+        } catch (parseErr) {
+          process.stderr.write(`[cache-bad-js] ${url2} len=${body2.length} ${parseErr.message} -- refetch fresh
 `);
-            _memCdnCache.delete(url2);
-            try {
-              import_node_fs.default.unlinkSync(diskPathFor(url2));
-            } catch (_) {
-            }
-            body2 = null;
+          _memCdnCache.delete(url2);
+          try {
+            import_node_fs.default.unlinkSync(diskPathFor(url2));
+          } catch (_) {
           }
+          body2 = null;
         }
       }
       if (body2) {
@@ -96032,81 +95988,166 @@ function makeInterceptor(bypassPeCache = false) {
           } catch (_) {
           }
         }
-        return {
+        return new w2.Response(patchPeBundle(Buffer.from(body2), url2), {
           status: 200,
           statusText: "OK",
-          ok: true,
-          url: url2,
-          redirected: false,
-          headers: new w2.Headers({ "content-type": sniffMime(url2) }),
-          body: patchPeBundle(Buffer.from(body2), url2),
-          [PropertySymbol_exports.virtualServerFile]: null
-        };
+          headers: { "content-type": sniffMime(url2) }
+        });
       }
+    }
+    try {
       const init = { method: request.method, headers: {} };
       request.headers.forEach((value2, key) => {
         init.headers[key] = value2;
       });
+      const bs = new URL(url2);
       const cookie = cookieHeader(request, w2, global.__browserFrame);
       if (cookie) init.headers.cookie = cookie;
+      let hasBody = false;
       try {
         if (request.body) {
-          const ab = request.body;
-          if (ab && ab.byteLength > 0) init.body = ab;
+          const ab = await request.arrayBuffer();
+          if (ab && ab.byteLength > 0) {
+            init.body = ab;
+            hasBody = true;
+          }
         }
       } catch (_) {
       }
-      const res = syncFetchBlocking(url2, init);
-      if (res.error) {
-        process.stderr.write(`[sync-xhr-err] ${url2}: ${res.error}
+      const res = await solveFetch(url2, init);
+      let buf = Buffer.from(await res.arrayBuffer());
+      if (CAPTCHA_SCRIPT_PATCH_RE.test(url2)) buf = __patchSdkXhrTimeout(buf);
+      storeSetCookies(res, url2);
+      if (_DEBUG && /captcha-open|verify\.|device\.saf|cloudauth-device|upload\./i.test(url2) && buf.length && buf.length < 4096) {
+        try {
+          process.stderr.write(`[xhr-body] ${request.method} ${bs.hostname}${bs.pathname}-> ${res.status} ${buf.toString("utf8").slice(0, 1200)}
 `);
-        return new w2.Response("", { status: 503, statusText: "sync fetch failed" });
-      }
-      try {
-        for (const raw of res.setCookie || []) {
-          const cookieContainer = global.__cookieContainer;
-          if (!cookieContainer) break;
-          const u = new URL(url2);
-          const parts = raw.split(";");
-          const pair = parts[0].split("=");
-          const cookie2 = {
-            name: pair[0].trim(),
-            value: pair.slice(1).join("=").trim(),
-            url: u.origin,
-            domain: u.hostname,
-            path: "/"
-          };
-          for (const p of parts.slice(1)) {
-            const kv = p.trim().split(/=(.*)/s);
-            const k = (kv[0] || "").toLowerCase();
-            if (k === "domain" && kv[1]) cookie2.domain = kv[1];
-            if (k === "path" && kv[1]) cookie2.path = kv[1];
-            if (k === "expires") cookie2.expires = new Date(kv[1]).getTime();
-            if (k === "max-age") cookie2.maxAge = parseInt(kv[1], 10);
-            if (k === "httponly") cookie2.httpOnly = true;
-            if (k === "secure") cookie2.secure = true;
-            if (k === "samesite") cookie2.sameSite = kv[1];
-          }
-          try {
-            cookieContainer.addCookies([cookie2]);
-          } catch (_) {
-          }
+        } catch (_) {
         }
-      } catch (_) {
       }
-      const hdrs = {};
-      for (const [k, v] of Object.entries(res.headers || {})) hdrs[k] = String(v);
-      return {
+      const headers2 = {};
+      const ct = res.headers.get("content-type");
+      if (ct) headers2["content-type"] = ct;
+      const logHost = bs.hostname;
+      if (_DEBUG)
+        process.stderr.write(
+          `[xhr] ${request.method} ${logHost}${bs.pathname} -> ${res.status} (${buf.length}b)
+`
+        );
+      return new w2.Response(buf, {
         status: res.status,
         statusText: res.statusText || "",
-        ok: res.status >= 200 && res.status < 300,
-        url: url2,
-        redirected: false,
-        headers: new w2.Headers(hdrs),
-        body: Buffer.from(res.body),
-        [PropertySymbol_exports.virtualServerFile]: null
-      };
+        headers: headers2
+      });
+    } catch (err) {
+      if (_DEBUG) process.stderr.write(`[xhr-err] ${url2}: ${err.message}
+`);
+      return new w2.Response("", { status: 503, statusText: "passthrough failed" });
     }
+  }
+}
+function handleSyncRequest({ request, window: w2, skipPeCache }) {
+  const url2 = request.url;
+  noteRequest({ at: Date.now(), method: request.method, url: url2, sync: true });
+  injectRequestHeaders(request);
+  let body2 = null;
+  if (/\balicdn\.com/i.test(url2)) {
+    body2 = skipPeCache(url2) ? null : getCachedBody(url2);
+    if (body2 && /\.js(\?|$)/i.test(url2)) {
+      try {
+        new Function(body2.toString("utf8"));
+      } catch (parseErr) {
+        process.stderr.write(`[cache-bad-js:sync] ${url2} len=${body2.length} ${parseErr.message} -- refetch fresh
+`);
+        _memCdnCache.delete(url2);
+        try {
+          import_node_fs.default.unlinkSync(diskPathFor(url2));
+        } catch (_) {
+        }
+        body2 = null;
+      }
+    }
+  }
+  if (body2) {
+    if (/dynamicJS\/[^/]*\/pe\.\d+\./.test(url2)) {
+      try {
+        w2.__lastPeUrl = url2;
+      } catch (_) {
+      }
+    }
+    return {
+      status: 200,
+      statusText: "OK",
+      ok: true,
+      url: url2,
+      redirected: false,
+      headers: new w2.Headers({ "content-type": sniffMime(url2) }),
+      body: patchPeBundle(Buffer.from(body2), url2),
+      [PropertySymbol_exports.virtualServerFile]: null
+    };
+  }
+  const init = { method: request.method, headers: {} };
+  request.headers.forEach((value2, key) => {
+    init.headers[key] = value2;
+  });
+  const cookie = cookieHeader(request, w2, global.__browserFrame);
+  if (cookie) init.headers.cookie = cookie;
+  try {
+    if (request.body) {
+      const ab = request.body;
+      if (ab && ab.byteLength > 0) init.body = ab;
+    }
+  } catch (_) {
+  }
+  const res = syncFetchBlocking(url2, init);
+  if (res.error) {
+    process.stderr.write(`[sync-xhr-err] ${url2}: ${res.error}
+`);
+    return new w2.Response("", { status: 503, statusText: "sync fetch failed" });
+  }
+  try {
+    for (const raw of res.setCookie || []) {
+      const cookieContainer = global.__cookieContainer;
+      if (!cookieContainer) break;
+      const u = new URL(url2);
+      const parts = raw.split(";");
+      const pair = parts[0].split("=");
+      const cookie2 = {
+        name: pair[0].trim(),
+        value: pair.slice(1).join("=").trim(),
+        url: u.origin,
+        domain: u.hostname,
+        path: "/"
+      };
+      for (const p of parts.slice(1)) {
+        const kv = p.trim().split(/=(.*)/s);
+        const k = (kv[0] || "").toLowerCase();
+        if (k === "domain" && kv[1]) cookie2.domain = kv[1];
+        if (k === "path" && kv[1]) cookie2.path = kv[1];
+        if (k === "expires") cookie2.expires = new Date(kv[1]).getTime();
+        if (k === "max-age") cookie2.maxAge = parseInt(kv[1], 10);
+        if (k === "httponly") cookie2.httpOnly = true;
+        if (k === "secure") cookie2.secure = true;
+        if (k === "samesite") cookie2.sameSite = kv[1];
+      }
+      try {
+        cookieContainer.addCookies([cookie2]);
+      } catch (_) {
+      }
+    }
+  } catch (_) {
+  }
+  const hdrs = {};
+  for (const [k, v] of Object.entries(res.headers || {})) hdrs[k] = String(v);
+  return {
+    status: res.status,
+    statusText: res.statusText || "",
+    ok: res.status >= 200 && res.status < 300,
+    url: url2,
+    redirected: false,
+    headers: new w2.Headers(hdrs),
+    body: CAPTCHA_SCRIPT_PATCH_RE.test(url2) ? __patchSdkXhrTimeout(Buffer.from(res.body)) : Buffer.from(res.body),
+    [PropertySymbol_exports.virtualServerFile]: null
   };
 }
 var GUEST_TIMER_PROPS = ["setTimeout", "setInterval", "clearTimeout", "clearInterval"];
@@ -98040,10 +98081,10 @@ async function solveTraceless(opts) {
         const reqs = _requestLog.filter((r2) => r2.at >= solveStart).map((r2) => `${r2.at - solveStart}ms ${r2.method} ${String(r2.url).replace(/^https?:\/\//, "").slice(0, 60)}`).slice(-12);
         reject(new Error(`captcha solve timeout pe=${peUrl.split("/").pop() || peUrl} reqs=${JSON.stringify(reqs)}`));
       }, timeoutMs);
-      const stallMs = opts.stallMs ?? Number(process.env.CAPTCHA_STALL_MS || 6e3);
+      const stallMs = opts.stallMs ?? Number(process.env.CAPTCHA_STALL_MS || 12e3);
       const stallTimer = setInterval(() => {
         const last = _requestLog[_requestLog.length - 1];
-        if (last && Date.now() - last.at > stallMs) {
+        if (last && Date.now() - last.at > stallMs && _asyncRequestsInFlight === 0) {
           const peUrl = (() => {
             try {
               return w2.__lastPeUrl || "?";

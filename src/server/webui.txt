@@ -351,7 +351,7 @@
             <div class="c-actions">
               <div class="think-bar">
                 <button class="pill" id="btn-think" type="button" title="Toggle deep thinking">Think: on</button>
-                <select id="reasoning-effort" title="Reasoning effort (GLM-5.2+)"></select>
+                <select id="reasoning-effort" title="Reasoning effort: low / high / max"></select>
               </div>
               <button class="c-btn attach" id="btn-attach" title="Attach image (vision models)" hidden>&#128206;</button>
               <button class="c-btn send" id="btn-send" title="Send">&#8593;</button>
@@ -1383,20 +1383,22 @@
         }
         saveState(); syncAttachVisibility(); populateEffort();
       };
-      // GLM-5.2 only has two distinct reasoning-effort levels (low/medium map
-      // to high, xhigh maps to max), so expose just high and max. Other models
-      // get a disabled placeholder (reasoning_effort is GLM-5.2+ only).
+      // GLM-5.3 family exposes all three legal effort levels (low/high/max,
+      // each paired with a thinking budget server-side — see GLM53_EFFORT_LEVELS
+      // in src/provider/reasoning.ts). Every advertised model is 5.3 family, so
+      // the dropdown is never model-dependent. Non-reasoning models get a
+      // disabled placeholder (reasoning_effort is GLM-5.2+ only).
       function populateEffort() {
         var model = modelSel.value;
         effortSel.innerHTML = "";
         if (isReasoningModel(model)) {
-          ["max", "high"].forEach(function (v) {
+          ["low", "high", "max"].forEach(function (v) {
             var o = document.createElement("option");
             o.value = v; o.textContent = v;
             effortSel.appendChild(o);
           });
           var cur = state.settings.reasoningEffort;
-          effortSel.value = (cur === "high") ? "high" : "max";
+          effortSel.value = (cur === "low" || cur === "high") ? cur : "max";
           effortSel.disabled = !state.settings.thinkingEnabled;
         } else {
           var o = document.createElement("option");

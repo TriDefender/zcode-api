@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { GlobalWindow } from "happy-dom";
 import {
   __captchaMemStats,
+  __cdnCacheGet,
+  __patchSdkXhrTimeout,
   __realmGlobalsLifecycle,
   createDom,
   destroyDom,
@@ -405,5 +407,58 @@ describe("realm globals lifecycle (Node bridge, descriptor contract)", () => {
     } finally {
       restore();
     }
+  });
+});
+
+describe("captcha-frontend js xhr-timeout patch (F008 mobile fix)", () => {
+  // The 5s default XHR timeout (AliyunCaptcha.js AND the rotated pe VM
+  // bundles — the verify POST goes through the pe copy) made mobile verify
+  // POSTs (>5s) time out and re-submit the same certifyId -> Aliyun F008
+  // duplicate-verify. The patch raises the default to 30s; these pins hold
+  // the exact bare byte pattern (single occurrence per bundle, 3.29.0) and
+  // the fail-open contract.
+  const RAW =
+    'a=arguments.length>4&&void 0!==arguments[4]?arguments[4]:5e3;return e.timeout=i,' +
+    'b=arguments.length>4&&void 0!==arguments[4]?arguments[4]:5e3,o=arguments.length>5;return r.timeout=a';
+
+  test("raises the hardcoded 5s default to 30s in both bundle variants", () => {
+    const out = __patchSdkXhrTimeout(Buffer.from(RAW, "utf8"));
+    const s = Buffer.from(out).toString("utf8");
+    expect(s).toContain("arguments[4]?arguments[4]:30e3;return e.timeout=i");
+    expect(s).toContain("arguments[4]?arguments[4]:30e3,o=arguments.length>5");
+    expect(s).not.toContain("arguments[4]?arguments[4]:5e3");
+    // Only the timeout literals changed -- surrounding bytes untouched.
+    expect(s.startsWith("a=arguments.length>4")).toBe(true);
+    expect(s.endsWith("return r.timeout=a")).toBe(true);
+    expect(s.match(/30e3/g)?.length).toBe(2);
+  });
+
+  test("is idempotent (already-patched body passes through)", () => {
+    const once = Buffer.from(__patchSdkXhrTimeout(Buffer.from(RAW, "utf8"))).toString("utf8");
+    const twice = Buffer.from(__patchSdkXhrTimeout(Buffer.from(once, "utf8"))).toString("utf8");
+    expect(twice).toBe(once);
+  });
+
+  test("fail-open: pattern absent (SDK update) returns body unchanged", () => {
+    const updated = Buffer.from("new SDK bundle without the pattern; 1e3 elsewhere", "utf8");
+    expect(Buffer.from(__patchSdkXhrTimeout(updated)).equals(updated)).toBe(true);
+  });
+
+  test("accepts string input (returns Buffer like every cache body)", () => {
+    const out = __patchSdkXhrTimeout(RAW);
+    expect(out).toBeInstanceOf(Buffer);
+    expect(out.toString("utf8")).toContain("30e3");
+  });
+
+  test("rememberCdnBody funnel patches captcha-frontend js (SDK + pe), not others", () => {
+    rememberCdnBody("https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js", Buffer.from(RAW, "utf8"));
+    rememberCdnBody("https://g.alicdn.com/captcha-frontend/dynamicJS/3.29.0/pe.071.x.js", Buffer.from(RAW, "utf8"));
+    rememberCdnBody("https://example.com/some/other/script.js", Buffer.from(RAW, "utf8"));
+    expect(Buffer.from(__cdnCacheGet("https://o.alicdn.com/captcha-frontend/aliyunCaptcha/AliyunCaptcha.js")).toString("utf8")).toContain("30e3");
+    // pe bundles are captcha-frontend js too -- the verify POST runs on the
+    // pe copy of the xhr helper, so the funnel must patch them as well.
+    expect(Buffer.from(__cdnCacheGet("https://g.alicdn.com/captcha-frontend/dynamicJS/3.29.0/pe.071.x.js")).toString("utf8")).toContain("30e3");
+    // Unrelated scripts store verbatim.
+    expect(Buffer.from(__cdnCacheGet("https://example.com/some/other/script.js")).toString("utf8")).toContain(":5e3");
   });
 });
