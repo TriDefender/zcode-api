@@ -28,8 +28,6 @@ interface ResponsesReasoning {
 export interface ResponsesContentPart {
   type: "input_text" | "output_text" | "text" | "input_image" | "image_url" | "summary_text" | "input_video" | "video_url" | "input_file" | "file";
   text?: string;
-  /** Output-text annotations — required (empty array) on the wire for output parts. */
-  annotations?: unknown[];
   image_url?: string | { url: string; detail?: string };
   /** Video part (`input_video`/`video_url`): data URL or http(s) URL. */
   video_url?: string | { url: string };
@@ -39,6 +37,17 @@ export interface ResponsesContentPart {
   file_data?: string;
   file?: { filename?: string; file_data?: string };
   filename?: string;
+}
+
+/**
+ * An `output_text` part inside a Responses output message. `annotations` is
+ * required on the wire (the Responses client deserializes OutputTextContent
+ * with no serde default) — always emit it, as `[]` when empty.
+ */
+export interface ResponsesOutputTextPart {
+  type: "output_text";
+  text: string;
+  annotations: unknown[];
 }
 
 /** Tool definitions on a Responses request. */
@@ -99,11 +108,13 @@ export interface ResponsesRequest {
 
 export interface ResponsesUsage {
   input_tokens: number;
-  // Required on the wire: the Responses client treats both detail objects as
-  // mandatory (serde `missing field` otherwise) — always emit them.
-  input_tokens_details: { cached_tokens?: number };
+  // Required on the wire: the Responses client treats both detail objects —
+  // and their inner token counts — as mandatory (serde `missing field`
+  // otherwise) — always emit them. `0` means "absent upstream", not a
+  // measured count (see chatUsageToResponsesUsage).
+  input_tokens_details: { cached_tokens: number };
   output_tokens: number;
-  output_tokens_details: { reasoning_tokens?: number };
+  output_tokens_details: { reasoning_tokens: number };
   total_tokens: number;
 }
 

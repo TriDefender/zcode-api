@@ -231,9 +231,17 @@ function chatUsageToResponsesUsage(u: OpenAIUsage): ResponsesUsage {
   // The Responses client (async-openai) deserializes ResponseUsage with ALL
   // five fields required — an absent `input_tokens_details` / `output_tokens_details`
   // fails the whole turn with `missing field \`input_tokens_details\``. Both detail
-  // objects are therefore always emitted; the upstream Chat usage may omit them
-  // (Anthropic translator only reports cache buckets when the upstream sends them,
-  // and never reports reasoning tokens).
+  // objects (and their inner counts) are therefore always emitted.
+  //
+  // SEMANTICS OF 0: an emitted `cached_tokens: 0` / `reasoning_tokens: 0`
+  // means "upstream did not report this breakdown", NOT a measured zero.
+  // The Anthropic translation layer only reports cache buckets when the
+  // upstream sends them and never reports reasoning tokens, so responses
+  // containing reasoning can legitimately show `reasoning_tokens: 0`.
+  // This fallback keeps the three known totals (input/output/total) instead
+  // of omitting the whole usage object — a deliberate tradeoff, and a
+  // semantic change from "field absent" to "field present with 0" for
+  // clients that consume these numbers.
   return {
     input_tokens: u.prompt_tokens ?? 0,
     input_tokens_details: { cached_tokens: u.prompt_tokens_details?.cached_tokens ?? 0 },

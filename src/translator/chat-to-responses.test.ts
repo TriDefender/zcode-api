@@ -53,7 +53,8 @@ describe("chatCompletionsToResponses (batch)", () => {
     const r = chatCompletionsToResponses(chatResp(), "glm-5.2");
     expect(r.status).toBe("completed");
     expect(r.output[0].type).toBe("message");
-    expect((r.output[0] as { content: { type: string; text: string }[] }).content[0]).toEqual({ type: "output_text", text: "hello", annotations: [] });
+    const content = (r.output[0] as unknown as { content: { type: string; text: string; annotations: unknown[] }[] }).content;
+    expect(content[0]).toEqual({ type: "output_text", text: "hello", annotations: [] });
   });
 
   it("carries cache-inclusive Chat usage into the Responses usage details", () => {
@@ -357,6 +358,8 @@ describe("streaming", () => {
 // here is deserialized WITHOUT a serde default by the Responses client: an
 // absent field fails the whole turn (`missing field \`x\``). Keep these in
 // sync with the wire contract the client enforces.
+// Target events are asserted to EXIST first — a filter-based loop that matches
+// nothing would pass vacuously and stop guarding the contract it pins.
 // ─────────────────────────────────────────────
 describe("client-required wire fields", () => {
   it("stream: every output_text part carries text and annotations", () => {
@@ -365,18 +368,35 @@ describe("client-required wire fields", () => {
       ...chatChunkToResponsesEvents(chunk({ choices: [{ index: 0, delta: { content: "hi" } }] }), state),
       ...finalizeResponsesStream(state),
     ];
-    for (const e of events) {
-      if (e.type === "response.output_item.added" || e.type === "response.output_item.done") {
-        if (e.item.type !== "message") continue;
-        for (const part of (e.item as { content: Record<string, unknown>[] }).content) {
-          expect(part).toHaveProperty("text");
-          expect(part).toHaveProperty("annotations");
-        }
+    const itemEvents = events.filter(
+      (e) => (e.type === "response.output_item.added" || e.type === "response.output_item.done") && e.item.type === "message",
+    );
+    const partEvents = events.filter(
+      (e) => e.type === "response.content_part.added" || e.type === "response.content_part.done",
+    );
+    // The target events must be present — otherwise the assertions below are vacuous.
+    expect(itemEvents.length).toBeGreaterThanOrEqual(2);
+    expect(partEvents.length).toBe(2);
+    for (const e of itemEvents) {
+      const content = (e.item as unknown as { content: Record<string, unknown>[] }).content;
+      for (const part of content) {
+        expect(part).toHaveProperty("text");
+        expect(part).toHaveProperty("annotations");
       }
-      if (e.type === "response.content_part.added" || e.type === "response.content_part.done") {
-        expect(e.part).toHaveProperty("text");
-        expect(e.part).toHaveProperty("annotations");
-      }
+    }
+    for (const e of partEvents) {
+      if (e.type !== "response.content_part.added" && e.type !== "response.content_part.done") continue;
+      expect(e.part).toHaveProperty("text");
+      expect(e.part).toHaveProperty("annotations");
+    }
+    // Terminal `response.output` message carries the same fields.
+    const terminal = events.find(e => e.type === "response.completed");
+    if (terminal?.type !== "response.completed") throw new Error("missing completed event");
+    const outMsg = terminal.response.output.find(i => i.type === "message") as unknown as { content: Record<string, unknown>[] };
+    expect(outMsg).toBeDefined();
+    for (const part of outMsg.content) {
+      expect(part).toHaveProperty("text");
+      expect(part).toHaveProperty("annotations");
     }
   });
 
@@ -387,30 +407,69 @@ describe("client-required wire fields", () => {
       ...chatChunkToResponsesEvents(chunk({ choices: [{ index: 0, delta: { content: "done" }, finish_reason: "stop" }] }), state),
       ...finalizeResponsesStream(state),
     ];
-    for (const e of events) {
-      if (e.type === "response.output_item.added" || e.type === "response.output_item.done") {
-        if (e.item.type !== "reasoning") continue;
-        expect((e.item as { summary?: unknown[] }).summary).toBeInstanceOf(Array);
-      }
-      if (e.type === "response.reasoning_summary_part.added" || e.type === "response.reasoning_summary_part.done") {
-        expect(e.part).toHaveProperty("text");
-      }
+    const itemEvents = events.filter(
+      (e) => (e.type === "response.output_item.added" || e.type === "response.output_item.done") && e.item.type === "reasoning",
+    );
+    const partEvents = events.filter(
+      (e) => e.type === "response.reasoning_summary_part.added" || e.type === "response.reasoning_summary_part.done",
+    );
+    expect(itemEvents.length).toBe(2);
+    expect(partEvents.length).toBe(2);
+    for (const e of itemEvents) {
+      const summary = (e.item as unknown as { summary?: unknown[] }).summary;
+      expect(summary).toBeInstanceOf(Array);
     }
+    for (const e of partEvents) {
+      if (e.type !== "response.reasoning_summary_part.added" && e.type !== "response.reasoning_summary_part.done") continue;
+      expect(e.part).toHaveProperty("text");
+    }
+    // Terminal `response.output` reasoning item carries a non-empty summary with text.
+    const terminal = events.find(e => e.type === "response.completed");
+    if (terminal?.type !== "response.completed") throw new Error("missing completed event");
+    const outReasoning = terminal.response.output.find(i => i.type === "reasoning") as unknown as { summary: Record<string, unknown>[] };
+    expect(outReasoning).toBeDefined();
+    expect(outReasoning.summary.length).toBeGreaterThan(0);
+    expect(outReasoning.summary[0]).toHaveProperty("text");
   });
 
-  it("stream: function_call items always carry arguments", () => {
-    const state = newResponsesStreamState("glm-5.2");
+  it("stream: function_call items always carry arguments (plain and namespaced)", () => {
+    const state = newResponsesStreamState("glm-5.2", {
+      meta: { customToolNames: new Set(), namespaceMap: new Map([["gmail__send", { namespace: "gmail", name: "send" }]]), hasToolSearch: false },
+    });
     const events = [
       ...chatChunkToResponsesEvents(chunk({ choices: [{ index: 0, delta: { tool_calls: [
         { index: 0, id: "c0", function: { name: "fn", arguments: "{\"a\":1}" } },
       ] } }] }), state),
+      ...chatChunkToResponsesEvents(chunk({ choices: [{ index: 0, delta: { tool_calls: [
+        { index: 1, id: "c1", function: { name: "gmail__send", arguments: "{}" } },
+      ] } }] }), state),
       ...finalizeResponsesStream(state),
     ];
-    for (const e of events) {
-      if (e.type === "response.output_item.added" || e.type === "response.output_item.done") {
-        if (e.item.type !== "function_call") continue;
-        expect((e.item as { arguments?: string }).arguments).toBeTypeOf("string");
-      }
+    const added = events.filter((e) => e.type === "response.output_item.added" && e.item.type === "function_call");
+    const done = events.filter((e) => e.type === "response.output_item.done" && e.item.type === "function_call");
+    // Both the plain and the namespaced branch must be exercised.
+    expect(added.length).toBe(2);
+    expect(done.length).toBe(2);
+    for (const e of added) {
+      const args = (e.item as unknown as { arguments?: string }).arguments;
+      expect(args).toBeTypeOf("string");
+    }
+    for (const e of done) {
+      const args = (e.item as unknown as { arguments?: string }).arguments;
+      expect(args).toBeTypeOf("string");
+      expect(args!.length).toBeGreaterThan(0);
+    }
+    const namespaced = done.find(e => (e.item as unknown as { namespace?: string }).namespace === "gmail");
+    expect(namespaced).toBeDefined();
+    // Terminal `response.output` function_call items carry final arguments.
+    const terminal = events.find(e => e.type === "response.completed");
+    if (terminal?.type !== "response.completed") throw new Error("missing completed event");
+    const outCalls = terminal.response.output.filter(i => i.type === "function_call");
+    expect(outCalls.length).toBe(2);
+    for (const call of outCalls) {
+      const args = (call as unknown as { arguments?: string }).arguments;
+      expect(args).toBeTypeOf("string");
+      expect(args!.length).toBeGreaterThan(0);
     }
   });
 
@@ -419,8 +478,10 @@ describe("client-required wire fields", () => {
     // Upstream Chat usage WITHOUT any details — the shape that used to fail.
     const usage = { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 };
     chatChunkToResponsesEvents(chunk({ usage, choices: [] }), state);
-    const terminal = finalizeResponsesStream(state).find(e => e.type === "response.completed");
-    if (terminal?.type !== "response.completed") throw new Error("missing completed event");
+    const terminalEvents = finalizeResponsesStream(state).filter(e => e.type === "response.completed");
+    expect(terminalEvents.length).toBe(1);
+    const terminal = terminalEvents[0];
+    if (terminal.type !== "response.completed") throw new Error("missing completed event");
     expect(terminal.response.usage).toEqual({
       input_tokens: 7,
       input_tokens_details: { cached_tokens: 0 },
@@ -430,17 +491,38 @@ describe("client-required wire fields", () => {
     });
   });
 
+  it("stream: preserves non-zero cached_tokens / reasoning_tokens from upstream usage", () => {
+    const state = newResponsesStreamState("glm-5.2");
+    const usage = {
+      prompt_tokens: 1224, completion_tokens: 5, total_tokens: 1229,
+      prompt_tokens_details: { cached_tokens: 1216 },
+      completion_tokens_details: { reasoning_tokens: 3 },
+    };
+    chatChunkToResponsesEvents(chunk({ usage, choices: [] }), state);
+    const terminalEvents = finalizeResponsesStream(state).filter(e => e.type === "response.completed");
+    expect(terminalEvents.length).toBe(1);
+    const terminal = terminalEvents[0];
+    if (terminal.type !== "response.completed") throw new Error("missing completed event");
+    expect(terminal.response.usage).toEqual({
+      input_tokens: 1224,
+      input_tokens_details: { cached_tokens: 1216 },
+      output_tokens: 5,
+      output_tokens_details: { reasoning_tokens: 3 },
+      total_tokens: 1229,
+    });
+  });
+
   it("batch: reasoning + message + usage fields satisfy the client contract", () => {
     const r = chatCompletionsToResponses({
-      id: "c", object: "chat.completion", model: "glm-5.2",
+      id: "c", object: "chat.completion", created: 1, model: "glm-5.2",
       choices: [{ index: 0, finish_reason: "stop", message: {
         role: "assistant", content: "answer", reasoning_content: "why",
       } }],
       usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 },
     }, "glm-5.2");
-    const reasoning = r.output.find(i => i.type === "reasoning") as { summary: Record<string, unknown>[] };
+    const reasoning = r.output.find(i => i.type === "reasoning") as unknown as { summary: Record<string, unknown>[] };
     expect(reasoning.summary[0]).toHaveProperty("text");
-    const message = r.output.find(i => i.type === "message") as { content: Record<string, unknown>[] };
+    const message = r.output.find(i => i.type === "message") as unknown as { content: Record<string, unknown>[] };
     expect(message.content[0]).toHaveProperty("annotations");
     expect(message.content[0]).toHaveProperty("text");
     expect(r.usage?.input_tokens_details).toEqual({ cached_tokens: 0 });
