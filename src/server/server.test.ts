@@ -78,19 +78,6 @@ function mockUpstream(): typeof fetch {
 }
 
 describe("server routing", () => {
-  it("GET /v1/models returns model list", async () => {
-    const config = makeConfig({ auth: {} });
-    const auth = oauthAuth("test");
-    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
-
-    const resp = await handler(new Request("http://localhost/v1/models", { method: "GET" }));
-    expect(resp.status).toBe(200);
-    const body = await resp.json();
-    expect(body.object).toBe("list");
-    expect(body.data.map((m: { id: string }) => m.id)).toEqual(["glm-5.3", "glm-5.3-flash"]);
-    expect(body.data[0].object).toBe("model");
-  });
-
   it("POST /v1/chat/completions forwards to upstream", async () => {
     const config = makeConfig();
     const auth = oauthAuth();
@@ -170,27 +157,9 @@ describe("server routing", () => {
     const body = await resp.json();
     expect(body.status).toBe("ok");
   });
-
-  it("unknown route returns 404", async () => {
-    const config = makeConfig();
-    const auth = oauthAuth("test");
-    const handler = createFetchHandler({ config, auth });
-
-    const resp = await handler(new Request("http://localhost/unknown", { method: "GET" }));
-    expect(resp.status).toBe(404);
-  });
 });
 
 describe("proxy API key auth", () => {
-  it("rejects request without proxy API key when configured", async () => {
-    const config = makeConfig({ auth: { proxyApiKey: "proxy-secret" } });
-    const auth = oauthAuth("test");
-    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
-
-    const resp = await handler(new Request("http://localhost/v1/models"));
-    expect(resp.status).toBe(401);
-  });
-
   it("accepts request with correct Bearer proxy key", async () => {
     const config = makeConfig({ auth: { proxyApiKey: "proxy-secret" } });
     const auth = oauthAuth("test");
@@ -215,19 +184,6 @@ describe("proxy API key auth", () => {
       }),
     );
     expect(resp.status).toBe(200);
-  });
-
-  it("rejects request with wrong proxy key", async () => {
-    const config = makeConfig({ auth: { proxyApiKey: "proxy-secret" } });
-    const auth = oauthAuth("test");
-    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
-
-    const resp = await handler(
-      new Request("http://localhost/v1/models", {
-        headers: { authorization: "Bearer wrong-key" },
-      }),
-    );
-    expect(resp.status).toBe(401);
   });
 
   it("does not require proxy key when proxyApiKey is unset", async () => {

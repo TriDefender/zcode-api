@@ -131,11 +131,6 @@ describe("buildZcodeTraceHeaders", () => {
     expect(h["x-query-id"]).toBeUndefined();
     expect(h["x-session-id"]).toBeUndefined();
   });
-
-  it("honors an explicit sessionType override", () => {
-    const h = buildZcodeTraceHeaders({ requestId: "req_1", traceId: "trace_1", sessionType: "other" });
-    expect(h["x-zcode-session-type"]).toBe("other");
-  });
 });
 describe("buildAuthHeaders", () => {
   it("injects x-api-key + anthropic-version for Anthropic", () => {

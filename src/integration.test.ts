@@ -457,7 +457,10 @@ describe("integration: Models endpoint", () => {
     expect(resp.status).toBe(200);
     const body = await resp.json();
     expect(body.object).toBe("list");
-    expect(body.data.length).toBeGreaterThan(0);
+    // exact advertised set (was pinned in server.test.ts; consolidated to this
+    // real-socket e2e when the unit-side smoke duplicate was removed)
+    expect(body.data.map((m: { id: string }) => m.id)).toEqual(["glm-5.3", "glm-5.3-flash"]);
+    expect(body.data[0].object).toBe("model");
   });
 });
 

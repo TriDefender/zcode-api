@@ -53,6 +53,9 @@ describe("buildZcodeTraceHeaders — session-type derivation (gateway system-sha
     const h = buildZcodeTraceHeaders({ sessionType: "subagent" });
     expect(h["x-zcode-session-type"]).toBe("subagent");
     expect(h["x-session-id"]).toBeUndefined();
+    // "other" branch of the resolveSessionType whitelist — consolidated here
+    // from upstream.test.ts so the pure-function seam owns all its coverage.
+    expect(buildZcodeTraceHeaders({ sessionType: "other" })["x-zcode-session-type"]).toBe("other");
   });
 
   it("explicit sessionType beats a contradicting session-id prefix", () => {

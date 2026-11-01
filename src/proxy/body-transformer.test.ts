@@ -290,17 +290,15 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
 
     const out = withEnvPromptVars(() => transformRequestBody(body, { format: "anthropic", startPlan: true, provider: "bigmodel" }));
     const parsed = JSON.parse(out as string);
-    // §J unified rules (2026-10-27): block 2 must only OPEN with the full
-    // stable text and block 3 is unconstrained — C1 puts the client text in
-    // block 3 so block 2 stays byte-exact pure stable.
+    // Wiring-level assertions only: the byte-exact block shapes (cli_prefix,
+    // stable-block tail, ephemeral breakpoints) are pinned at the
+    // buildStartPlanSystem seam (system-prompt.test.ts). Here we verify the
+    // transformer routes the client text through that seam — §J rules
+    // (2026-10-27); negative suppression per the AGENTS.md convention.
     expect(parsed.system).toHaveLength(3);
-    expect(parsed.system[0]).toEqual({ type: "text", text: "You are ZCode, an interactive agent" });
-    expect(parsed.system[1].cache_control).toEqual({ type: "ephemeral" });
     expect(parsed.system[1].text).toContain("working with the user toward their goals");
-    expect(parsed.system[1].text.endsWith(" - Reference code as `file_path:line_number` — it's clickable.")).toBe(true);
     expect(parsed.system[1].text).not.toContain("User rule");
     expect(parsed.system[2].text).toBe("\n\nUser rule");
-    expect(parsed.system[2].cache_control).toEqual({ type: "ephemeral" });
   });
 
   it("system blocks stay env-free regardless of body.model presence (3.17.1 meta_user move)", () => {
@@ -332,7 +330,6 @@ describe("transformRequestBody — start-plan system (Anthropic)", () => {
     const parsed = JSON.parse(out as string);
 
     expect(parsed.system).toHaveLength(3);
-    expect(parsed.system[1].text.endsWith(" - Reference code as `file_path:line_number` — it's clickable.")).toBe(true);
     expect(parsed.system[1].text).not.toContain("User rule");
     expect(parsed.system[2].text).toBe("\n\nUser rule");
   });

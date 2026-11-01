@@ -393,33 +393,6 @@ function getCachedBody(url) {
   return null;
 }
 
-async function fetchAndStore(url) {
-  try {
-    const res = await fetch(url, { headers: { "user-agent": fp.userAgent } });
-    const buf = Buffer.from(await res.arrayBuffer());
-    if (buf.length > 0) {
-      rememberCdnBody(url, buf);
-      try {
-        const p = diskPathFor(url);
-        fs.mkdirSync(CDN_CACHE_DIR, { recursive: true });
-        fs.writeFileSync(p, buf);
-        // verify write completed (no partial file)
-        const stat = fs.statSync(p);
-        if (stat.size !== buf.length) {
-          process.stderr.write(`[cache-write-short] ${url} wrote ${stat.size}/${buf.length}b -- rewrite\n`);
-          fs.writeFileSync(p, buf);
-        }
-      } catch (err) {
-        if (_DEBUG) process.stderr.write(`[cache-write-err] ${url}: ${err.message}\n`);
-      }
-    }
-    return buf;
-  } catch (err) {
-    if (_DEBUG) process.stderr.write(`[loader-fetch-err] ${url}: ${err.message}\n`);
-    return null;
-  }
-}
-
 // -- Request header injection (every frame request: XHR, fetch, scripts) ----
 function injectRequestHeaders(request) {
   const h = request.headers;
