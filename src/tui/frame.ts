@@ -349,12 +349,14 @@ function friendlyWindowType(type: string): string {
  * 位次标签把工具调用行贴成"每周"、每周行贴成"月度"，整体错位一格。
  * MCP 工具调用窗口（TIME_LIMIT）由调用方先行剔除，不进本函数；已知边缘：
  * 每周窗口生命末期（最后 ≤6h）会被贴成"5 小时"，跨过重置即自愈 —— 比位次
- * 方案整体平移好。无重置时间/越界时诚实降级为周期/类型名，不硬贴语义。
+ * 方案整体平移好。逾期（horizon < 0，时钟偏斜/服务端滚动滞后；实弹 2026-11-05
+ * 截图：重置边界上的 5h 行被旧降级贴成"周期"）同样归入 5h 档 —— 5h 窗口滚动
+ * 频率是每周窗口的 28 倍，逾期行几乎必是 5h 窗口。无重置时间/超长 horizon 时
+ * 诚实降级为类型名/周期，不硬贴语义。
  */
 function codingWindowLabel(type: string, nextResetTime: number | undefined, nowMs: number): string {
   const horizon = nextResetTime !== undefined ? toEpochMs(nextResetTime) - nowMs : undefined;
   if (horizon === undefined) return friendlyWindowType(type);
-  if (horizon < 0) return "周期";
   if (horizon <= 6 * 3600e3) return "5 小时";
   if (horizon <= 8 * 86400e3) return "每周";
   if (horizon <= 45 * 86400e3) return "月度";

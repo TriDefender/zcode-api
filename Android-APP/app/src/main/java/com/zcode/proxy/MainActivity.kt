@@ -1452,7 +1452,10 @@ private fun friendlyWindowType(type: String): String = when (type) {
  * 对拍官方面板"剩余额度"卡：三窗口按重置升序是 5 小时 TOKENS_LIMIT / MCP 工具
  * 调用 TIME_LIMIT / 每周 TOKENS_LIMIT，位次标签把工具调用行贴成"每周"、每周行
  * 贴成"月度"，整体错位一格）。工具调用是 MCP 余量、与 LLM 用量无关，先剔除不
- * 展示。已知边缘：每周窗口生命末期（≤6h）会被贴成 5 小时，跨重置自愈。条画剩余
+ * 展示。已知边缘：每周窗口生命末期（≤6h）会被贴成 5 小时，跨重置自愈。逾期
+ * （horizon < 0，时钟偏斜/服务端滚动滞后；实弹 2026-11-05 截图：重置边界上的
+ * 5h 行被旧降级贴成"周期"）同样归入 5 小时档 —— 5h 窗口滚动频率是每周窗口的
+ * 28 倍，逾期行几乎必是 5h 窗口（此时时间进度条纹退化为满格，语义正确）。条画剩余
  * 占比（percentage 缺位时 5 小时/每周退回时间进度条纹条）；值 = 剩 remaining 或 剩 P%。
  */
 private fun codingRows(coding: JSONObject?, nowMs: Long): List<QuotaRowUi> {
@@ -1482,7 +1485,6 @@ private fun codingRows(coding: JSONObject?, nowMs: Long): List<QuotaRowUi> {
         val horizon = l.resetMs?.let { it - nowMs }
         val label = when {
             horizon == null -> friendlyWindowType(l.type)
-            horizon < 0 -> "周期"
             horizon <= 6 * 3600_000L -> LABEL_5H
             horizon <= 8 * 86_400_000L -> LABEL_WEEK
             horizon <= 45 * 86_400_000L -> "月度"

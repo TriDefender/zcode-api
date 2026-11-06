@@ -374,6 +374,33 @@ describe("buildFrame", () => {
     expect(new Set(barCols).size).toBe(1);
   });
 
+  test("overdue window (clock skew / roll lag) still reads as the 5h window, not 周期", () => {
+    const now = Date.now();
+    // Live 2026-11-05 screenshot: a reset-boundary row (nextResetTime just past,
+    // countdown "即将重置") was degraded to the generic "周期" label. The overdue
+    // row is the 5h window whenever a live weekly row sits below it (28× roll
+    // frequency), so negative horizon falls into the ≤6h band.
+    const quota = {
+      status: "ok" as const,
+      balances: [],
+      coding: {
+        level: "max",
+        rows: [
+          { type: "TOKENS_LIMIT", percentage: 70, nextResetTime: now - 2 * 60e3 },
+          { type: "TOKENS_LIMIT", percentage: 41, nextResetTime: now + 2 * 86400e3 + 10 * 3600e3 },
+        ],
+      },
+      errors: [],
+      error: "",
+      fetchedAt: now,
+    };
+    const text = plainLines(baseState({ quota })).join("\n");
+    expect(text).toContain("5 小时");
+    expect(text).toContain("即将重置");
+    expect(text).toContain("每周");
+    expect(text).not.toContain("周期");
+  });
+
   test("non-token unit types are surfaced, token stays invisible", () => {
     const balanceLine = (unitType?: string): string =>
       plainLines(baseState({
