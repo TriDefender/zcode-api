@@ -569,7 +569,7 @@ export class CaptchaTokenPool {
     if (now - this.lastStormResetAt < 12 * 60_000) return;
     this.lastStormResetAt = now;
     console.warn(
-      `[captcha] mint storm detected (${fails} failures/5min, ${succs} successes/3min; latest: ${latestReason.slice(0, 120)}) -> requesting IP reset`,
+      `[captcha] mint storm detected (${fails} failures/5min, ${succs} successes/3min; latest: ${latestReason.slice(0, 120)}) -> Please consider switching network IP`,
     );
     try {
       this.opts.onCaptchaIpBlock?.(`mint storm: ${fails} failed mints in 5min`);
