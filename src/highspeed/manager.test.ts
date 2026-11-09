@@ -2,6 +2,7 @@ import { describe, expect, it, afterEach } from "bun:test";
 import {
   HighspeedManager,
   applyHighspeedCardHeaders,
+  highspeedLlmUrl,
   isHighspeedCardRejection,
   rewriteBodyModel,
   type HighspeedAuth,
@@ -441,6 +442,21 @@ describe("highspeed helpers", () => {
       .toBe('{"model":"glm-5.3-highspeed","messages":[]}');
     expect(rewriteBodyModel("not json", "glm-5.3-highspeed")).toBe("not json");
     expect(rewriteBodyModel('{"messages":[]}', "x")).toBe('{"messages":[]}');
+  });
+
+  it("highspeedLlmUrl pins the dedicated inference endpoint (zcode-builtin providerRules rev 31+)", () => {
+    expect(highspeedLlmUrl("https://zcode.z.ai")).toBe("https://zcode.z.ai/api/v1/highspeed/anthropic/v1/messages");
+    expect(highspeedLlmUrl("https://zcode.z.ai/")).toBe("https://zcode.z.ai/api/v1/highspeed/anthropic/v1/messages");
+  });
+
+  it("manager.llmUrl derives from the draw-plane origin", () => {
+    const manager = new HighspeedManager({
+      origin: "https://hs.example.test",
+      models: ["glm-5.3"],
+      fetchImpl: (async () => new Response("{}")) as unknown as typeof fetch,
+    });
+    live.push(manager);
+    expect(manager.llmUrl).toBe("https://hs.example.test/api/v1/highspeed/anthropic/v1/messages");
   });
 
   it("applyHighspeedCardHeaders swaps the coding-plan dual auth and appends the card set", () => {

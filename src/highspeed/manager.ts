@@ -28,6 +28,7 @@ import { randomUUID } from "node:crypto";
 import type { UpstreamHeaderPair } from "../proxy/upstream.js";
 import type { Credential } from "../auth/types.js";
 import { credentialString } from "../auth/types.js";
+import { warmHighspeedProviderConfig } from "./provider-config.js";
 
 const DRAW_PATH = "/api/v1/highspeed/draw";
 /** Measured admitted-draw tail reaches ~5.6s (2026-10-14 probe); official transport timeout is 20s. */
@@ -198,6 +199,14 @@ export class HighspeedManager {
     if (!this.card) return null;
     if (this.card.expiresAt - this.now() < CARD_MIN_REMAINING_MS) return null;
     return this.card;
+  }
+
+  /**
+   * Inference URL carded requests reroute to (`highspeedLlmUrl` of this
+   * manager's origin — the same plane that serves /draw).
+   */
+  get llmUrl(): string {
+    return highspeedLlmUrl(this.origin);
   }
 
   /**
@@ -431,12 +440,17 @@ let defaultManagerKey = "";
  * Process-wide manager (single card slot, like the official host service).
  * Returns null when `highspeed.enabled` is false. Recreated when origin/models
  * change (Android `setConfig`) — the previous instance's loop is stopped.
+ * Also warms the remote provider-config snapshot (client/configs → CDN →
+ * highspeed baseUrl override; see `provider-config.ts`) — production path
+ * only: tests injecting `opts.highspeed` bypass this and never touch the
+ * network.
  */
 export function getDefaultHighspeedManager(config: {
   highspeed: { enabled: boolean; origin: string; models: string[] };
-  identity: { deviceMid?: string };
+  identity: { deviceMid?: string; appVersion: string };
 }): HighspeedManager | null {
   if (!config.highspeed.enabled) return null;
+  void warmHighspeedProviderConfig({ origin: config.highspeed.origin, appVersion: config.identity.appVersion });
   const key = `${config.highspeed.origin}\n${config.highspeed.models.join(",")}\n${config.identity.deviceMid}`;
   if (!defaultManager || key !== defaultManagerKey) {
     defaultManager?.stop();
@@ -464,6 +478,30 @@ export function rewriteBodyModel(body: string, model: string): string {
   } catch {
     return body;
   }
+}
+
+/**
+ * Carded inference URL — the official client's `account:{family}-highspeed-card`
+ * providers are pinned by `zcode-builtin.json` providerRules (rev 31=3.15.1
+ * through rev 43, both zai and bigmodel families) to
+ * `{origin}/api/v1/highspeed/anthropic`, and the anthropic SDK appends
+ * `/v1/messages`. Carded requests therefore reroute here — NOT the coding-plan
+ * provider URL (ultra after routing). Found 2026-11-09; the 2026-10-14
+ * "挂卡头面仅三差异" audit missed this because the URL lives in the provider
+ * config JSON, not the bundle code.
+ */
+export function highspeedLlmUrl(origin: string): string {
+  return highspeedLlmUrlFromBase(`${origin.replace(/\/+$/u, "")}/api/v1/highspeed/anthropic`);
+}
+
+/**
+ * Full carded inference URL from a provider-rule baseUrl (the remote snapshot
+ * in `provider-config.ts` may override the pinned default above; the official
+ * anthropic SDK appends `/v1/messages` to whatever base the provider rules
+ * carry, and so do we).
+ */
+export function highspeedLlmUrlFromBase(baseUrl: string): string {
+  return `${baseUrl.replace(/\/+$/u, "")}/v1/messages`;
 }
 
 /**

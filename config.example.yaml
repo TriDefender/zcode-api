@@ -199,8 +199,11 @@ clientSigning:
 # ignites a background draw loop (POST {origin}/api/v1/highspeed/draw at ~1/s —
 # the measured token-bucket refill rate; server next_draw_at is ignored on a
 # miss); on a hit, requests inside the card window are rewritten to the card
-# model with the highspeed auth set (X-Highspeed-Card-ID) and stay unsigned,
-# exactly like the official client. The loop self-extinguishes 5 minutes after
+# model with the highspeed auth set (X-Highspeed-Card-ID), rerouted to the
+# dedicated inference endpoint ({origin}/api/v1/highspeed/anthropic/v1/messages
+# — pinned by the official zcode-builtin provider rules, NOT the coding-plan
+# URL) and stay unsigned, exactly like the official client. The loop
+# self-extinguishes 5 minutes after
 # the last eligible request; account unavailability (503/3404) is
 # negative-cached 10min, HTTP 429 backs off 5s. task_id reuses the local
 # client-session affinity inference. Env override: ZCODE_HIGHSPEED_ENABLED=false.

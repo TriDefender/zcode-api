@@ -29,6 +29,7 @@ import {
   type HighspeedCard,
   type HighspeedManager,
 } from "../highspeed/manager.js";
+import { resolvedHighspeedLlmUrl } from "../highspeed/provider-config.js";
 import { credentialString } from "../auth/types.js";
 import { sendOrderedUpstreamRequest, orderedAdvertisedCodings } from "./ordered-transport.js";
 import { transformRequestBody } from "./body-transformer.js";
@@ -187,14 +188,19 @@ export async function proxyRequest(
   }
 
   // ── HighSpeed 加速卡（3.15.1 镜像，默认开）──
-  // coding-plan + 合格模型：懒触发抽卡（affinity task_id）；持卡窗口内改写
-  // 模型为卡上模型并替换鉴权套装（buildHighspeedTurnExecution 同构）。挂卡
-  // 请求不签名（官方静态规则：highspeed mode 永不签名）。
+  // coding-plan + 合格模型：懒触发抽卡（affinity task_id，会话模型如 glm-5.3）；
+  // 抽中挂卡后该请求改写模型为卡上模型、替换鉴权套装并 reroute 到 highspeed
+  // 专属推理端点（buildHighspeedTurnExecution 同构——官方 `account:*-highspeed-card`
+  // provider 钉在 {origin}/api/v1/highspeed/anthropic，URL 取
+  // `HighspeedManager.llmUrl`（`highspeedLlmUrl()` 纯函数），2026-11-09 对照
+  // zcode-builtin.json 补齐）。挂卡请求不签名（官方静态规则：
+  // highspeed mode 永不签名）。
   const highspeedManager = opts.highspeed !== undefined ? opts.highspeed : getDefaultHighspeedManager(config);
   let highspeedCard: HighspeedCard | undefined;
   let highspeedAuth: HighspeedAuth | undefined = undefined;
   let highspeedOrigBody: string | undefined;
   let highspeedOrigPairs: UpstreamHeaderPair[] | undefined;
+  let highspeedUpstreamUrl: string | undefined;
   if (highspeedManager && !startPlan && highspeedManager.isEligibleModel(meta.model) && transformedBody) {
     const auth = highspeedAuthFrom(cred);
     if (auth) {
@@ -205,6 +211,9 @@ export async function proxyRequest(
         highspeedOrigBody = transformedBody;
         transformedBody = rewriteBodyModel(transformedBody, card.model);
         highspeedCard = card;
+        // remote provider-config snapshot overrides the pinned default (CDN
+        // hot-update chain, provider-config.ts); sync read, fail-open default
+        highspeedUpstreamUrl = resolvedHighspeedLlmUrl(auth.family) ?? highspeedManager.llmUrl;
         console.log(`${reqId} highspeed card applied (model=${card.model}, card ${card.cardId.slice(0, 12)}…, window ${Math.round((card.expiresAt - Date.now()) / 1000)}s)`);
       }
     }
@@ -257,8 +266,12 @@ export async function proxyRequest(
     // dispatch reuses the pre-built Request whenever the signer returns the
     // pairs unchanged (unsigned path) — rebuild it from the swapped pairs so
     // the card headers actually reach the wire (buildUpstreamRequest derives
-    // its own header set internally).
-    upstreamReq = new Request(upstreamReq.url, {
+    // its own header set internally). The URL reroutes to the dedicated
+    // highspeed inference endpoint; routing.resolve sees no from→to entry for
+    // it → passes through unchanged, mirroring the client's generic routing
+    // wrapper. The 401/3402 fallback below rebuilds via buildUpstreamRequest
+    // and thus returns to the provider URL automatically.
+    upstreamReq = new Request(highspeedUpstreamUrl ?? upstreamReq.url, {
       method: upstreamReq.method,
       headers: Object.fromEntries(upstreamHeaderPairs),
       body: transformedBody ?? undefined,

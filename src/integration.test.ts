@@ -35,6 +35,12 @@ function writeTestConfig(): string {
     "defaultModel: glm-4.6",
     "models:",
     "  - glm-4.6",
+    // highspeed off: without this the real config defaults it on and the
+    // production manager warms the REMOTE provider-config snapshot with a
+    // real network fetch (client/configs → CDN) — its shared in-flight
+    // dedup slot then races handler-highspeed.test.ts's seam-seeded warm.
+    "highspeed:",
+    "  enabled: false",
     "logging:",
     "  level: info",
     "",

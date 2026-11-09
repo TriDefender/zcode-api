@@ -658,10 +658,10 @@ describe("handleResponses highspeed wiring", () => {
       expect(requests).toBe(2);
     } finally { manager.stop(); }
   });
-  it("mounts the card: model rewritten, JWT auth set, card headers, never signed", async () => {
+  it("mounts the card: model rewritten, rerouted to the highspeed endpoint, JWT auth set, card headers, never signed", async () => {
     const manager = await cardHoldingManager();
     const signingFetches: string[] = [];
-    const calls: { headers: Headers; body: string }[] = [];
+    const calls: { url: string; headers: Headers; body: string }[] = [];
     const response = await handleResponses(makeReq({ model: "glm-5.2", input: "hello" }), {
       config: CONFIG, auth: oauthJwtAuth(), endpointRouting: null,
       clientSigning: new ClientSigningManager({
@@ -672,13 +672,16 @@ describe("handleResponses highspeed wiring", () => {
       }),
       highspeed: manager,
       fetchImpl: (async (request: Request) => {
-        calls.push({ headers: request.headers, body: await request.clone().text() });
+        calls.push({ url: request.url, headers: request.headers, body: await request.clone().text() });
         return new Response(anthropicMsg("answer"));
       }) as typeof fetch,
     });
     expect(response.status).toBe(200);
     expect(calls.length).toBe(1);
     expect(JSON.parse(calls[0]!.body).model).toBe("glm-5.3-highspeed");
+    // URL rerouted to the dedicated highspeed inference endpoint (zcode-builtin
+    // providerRules rev 31+; NOT the coding-plan provider URL)
+    expect(calls[0]!.url).toBe("https://zcode.z.ai/api/v1/highspeed/anthropic/v1/messages");
     expect(calls[0]!.headers.get("x-api-key")).toBe("test-zcode-jwt");
     expect(calls[0]!.headers.get("authorization")).toBe("Bearer test-zcode-jwt");
     expect(calls[0]!.headers.get("x-bigmodel-authorization")).toBe("Bearer testkey.testsecret");
@@ -691,11 +694,11 @@ describe("handleResponses highspeed wiring", () => {
 
   it("falls back to the session model and normal auth after a card rejection (401)", async () => {
     const manager = await cardHoldingManager();
-    const calls: { headers: Headers; body: string }[] = [];
+    const calls: { url: string; headers: Headers; body: string }[] = [];
     const response = await handleResponses(makeReq({ model: "glm-5.2", input: "hello" }), {
       config: CONFIG, auth: oauthJwtAuth(), endpointRouting: null, clientSigning: null, highspeed: manager,
       fetchImpl: (async (request: Request) => {
-        calls.push({ headers: request.headers, body: await request.clone().text() });
+        calls.push({ url: request.url, headers: request.headers, body: await request.clone().text() });
         return calls.length === 1
           ? new Response(JSON.stringify({ msg: "VERIFY_SIGNATURE_INVALID" }), { status: 401 })
           : new Response(anthropicMsg("answer"));
@@ -703,10 +706,12 @@ describe("handleResponses highspeed wiring", () => {
     });
     expect(response.status).toBe(200);
     expect(calls.length).toBe(2);
-    // first: carded
+    // first: carded — dedicated highspeed endpoint
     expect(calls[0]!.headers.get("x-highspeed-card-id")).toBe("hsc_resp_1");
+    expect(calls[0]!.url).toBe("https://zcode.z.ai/api/v1/highspeed/anthropic/v1/messages");
     expect(JSON.parse(calls[0]!.body).model).toBe("glm-5.3-highspeed");
-    // fallback: original model, normal coding-plan dual auth, no card header
+    // fallback: original model, provider URL, normal coding-plan dual auth, no card header
+    expect(calls[1]!.url).toBe("https://api.z.ai/api/anthropic/v1/messages");
     expect(calls[1]!.headers.get("x-highspeed-card-id")).toBeNull();
     expect(calls[1]!.headers.get("x-api-key")).toBe("testkey.testsecret");
     expect(calls[1]!.headers.get("authorization")).toBe("Bearer testkey.testsecret");
@@ -716,18 +721,45 @@ describe("handleResponses highspeed wiring", () => {
     expect(manager.activeCard()?.cardId).toBe("hsc_resp_1");
   });
 
+  it("keeps card headers and the rerouted URL on connect-retry redispatches", async () => {
+    const manager = await cardHoldingManager();
+    const calls: { url: string; headers: Headers; body: string }[] = [];
+    let attempts = 0;
+    const response = await handleResponses(makeReq({ model: "glm-5.2", input: "hello" }), {
+      config: CONFIG, auth: oauthJwtAuth(), endpointRouting: null, clientSigning: null, highspeed: manager,
+      fetchImpl: (async (request: Request) => {
+        attempts++;
+        if (attempts === 1) throw new Error("Unable to connect");
+        calls.push({ url: request.url, headers: request.headers, body: await request.clone().text() });
+        return new Response(anthropicMsg("answer"));
+      }) as typeof fetch,
+    });
+    expect(response.status).toBe(200);
+    expect(attempts).toBe(2);
+    expect(calls.length).toBe(1);
+    // the retried dispatch must still carry the full carded set, card model
+    // AND the rerouted highspeed URL (dispatch rebuilds from the closure
+    // variable every attempt — mirrors handler.ts's rebuild test)
+    expect(calls[0]!.headers.get("x-highspeed-card-id")).toBe("hsc_resp_1");
+    expect(calls[0]!.headers.get("x-api-key")).toBe("test-zcode-jwt");
+    expect(JSON.parse(calls[0]!.body).model).toBe("glm-5.3-highspeed");
+    expect(calls[0]!.url).toBe("https://zcode.z.ai/api/v1/highspeed/anthropic/v1/messages");
+  });
+
   it("leaves requests untouched when the model is not eligible", async () => {
     const manager = await cardHoldingManager();
-    const calls: { headers: Headers; body: string }[] = [];
+    const calls: { url: string; headers: Headers; body: string }[] = [];
     const response = await handleResponses(makeReq({ model: "glm-4.6", input: "hello" }), {
       config: CONFIG, auth: oauthJwtAuth(), endpointRouting: null, clientSigning: null, highspeed: manager,
       fetchImpl: (async (request: Request) => {
-        calls.push({ headers: request.headers, body: await request.clone().text() });
+        calls.push({ url: request.url, headers: request.headers, body: await request.clone().text() });
         return new Response(anthropicMsg("answer"));
       }) as typeof fetch,
     });
     expect(response.status).toBe(200);
     expect(calls.length).toBe(1);
+    // uncarded traffic keeps the provider URL (no highspeed reroute)
+    expect(calls[0]!.url).toBe("https://api.z.ai/api/anthropic/v1/messages");
     expect(calls[0]!.headers.get("x-highspeed-card-id")).toBeNull();
     expect(calls[0]!.headers.get("x-api-key")).toBe("testkey.testsecret");
     expect(JSON.parse(calls[0]!.body).model).toBe("glm-4.6");

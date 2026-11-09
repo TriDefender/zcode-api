@@ -8,6 +8,11 @@ import { proxyRequest } from "./handler.js";
 import type { ProxyConfig, ProxyIdentity } from "../config/types.js";
 import { AuthManager } from "../auth/manager.js";
 import { HighspeedManager } from "../highspeed/manager.js";
+import {
+  __resetHighspeedProviderConfigForTests,
+  __setProviderConfigFetchForTests,
+  warmHighspeedProviderConfig,
+} from "../highspeed/provider-config.js";
 import { ClientSigningManager } from "./client-signing.js";
 
 const IDENTITY: ProxyIdentity = {
@@ -70,6 +75,10 @@ function anthropicOk(): Response {
     }),
     { status: 200, headers: { "content-type": "application/json" } },
   );
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 }
 
 /** Manager pre-loaded with an active card (draw already settled). */
@@ -151,7 +160,7 @@ describe("proxyRequest highspeed wiring", () => {
     }
   });
 
-  it("rewrites the model, swaps auth to the JWT set, adds the card header, and skips signing", async () => {
+  it("rewrites the model, reroutes to the highspeed endpoint, swaps auth to the JWT set, adds the card header, and skips signing", async () => {
     const manager = await cardHoldingManager();
     const upstreamCalls: { url: string; headers: Headers; body: string }[] = [];
     const signingFetches: string[] = [];
@@ -174,6 +183,9 @@ describe("proxyRequest highspeed wiring", () => {
     const call = upstreamCalls[0]!;
     // model rewritten to the card model
     expect(JSON.parse(call.body).model).toBe("glm-5.3-highspeed");
+    // URL rerouted to the dedicated highspeed inference endpoint (NOT the
+    // coding-plan provider URL — zcode-builtin providerRules rev 31+)
+    expect(call.url).toBe("https://zcode.z.ai/api/v1/highspeed/anthropic/v1/messages");
     // coding-plan dual auth replaced by the JWT set + card headers
     expect(call.headers.get("x-api-key")).toBe(JWT);
     expect(call.headers.get("authorization")).toBe(`Bearer ${JWT}`);
@@ -186,16 +198,54 @@ describe("proxyRequest highspeed wiring", () => {
     expect(call.headers.get("x-client-sig")).toBeNull();
   });
 
+  it("mounts on the CDN-resolved base when the remote provider-config snapshot overrides it", async () => {
+    // Seed the module-level snapshot via the test fetch seam (client/configs →
+    // CDN two-stage, never the network); try/finally resets it — bun runs
+    // test files in one process, a leaked snapshot would reroute other files'
+    // carded assertions.
+    __setProviderConfigFetchForTests((async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      return url.includes("/api/v1/client/configs")
+        ? jsonResponse({ data: { configs: { builtin_provider_config_json: "https://cdn.example.test/builtin.json" } } })
+        : jsonResponse({ config: { providerConfigRules: { providerRules: [
+          { providerId: "account:zai-highspeed-card", config: { api: { baseUrl: "https://moved.example.test/hs/anthropic" } } },
+        ] } } });
+    }) as unknown as typeof fetch);
+    try {
+      await warmHighspeedProviderConfig({ origin: "https://zcode.z.ai", appVersion: IDENTITY.appVersion });
+      const manager = await cardHoldingManager();
+      const upstreamCalls: { url: string }[] = [];
+      const resp = await proxyRequest(anthropicClientReq(), "anthropic", {
+        config: TEST_CONFIG,
+        auth: oauthAuth(),
+        fetchImpl: Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const req = input instanceof Request ? input : new Request(String(input), init);
+          upstreamCalls.push({ url: req.url });
+          return anthropicOk();
+        }, { preconnect: () => {} }) as unknown as typeof fetch,
+        endpointRouting: null,
+        clientSigning: null,
+        highspeed: manager,
+      });
+      expect(resp.status).toBe(200);
+      // remote snapshot wins over the pinned default for the zai family
+      expect(upstreamCalls[0]!.url).toBe("https://moved.example.test/hs/anthropic/v1/messages");
+    } finally {
+      __resetHighspeedProviderConfigForTests();
+      __setProviderConfigFetchForTests(null);
+    }
+  });
+
   it("falls back to the original model and normal auth after a card rejection (401)", async () => {
     const manager = await cardHoldingManager();
-    const upstreamCalls: { headers: Headers; body: string }[] = [];
+    const upstreamCalls: { url: string; headers: Headers; body: string }[] = [];
 
     const resp = await proxyRequest(anthropicClientReq(), "anthropic", {
       config: TEST_CONFIG,
       auth: oauthAuth(),
       fetchImpl: Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
         const req = input instanceof Request ? input : new Request(String(input), init);
-        upstreamCalls.push({ headers: req.headers, body: await req.clone().text() });
+        upstreamCalls.push({ url: req.url, headers: req.headers, body: await req.clone().text() });
         return upstreamCalls.length === 1
           ? new Response(JSON.stringify({ msg: "VERIFY_SIGNATURE_INVALID" }), { status: 401 })
           : anthropicOk();
@@ -207,10 +257,12 @@ describe("proxyRequest highspeed wiring", () => {
 
     expect(resp.status).toBe(200);
     expect(upstreamCalls.length).toBe(2);
-    // first: carded
+    // first: carded — dedicated highspeed endpoint
     expect(upstreamCalls[0]!.headers.get("x-highspeed-card-id")).toBe("hsc_wiring_1");
+    expect(upstreamCalls[0]!.url).toBe("https://zcode.z.ai/api/v1/highspeed/anthropic/v1/messages");
     expect(JSON.parse(upstreamCalls[0]!.body).model).toBe("glm-5.3-highspeed");
-    // fallback: original model, normal coding-plan dual auth, no card header
+    // fallback: original model, provider URL, normal coding-plan dual auth, no card header
+    expect(upstreamCalls[1]!.url).toBe("https://api.z.ai/api/anthropic/v1/messages");
     expect(upstreamCalls[1]!.headers.get("x-highspeed-card-id")).toBeNull();
     expect(upstreamCalls[1]!.headers.get("x-api-key")).toBe(CRED);
     expect(upstreamCalls[1]!.headers.get("authorization")).toBe(`Bearer ${CRED}`);
@@ -223,7 +275,7 @@ describe("proxyRequest highspeed wiring", () => {
 
   it("keeps card headers on connect-retry rebuilds (attempt ≥ 2 rebuilds from the swapped pairs)", async () => {
     const manager = await cardHoldingManager();
-    const upstreamCalls: { headers: Headers; body: string }[] = [];
+    const upstreamCalls: { url: string; headers: Headers; body: string }[] = [];
     let attempts = 0;
 
     const resp = await proxyRequest(anthropicClientReq(), "anthropic", {
@@ -233,7 +285,7 @@ describe("proxyRequest highspeed wiring", () => {
         attempts++;
         if (attempts === 1) throw new Error("Unable to connect");
         const req = input instanceof Request ? input : new Request(String(input), init);
-        upstreamCalls.push({ headers: req.headers, body: await req.clone().text() });
+        upstreamCalls.push({ url: req.url, headers: req.headers, body: await req.clone().text() });
         return anthropicOk();
       }, { preconnect: () => {} }) as unknown as typeof fetch,
       endpointRouting: null,
@@ -249,6 +301,8 @@ describe("proxyRequest highspeed wiring", () => {
     expect(upstreamCalls[0]!.headers.get("x-api-key")).toBe(JWT);
     expect(upstreamCalls[0]!.headers.get("x-bigmodel-authorization")).toBe(`Bearer ${CRED}`);
     expect(JSON.parse(upstreamCalls[0]!.body).model).toBe("glm-5.3-highspeed");
+    // …and stay on the rerouted highspeed URL (upstreamReq.url is reused as-is)
+    expect(upstreamCalls[0]!.url).toBe("https://zcode.z.ai/api/v1/highspeed/anthropic/v1/messages");
   });
 
   it("leaves requests untouched when the model is not eligible", async () => {
@@ -261,7 +315,7 @@ describe("proxyRequest highspeed wiring", () => {
       noteActivityCalls += 1;
       base.noteActivity();
     };
-    const upstreamCalls: { headers: Headers; body: string }[] = [];
+    const upstreamCalls: { url: string; headers: Headers; body: string }[] = [];
 
     const resp = await proxyRequest(new Request("http://localhost:8080/v1/messages", {
       method: "POST",
@@ -272,7 +326,7 @@ describe("proxyRequest highspeed wiring", () => {
       auth: oauthAuth(),
       fetchImpl: Object.assign(async (input: RequestInfo | URL, init?: RequestInit) => {
         const req = input instanceof Request ? input : new Request(String(input), init);
-        upstreamCalls.push({ headers: req.headers, body: await req.clone().text() });
+        upstreamCalls.push({ url: req.url, headers: req.headers, body: await req.clone().text() });
         return anthropicOk();
       }, { preconnect: () => {} }) as unknown as typeof fetch,
       endpointRouting: null,
@@ -282,6 +336,8 @@ describe("proxyRequest highspeed wiring", () => {
 
     expect(resp.status).toBe(200);
     expect(upstreamCalls.length).toBe(1);
+    // uncarded traffic keeps the provider URL (no highspeed reroute)
+    expect(upstreamCalls[0]!.url).toBe("https://api.z.ai/api/anthropic/v1/messages");
     expect(upstreamCalls[0]!.headers.get("x-highspeed-card-id")).toBeNull();
     expect(upstreamCalls[0]!.headers.get("x-api-key")).toBe(CRED);
     expect(JSON.parse(upstreamCalls[0]!.body).model).toBe("glm-4.6");

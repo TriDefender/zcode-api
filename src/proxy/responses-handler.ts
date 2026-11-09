@@ -47,6 +47,7 @@ import {
   type HighspeedCard,
   type HighspeedManager,
 } from "../highspeed/manager.js";
+import { resolvedHighspeedLlmUrl } from "../highspeed/provider-config.js";
 import { buildAnthropicMetadataUserId } from "./trace-headers.js";
 import { credentialString } from "../auth/types.js";
 import { translateRequestOpenAIToAnthropic, translateResponseAnthropicToOpenAI } from "../translator/openai-to-anthropic.js";
@@ -204,13 +205,16 @@ export async function handleResponses(
   }) ?? anthropicBody;
 
   // ── HighSpeed 加速卡（2026-10-14 接线，与 handler.ts 同构）──
-  // coding-plan + 合格模型：抽卡触发（task_id=upstreamSessionId）；持卡窗口内
-  // 改写模型为卡上模型并换装 JWT 鉴权套装；挂卡请求永不签名（官方静态规则）。
+  // coding-plan + 合格模型：抽卡触发（task_id=upstreamSessionId，会话模型如
+  // glm-5.3）；抽中挂卡后改写模型为卡上模型、换装 JWT 鉴权套装并 reroute 到
+  // highspeed 专属推理端点（`HighspeedManager.llmUrl`（`highspeedLlmUrl()`），
+  // 2026-11-09 补齐）；挂卡请求永不签名（官方静态规则）。
   const highspeedManager = opts.highspeed !== undefined ? opts.highspeed : getDefaultHighspeedManager(opts.config);
   let highspeedCard: HighspeedCard | undefined;
   let highspeedAuth: HighspeedAuth | undefined;
   let highspeedOrigBody: string | undefined;
   let highspeedOrigPairs: UpstreamHeaderPair[] | undefined;
+  let highspeedUpstreamUrl: string | undefined;
   if (highspeedManager && !startPlan && highspeedManager.isEligibleModel(req.model) && transformedBody) {
     const hsAuth = highspeedAuthFrom(cred);
     if (hsAuth) {
@@ -221,6 +225,9 @@ export async function handleResponses(
         highspeedOrigBody = transformedBody;
         transformedBody = rewriteBodyModel(transformedBody, card.model);
         highspeedCard = card;
+        // remote provider-config snapshot overrides the pinned default (CDN
+        // hot-update chain, provider-config.ts); sync read, fail-open default
+        highspeedUpstreamUrl = resolvedHighspeedLlmUrl(hsAuth.family) ?? highspeedManager.llmUrl;
       }
     }
   }
@@ -266,22 +273,28 @@ export async function handleResponses(
     wireHeaders = applyHighspeedCardHeaders(upstreamHeaders, highspeedCard, highspeedAuth);
   }
   const upstreamReq = buildUpstreamRequest(clientReq, upstreamFormat, providerDef, cred, transformedBody, opts.config.identity, opts.config.plan, captchaHeaders, clientSession);
-  if (debug) console.log(`[responses] → POST ${upstreamReq.url}`);
+  // Carded requests reroute to the dedicated highspeed inference endpoint
+  // (manager.llmUrl; mirrors handler.ts — the official `account:*-highspeed-card`
+  // providers pin {origin}/api/v1/highspeed/anthropic, and routing has no
+  // from→to entry for it → passes through unchanged). The 401/3402 fallback
+  // below restores the provider URL.
+  let upstreamUrl = highspeedUpstreamUrl ?? upstreamReq.url;
+  if (debug) console.log(`[responses] → POST ${upstreamUrl}`);
 
   const routing = opts.endpointRouting !== undefined ? opts.endpointRouting : getDefaultEndpointRouting(opts.config);
   // 官方 3.15.1 静态规则：highspeed mode 的推理请求永不签名（`TUs` 返回 false）。
   let signer = highspeedCard ? null : (opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(opts.config));
   const dispatch = async (pairs: UpstreamHeaderPair[]): Promise<Response> => {
-    const routed = routing ? await routing.resolve(upstreamReq.url, credentialString(cred), cred.jwt) : null;
-    const sendUrl = routed?.routed ? routed.url : upstreamReq.url;
+    const routed = routing ? await routing.resolve(upstreamUrl, credentialString(cred), cred.jwt) : null;
+    const sendUrl = routed?.routed ? routed.url : upstreamUrl;
     const routingHeaderPairs = routed?.headers
       ? (Object.entries(routed.headers) as UpstreamHeaderPair[])
       : undefined;
-    if (debug && routed?.routed) console.log(`[responses] endpoint routing: ${upstreamReq.url} -> ${sendUrl}`);
+    if (debug && routed?.routed) console.log(`[responses] endpoint routing: ${upstreamUrl} -> ${sendUrl}`);
     // signing decisions run against the PRE-routing provider URL (mirrors the
     // client, whose signer wraps the routing transport)
     return sendWithClientSigning(signer, {
-      url: upstreamReq.url,
+      url: upstreamUrl,
       headerPairs: pairs,
       credential: credentialString(cred),
       oauthAccessToken: cred.oauthAccessToken,
@@ -322,6 +335,7 @@ export async function handleResponses(
     console.log("[responses] highspeed card rejected upstream — falling back to session model");
     highspeedManager?.dropCard("upstream_rejected");
     transformedBody = highspeedOrigBody;
+    upstreamUrl = upstreamReq.url;
     signer = opts.clientSigning !== undefined ? opts.clientSigning : getDefaultClientSigning(opts.config);
     const retryPairs = highspeedOrigPairs;
     try {
