@@ -58,6 +58,27 @@ describe("getCaptchaToken — pool-first degradation (§H 九轮)", () => {
     expect(second?.region).toBe("sgp"); // region from the last-good config
   });
 
+  it("an active block missing region fails open (3.18.0 `qV` mirror — solver init rides server fields)", async () => {
+    // 3.18.0 renderer qV: !region||!prefix||!sceneId → no captcha (NOTEPAD
+    // 「3.18.0 增补」§C 复核修正). A partial block must not mint.
+    captcha.__setConfigsFetchForTests((async () =>
+      jsonResp(JSON.stringify({
+        data: { configs: { captcha: { enabled: true, prefix: "no8xfe", sceneId: "11xygtvd" } } },
+      }))
+    ) as unknown as typeof fetch);
+    expect(await captcha.getCaptchaToken("test-1.0.0")).toBeNull();
+
+    // Empty string counts as missing too.
+    captcha.__resetCaptchaConfigCacheForTests();
+    captcha.__setConfigsFetchForTests((async () =>
+      jsonResp(JSON.stringify({
+        data: { configs: { captcha: { enabled: true, prefix: "no8xfe", sceneId: "11xygtvd", region: "" } } },
+      }))
+    ) as unknown as typeof fetch);
+    expect(await captcha.getCaptchaToken("test-1.0.0")).toBeNull();
+    expect(solveMock).not.toHaveBeenCalled();
+  });
+
   it("an authoritative disable beats banked tokens and survives the next refresh outage", async () => {
     let disabled = false;
     let outage = false;

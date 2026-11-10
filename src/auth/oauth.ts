@@ -20,6 +20,10 @@
  *   the headless `--paste` login only — the desktop no longer uses it as the
  *   primary path but the protocol (authorize at `bigmodel.cn/login`, exchange
  *   at the shared zcode.z.ai token endpoint) is unchanged.
+ * - 3.18.0 adds a `zai_cn` login flavor on the desktop; `isZaiOAuthProvider`
+ *   treats it as zai and it reuses this exact chain (same authorize/userinfo/
+ *   token endpoints — no dedicated URL templates exist in the bundle), so no
+ *   separate client is mirrored here. See NOTEPAD「3.18.0 增补」§D.
  *
  * @see _reverse/NOTEPAD.md "4. OAuth 流程"
  */

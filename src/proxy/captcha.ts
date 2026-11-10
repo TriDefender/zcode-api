@@ -135,8 +135,11 @@ function captchaConfigTtlMs(): number {
  * (ZCODE_CAPTCHA_RETRIES attempts with a fresh solve per retry).
  *
  * Returns null when the fetched config DEFINITIVELY disables captcha
- * (`enabled:false`/missing scene) — no captcha headers is then the correct
- * wire shape. THROWS when acquisition failed for unknown reasons (pool
+ * (`enabled:false`) or is active but missing any of region/prefix/sceneId
+ * (3.18.0 renderer `qV` fail-open: the official captcha controller builds its
+ * Aliyun SDK init from exactly these fields — a partial block means "no
+ * captcha", NOTEPAD「3.18.0 增补」§C 复核修正) — no captcha headers is then the
+ * correct wire shape. THROWS when acquisition failed for unknown reasons (pool
  * exhaustion with no config history) — callers must NOT dispatch a
  * captcha-less request on a throw: the start-plan edge answers those with
  * bare 502s (2026-10-23 live, NOTEPAD "3.16.3 增补" §H).
@@ -149,7 +152,10 @@ function captchaConfigTtlMs(): number {
 export async function getCaptchaToken(appVersion: string): Promise<{ verifyParam: string; region: string } | null> {
   const cfg = (await fetchCaptchaConfig(appVersion)) ?? lastGoodCfg;
   if (!cfg) throw new Error("Captcha config unavailable");
-  if (!cfg.enabled || !cfg.prefix || !cfg.sceneId) return null;
+  // 3.18.0 `qV` mirror: all three Aliyun init params must be present for the
+  // official controller to solve; region feeds both the SDK init and the
+  // X-Aliyun-Captcha-Verify-Region header, so a block without it fails open.
+  if (!cfg.enabled || !cfg.region || !cfg.prefix || !cfg.sceneId) return null;
   return { verifyParam: await takeCaptchaToken(cfg), region: cfg.region };
 }
 

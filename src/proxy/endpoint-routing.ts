@@ -67,16 +67,22 @@ interface RoutingTarget {
 }
 
 /**
- * 3.16.3 request-verification switch (bundle `$rs`=readRequestVerificationConfig,
- * chunk `o5`): agent/configs `data.configs.captcha` → camelCase. Only the two
- * decisive booleans are kept — the official rest-spread carries them plus
- * fields nothing reads, and the gate (bundle `a5`) only ever compares
- * `enabled !== false` / `skipModelRequest !== true`, so this shape is
- * outcome-identical.
+ * 3.16.3 request-verification switch (bundle `$rs` → 3.18.0 `I1r`
+ * readRequestVerificationConfig): agent/configs `data.configs.captcha` →
+ * camelCase. The two booleans drive the gate (bundle `aws`
+ * requiresRequestVerification: `enabled !== false` / `skipModelRequest !==
+ * true`). 3.18.0 additionally carries `region`/`prefix`/`sceneId` — the
+ * renderer captcha controller builds its Aliyun SDK init from exactly these
+ * (NOTEPAD「3.18.0 增补」§C 复核修正), so they are passed through when present
+ * as non-empty strings (the `ows` validator's active-block requirement).
  */
 export interface RequestVerificationConfig {
   enabled?: boolean;
   skipModelRequest?: boolean;
+  /** 3.18.0 Aliyun captcha init params — solver consumes them when the block ships. */
+  region?: string;
+  prefix?: string;
+  sceneId?: string;
 }
 
 interface RoutingSnapshot {
@@ -98,6 +104,13 @@ function parseRequestVerificationConfig(configs: unknown): RequestVerificationCo
   const out: RequestVerificationConfig = {};
   if (typeof rest.enabled === "boolean") out.enabled = rest.enabled;
   if (typeof skip_model_request === "boolean") out.skipModelRequest = skip_model_request;
+  // 3.18.0: Aliyun init params ride the same block (`ows` demands non-empty
+  // strings when the block is active) — keep only well-formed values; the
+  // solver-side gate (captcha.ts) fails open on any missing one.
+  for (const key of ["region", "prefix", "sceneId"] as const) {
+    const v = rest[key];
+    if (typeof v === "string" && v.trim()) out[key] = v;
+  }
   return out;
 }
 

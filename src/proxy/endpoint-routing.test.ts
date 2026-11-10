@@ -320,6 +320,34 @@ describe("3.16.3 configs.captcha request-verification switch", () => {
     expect(await garbage.getRequestVerificationConfig()).toBeNull();
   });
 
+  it("3.18.0: region/prefix/sceneId pass through when non-empty strings (renderer Aliyun SDK init params)", async () => {
+    const svc = new EndpointRoutingService({
+      identity,
+      fetchImpl: configFetchWith({
+        enabled: true,
+        skip_model_request: false,
+        region: "sgp",
+        prefix: "no8xfe",
+        sceneId: "11xygtvd",
+      }),
+    });
+    expect(await svc.getRequestVerificationConfig()).toEqual({
+      enabled: true,
+      skipModelRequest: false,
+      region: "sgp",
+      prefix: "no8xfe",
+      sceneId: "11xygtvd",
+    });
+  });
+
+  it("3.18.0: non-string / blank captcha init params are dropped (ows active-block shape)", async () => {
+    const svc = new EndpointRoutingService({
+      identity,
+      fetchImpl: configFetchWith({ enabled: true, region: 42, prefix: "   ", sceneId: null }),
+    });
+    expect(await svc.getRequestVerificationConfig()).toEqual({ enabled: true });
+  });
+
   it("a malformed captcha block never fails the mapping refresh", async () => {
     const svc = new EndpointRoutingService({ identity, fetchImpl: configFetchWith([1, 2]) });
     const resolved = await svc.resolve(ZAI_ANTHROPIC);

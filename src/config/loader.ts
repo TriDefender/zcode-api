@@ -32,7 +32,7 @@ const ENV = {
  * (see _reverse/MANIFEST.md). Not configurable: the identity.appVersion YAML
  * key and the ZCODE_APP_VERSION env override were removed on 2026-10-27.
  */
-export const DEFAULT_APP_VERSION = "3.17.2";
+export const DEFAULT_APP_VERSION = "3.18.0";
 
 const DEFAULTS = {
   PORT: 8080,
