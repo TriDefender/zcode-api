@@ -23,7 +23,6 @@ import type { ProxyConfig } from "../config/types.js";
 import type { AuthManager } from "../auth/manager.js";
 import { buildUpstreamRequest, buildUpstreamHeaderPairs, type UpstreamHeaderPair } from "./upstream.js";
 import { isCaptchaChallenged, retryOnCaptchaChallenge, resolveCaptchaAcquireBudgetMs, acquireCaptchaWithRetry, type CaptchaModuleLike } from "./captcha-retry.js";
-import { dispatchWithConnectRetry } from "./handler.js";
 
 // Lazy, runtime-gated module load (exception to the static-import rule, same
 // as handler.ts): pulling captcha.ts eagerly drags in the happy-dom solver, so
@@ -75,7 +74,18 @@ import {
   type ResponsesOutputItem,
 } from "../translator/responses-types.js";
 import { ResponseStore, type StoredResponse } from "../responses/store.js";
-import { errorResponse, readBody, InflatedBodyTooLargeError } from "./handler.js";
+import {
+  dispatchWithConnectRetry,
+  errorResponse,
+  isAnthropicMessagesResponse,
+  nextReqId,
+  observeStream,
+  printRow,
+  readBody,
+  InflatedBodyTooLargeError,
+  type RequestMeta,
+} from "./handler.js";
+import { dumpBody, dumpEnabled, dumpHeaders, dumpPhase } from "./dump.js";
 
 export interface ResponsesHandlerOptions {
   config: ProxyConfig;
@@ -104,6 +114,7 @@ export async function handleResponses(
   const fetchImpl = opts.fetchImpl ?? fetch;
   const debug = opts.debug === true;
   const start = Date.now();
+  const reqId = nextReqId();
 
   // ── 1. parse body ──
   let rawBody: string;
@@ -114,6 +125,14 @@ export async function handleResponses(
       return errorResponse(413, "request_too_large", err.message);
     }
     return errorResponse(400, "invalid_request", `could not read request body: ${(err as Error).message}`);
+  }
+  if (dumpEnabled()) {
+    dumpPhase(reqId, "client_in", {
+      method: clientReq.method,
+      url: clientReq.url,
+      headers: dumpHeaders(clientReq.headers),
+      body: dumpBody(rawBody),
+    });
   }
   let req: ResponsesRequest;
   try {
@@ -132,6 +151,7 @@ export async function handleResponses(
   }
 
   const stream = req.stream === true;
+  const meta: RequestMeta = { model: req.model, stream };
 
   // ── 2. resolve previous_response_id ──
   let historyItems: ResponsesInputItem[] = [];
@@ -172,6 +192,7 @@ export async function handleResponses(
   try {
     cred = await opts.auth.getCredential();
   } catch (err) {
+    printRow(reqId, "openai", meta, 503, start, Date.now(), 0, 0, 0, "RSP");
     return errorResponse(503, "credential_unavailable", (err as Error).message);
   }
   const providerDef = resolveProviderDef(opts.config);
@@ -253,6 +274,7 @@ export async function handleResponses(
       });
     } catch (err) {
       if (debug) console.log(`[responses] ERROR captcha_solver_failed: ${(err as Error).message}`);
+      printRow(reqId, "openai", meta, 503, start, Date.now(), 0, 0, 0, "RSP");
       return errorResponse(503, "captcha_solver_failed", `Captcha acquisition failed: ${(err as Error).message}. The start-plan edge rejects captcha-less requests — retry shortly.`);
     }
   }
@@ -280,6 +302,17 @@ export async function handleResponses(
   // below restores the provider URL.
   let upstreamUrl = highspeedUpstreamUrl ?? upstreamReq.url;
   if (debug) console.log(`[responses] → POST ${upstreamUrl}`);
+  if (dumpEnabled()) {
+    dumpPhase(reqId, "upstream_out", {
+      method: "POST",
+      url: upstreamUrl,
+      headers: dumpHeaders(new Headers(Object.fromEntries(wireHeaders))),
+      body: dumpBody(transformedBody),
+      upstreamFormat,
+      translateMode: true,
+      startPlan,
+    });
+  }
 
   const routing = opts.endpointRouting !== undefined ? opts.endpointRouting : getDefaultEndpointRouting(opts.config);
   // 官方 3.15.1 静态规则：highspeed mode 的推理请求永不签名（`TUs` 返回 false）。
@@ -306,6 +339,15 @@ export async function handleResponses(
         // client's routing wrapper sits inside its signing wrapper) — last on
         // the wire, same as handler.ts.
         const outboundPairs = routingHeaderPairs ? [...finalPairs, ...routingHeaderPairs] : finalPairs;
+        if (dumpEnabled()) {
+          // what actually went on the wire: routed URL + signed pairs (mirrors
+          // handler.ts — the pre-routing/pre-signing view is `upstream_out`)
+          dumpPhase(reqId, "wire_out", {
+            url: sendUrl,
+            signed: outboundPairs.some(([k]) => k.toLowerCase() === "x-client-sig"),
+            headers: dumpHeaders(new Headers(Object.fromEntries(outboundPairs))),
+          });
+        }
         const req = new Request(sendUrl, {
           method: "POST",
           headers: Object.fromEntries(outboundPairs),
@@ -325,7 +367,19 @@ export async function handleResponses(
       isAborted: () => clientReq.signal.aborted,
     });
   } catch (err) {
+    printRow(reqId, "openai", meta, 502, start, Date.now(), 0, 0, 0, "RSP");
     return errorResponse(502, "upstream_unreachable", (err as Error).message);
+  }
+  const headersAt = Date.now();
+  if (debug) console.log(`[responses] ← ${upstreamResp.status} ${upstreamResp.statusText}`);
+  if (dumpEnabled()) {
+    dumpPhase(reqId, "upstream_in", {
+      status: upstreamResp.status,
+      statusText: upstreamResp.statusText,
+      headers: dumpHeaders(upstreamResp.headers),
+      isSSE: upstreamResp.headers.get("content-type")?.includes("text/event-stream") ?? false,
+      ttfbMs: headersAt - start,
+    });
   }
 
   // highspeed selectionFallback（官方语义，与 handler.ts 同构）：挂卡请求收到
@@ -343,6 +397,7 @@ export async function handleResponses(
         isAborted: () => clientReq.signal.aborted,
       });
     } catch (err) {
+      printRow(reqId, "openai", meta, 502, start, Date.now(), 0, 0, 0, "RSP");
       return errorResponse(502, "upstream_unreachable", (err as Error).message);
     }
   }
@@ -363,10 +418,14 @@ export async function handleResponses(
         solveAndRetry: (retryHeaders) => dispatch(
           buildUpstreamHeaderPairs(clientReq, upstreamFormat, cred, opts.config.identity, opts.config.plan, retryHeaders, clientSession),
         ),
-        mapError: (err, phase) =>
-          phase === "solver"
-            ? errorResponse(503, "captcha_solver_failed", err.message)
-            : errorResponse(502, "upstream_unreachable", err.message),
+        mapError: (err, phase) => {
+          if (phase === "solver") {
+            printRow(reqId, "openai", meta, 503, start, Date.now(), 0, 0, 0, "RSP");
+            return errorResponse(503, "captcha_solver_failed", err.message);
+          }
+          printRow(reqId, "openai", meta, 502, start, Date.now(), 0, 0, 0, "RSP");
+          return errorResponse(502, "upstream_unreachable", err.message);
+        },
       });
       if (!outcome.ok) return outcome.resp;
       upstreamResp = outcome.resp;
@@ -375,17 +434,35 @@ export async function handleResponses(
 
   if (!upstreamResp.ok) {
     const errText = await upstreamResp.text().catch(() => "");
+    printRow(reqId, "openai", meta, upstreamResp.status, start, headersAt, 0, 0, 0, "RSP");
     return errorResponse(upstreamResp.status, "upstream_error", errText.slice(0, 500) || `upstream returned ${upstreamResp.status}`);
   }
+
+  // Effective streaming = the client asked for a stream AND the upstream
+  // actually answered with SSE. A JSON answer to a stream request (HTTP 200
+  // wrapped around a business envelope — start-plan quota `code:1005`, a
+  // quota-dead highspeed card, …) takes the batch lane, where the
+  // `isAnthropicMessagesResponse` guard turns it into an honest 502 instead of
+  // feeding JSON to the SSE translator (2026-11-09 实弹: the envelope crashed
+  // `resp.content.filter` in the batch lane and produced empty streams in the
+  // SSE lane — both invisible in the log pane, NOTEPAD "3.16.3 增补" §C).
+  const isSSE = upstreamResp.headers.get("content-type")?.includes("text/event-stream") ?? false;
+  const streamOut = stream && isSSE;
 
   if (upstreamFormat === "anthropic") {
     // normalize the Anthropic upstream response into the OpenAI Chat shape the
     // downstream Responses translators already consume (SSE + batch)
-    if (stream) {
+    if (streamOut) {
       if (!upstreamResp.body) {
         return errorResponse(502, "translation_failed", "upstream returned no body for stream");
       }
-      upstreamResp = new Response(anthropicSseToOpenaiSse(upstreamResp.body, req.model), {
+      const translated = anthropicSseToOpenaiSse(upstreamResp.body, req.model);
+      // tee: one branch feeds the client translator, one feeds the shared
+      // request-table row (tokens/tok/s at stream end) — same observe pattern
+      // as handler.ts. The in-flight note stays with `onStreamEnd` below.
+      const [clientBody, statsBody] = translated.tee();
+      observeStream(reqId, "openai", meta, upstreamResp.status, start, statsBody, null, undefined, "RSP");
+      upstreamResp = new Response(clientBody, {
         status: upstreamResp.status,
         headers: { "content-type": "text/event-stream" },
       });
@@ -395,7 +472,12 @@ export async function handleResponses(
       try {
         parsedAnthropic = JSON.parse(rawAnthropic) as AnthropicMessagesResponse;
       } catch (err) {
+        printRow(reqId, "openai", meta, 502, start, headersAt, 0, 0, 0, "RSP");
         return errorResponse(502, "translation_failed", `upstream returned non-JSON body: ${(err as Error).message}`);
+      }
+      if (!isAnthropicMessagesResponse(parsedAnthropic)) {
+        printRow(reqId, "openai", meta, 502, start, headersAt, 0, 0, 0, "RSP");
+        return errorResponse(502, "translation_failed", `upstream returned invalid Anthropic message: ${rawAnthropic.slice(0, 200)}`);
       }
       const openaiResp = translateResponseAnthropicToOpenAI(parsedAnthropic, req.model);
       upstreamResp = new Response(JSON.stringify(openaiResp), {
@@ -407,10 +489,10 @@ export async function handleResponses(
 
   // ── 8. translate Chat → Responses ──
   const responseId = generateResponsesId();
-  const meta = { customToolNames, namespaceMap, hasToolSearch };
+  const translatorMeta = { customToolNames, namespaceMap, hasToolSearch };
 
-  if (stream) {
-    return streamResponse(upstreamResp, { responseId, model: req.model, meta, request: req, input, options: opts, onStreamEnd: noteInFlightEnded });
+  if (streamOut) {
+    return streamResponse(upstreamResp, { responseId, model: req.model, meta: translatorMeta, request: req, input, options: opts, onStreamEnd: noteInFlightEnded });
   }
 
   const rawChatResp = await upstreamResp.text();
@@ -418,11 +500,12 @@ export async function handleResponses(
   try {
     chatRespJson = JSON.parse(rawChatResp);
   } catch (err) {
+    printRow(reqId, "openai", meta, 502, start, headersAt, 0, 0, 0, "RSP");
     return errorResponse(502, "translation_failed", `upstream returned non-JSON body: ${(err as Error).message}`);
   }
   const responsesResp = chatCompletionsToResponses(chatRespJson, req.model, {
     responseId,
-    meta,
+    meta: translatorMeta,
     ...(typeof req.instructions === "string" ? { instructions: req.instructions } : {}),
     ...(prevId ? { previousResponseId: prevId } : {}),
   });
@@ -435,6 +518,7 @@ export async function handleResponses(
 
   if (debug) console.log(`[responses] ← ${responsesResp.status} (${Date.now() - start}ms)`);
 
+  printRow(reqId, "openai", meta, 200, start, headersAt, chatRespJson?.usage?.completion_tokens ?? 0, 0, 0, "RSP");
   noteInFlightEnded();
   return new Response(JSON.stringify(responsesResp), {
     status: 200,

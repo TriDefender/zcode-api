@@ -38,7 +38,10 @@ const CONFIG: ProxyConfig = {
 const auth = { getCredential: async () => ({ apiKey: "testkey.testsecret", userId: "u1" }) } as unknown as import("../auth/manager.js").AuthManager;
 
 function chatUpstream(body: string, status = 200): typeof fetch {
-  return (async (): Promise<Response> => new Response(body, { status, headers: { "content-type": "application/json" } })) as unknown as typeof fetch;
+  // SSE bodies are labeled text/event-stream like the real wire — the handler
+  // gates the streaming lane on that content-type (mirrors handler.ts)
+  const contentType = body.startsWith("event:") || body.startsWith("data:") ? "text/event-stream" : "application/json";
+  return (async (): Promise<Response> => new Response(body, { status, headers: { "content-type": contentType } })) as unknown as typeof fetch;
 }
 
 function anthropicMsg(text: string, id = "msg_1"): string {
@@ -814,5 +817,77 @@ describe("handleResponses session affinity (2026-10-14 收口)", () => {
     const userId = JSON.parse(body.metadata!.user_id!) as { device_id?: string; account_uuid: string; session_id: string };
     expect(userId.session_id).toBe("test123");
     expect(userId.account_uuid).toBe("");
+  });
+});
+
+// 2026-11-09 实弹：highspeed 死卡以 HTTP 200 + {"code":1005} 信封回应；该形态
+// 旧管线当成功处理——非流式在翻译层崩成 500（resp.content.filter）、流式产出空
+// 流，且 /v1/responses 全端点不打请求表行，两起事故在日志面板均不可见。
+describe("handleResponses observability + biz-envelope guards (2026-11-09)", () => {
+  const envelope = JSON.stringify({ code: 1005, msg: "exceed quota limit", logid: "20261109" });
+
+  it("turns a 200-wrapped biz envelope into an honest 502 (batch lane)", async () => {
+    const response = await handleResponses(makeReq({ model: "glm-5.2", input: "hello" }), {
+      config: CONFIG, auth, endpointRouting: null, clientSigning: null,
+      fetchImpl: chatUpstream(envelope),
+    });
+    expect(response.status).toBe(502);
+    const body = await response.json();
+    expect(body.error.type).toBe("translation_failed");
+    expect(body.error.message).toContain("exceed quota limit");
+  });
+
+  it("does the same for stream requests answered with JSON (no empty SSE garbage)", async () => {
+    const response = await handleResponses(makeReq({ model: "glm-5.2", input: "hello", stream: true }), {
+      config: CONFIG, auth, endpointRouting: null, clientSigning: null,
+      fetchImpl: chatUpstream(envelope),
+    });
+    expect(response.status).toBe(502);
+    expect((await response.json()).error.type).toBe("translation_failed");
+  });
+
+  it("logs request-table rows (RSP tag) for batch success and upstream error passthrough", async () => {
+    const lines: string[] = [];
+    const origLog = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.join(" ")); };
+    try {
+      const ok = await handleResponses(makeReq({ model: "glm-5.2", input: "hello" }), {
+        config: CONFIG, auth, endpointRouting: null, clientSigning: null,
+        fetchImpl: chatUpstream(anthropicMsg("hi back")),
+      });
+      expect(ok.status).toBe(200);
+      const limited = await handleResponses(makeReq({ model: "glm-5.2", input: "hello" }), {
+        config: CONFIG, auth, endpointRouting: null, clientSigning: null,
+        fetchImpl: chatUpstream('{"error":{"type":"rate_limit_error"}}', 429),
+      });
+      expect(limited.status).toBe(429);
+    } finally {
+      console.log = origLog;
+    }
+    const rows = lines.filter((l) => l.includes("RSP"));
+    expect(rows.some((l) => l.includes("|  200 |"))).toBeTrue();
+    expect(rows.some((l) => l.includes("|  429 |"))).toBeTrue();
+  });
+
+  it("drops a quota-dead card answering 200+code:1005 and falls back to the session model", async () => {
+    const manager = await cardHoldingManager();
+    const calls: { url: string }[] = [];
+    try {
+      const response = await handleResponses(makeReq({ model: "glm-5.2", input: "hi" }), {
+        config: CONFIG, auth: oauthJwtAuth(), endpointRouting: null, clientSigning: null, highspeed: manager,
+        fetchImpl: (async (request: Request) => {
+          calls.push({ url: request.url });
+          return calls.length === 1
+            ? new Response(envelope, { status: 200, headers: { "content-type": "application/json" } })
+            : new Response(anthropicMsg("recovered"));
+        }) as typeof fetch,
+      });
+      expect(response.status).toBe(200);
+      expect(calls.length).toBe(2);
+      // carded attempt reroutes to the dedicated highspeed endpoint; the
+      // fallback returns to the provider URL with the session model
+      expect(calls[0]!.url).toContain("/api/v1/highspeed/");
+      expect(calls[1]!.url).toBe("https://api.z.ai/api/anthropic/v1/messages");
+    } finally { manager.stop(); }
   });
 });

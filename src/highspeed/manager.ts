@@ -533,13 +533,38 @@ export function applyHighspeedCardHeaders(
   ];
 }
 
-/** True when an upstream response is a card-auth rejection (HTTP 401 or biz 3402). */
+/**
+ * True when an upstream response means the carded route is unusable and the
+ * request must fall back to the session model (official `selectionFallback`
+ * semantics): HTTP 401, biz `code:3402`, or a 200-wrapped business envelope
+ * (`{"code":1005,"msg":"exceed quota limit",…}`).
+ *
+ * The 200+code shape went live with the 2026-11-09 reroute to the dedicated
+ * highspeed endpoint: a quota-dead card answers HTTP 200 with that envelope,
+ * which the old 401/3402-only predicate never matched — the dead card was
+ * never dropped and every carded non-stream request crashed the translator
+ * (`resp.content.filter` on a body with no `content`, /v1/responses → 500).
+ * Deliberate deviation: the official client was only OBSERVED rejecting
+ * 401/3402; extending the same fallback to code-bearing 200 bodies is our
+ * call, not a mirror. A legitimate Anthropic success body never carries a
+ * top-level `code`, so false positives are structurally impossible; SSE
+ * bodies are never sniffed (teeing a live stream would buffer it whole).
+ */
 export async function isHighspeedCardRejection(resp: Response): Promise<boolean> {
   if (resp.status === 401) return true;
   if (resp.status !== 200 && resp.status < 500) {
     try {
       const body = await resp.clone().json() as { code?: unknown };
       if (body?.code === 3402) return true;
+    } catch {
+      // non-JSON — not a card rejection
+    }
+    return false;
+  }
+  if (resp.status === 200 && (resp.headers.get("content-type") ?? "").includes("application/json")) {
+    try {
+      const body = await resp.clone().json() as { code?: unknown };
+      if (body && typeof body === "object" && body.code !== undefined) return true;
     } catch {
       // non-JSON — not a card rejection
     }

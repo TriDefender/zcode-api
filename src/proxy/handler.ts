@@ -923,7 +923,7 @@ function translateAnthropicBody(body: string | undefined): Response | string | u
   }
 }
 
-function isAnthropicMessagesResponse(value: unknown): value is AnthropicMessagesResponse {
+export function isAnthropicMessagesResponse(value: unknown): value is AnthropicMessagesResponse {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<AnthropicMessagesResponse>;
   return candidate.type === "message" && candidate.role === "assistant" && Array.isArray(candidate.content);
@@ -951,7 +951,7 @@ function translatedSseResponse(body: ReadableStream<Uint8Array>): Response {
   });
 }
 
-interface RequestMeta {
+export interface RequestMeta {
   model: string;
   stream: boolean;
 }
@@ -981,7 +981,8 @@ function localTime(ms: number): string {
   return `${hh}:${mm}:${ss}`;
 }
 
-function nextReqId(): string {
+/** Shared request id source (handler.ts hot paths + /v1/responses). */
+export function nextReqId(): string {
   return `#${String(++reqCounter).padStart(3, "0")}`;
 }
 
@@ -1074,7 +1075,13 @@ function printHeader(): void {
   );
 }
 
-function printRow(
+/**
+ * Request-table row logger, shared by the handler.ts hot paths and
+ * /v1/responses (which emitted nothing before 2026-11-09 — an upstream 429
+ * passthrough was invisible in the log pane and burned a whole debugging
+ * session; rows for /v1/responses carry the "RSP" tag override).
+ */
+export function printRow(
   reqId: string,
   format: Format,
   meta: RequestMeta,
@@ -1084,9 +1091,11 @@ function printRow(
   tokens: number,
   avgTps: number,
   streamEndAt: number,
+  /** Row tag override (e.g. "RSP" for /v1/responses); defaults by format. */
+  tagOverride?: string,
 ): void {
   printHeader();
-  const tag = format === "anthropic" ? "ANT" : "OAI";
+  const tag = tagOverride ?? (format === "anthropic" ? "ANT" : "OAI");
   const mode = meta.stream ? "stream" : "batch";
 
   if (COMPACT_LOG) {
@@ -1123,7 +1132,8 @@ function fmtMs(ms: number): string {
   return `${Math.floor(ms / 60_000)}m${Math.floor((ms % 60_000) / 1000)}s`;
 }
 
-function observeStream(
+/** Shared stream observer: row + stream-summary dump at stream end. */
+export function observeStream(
   reqId: string,
   format: Format,
   meta: RequestMeta,
@@ -1132,6 +1142,7 @@ function observeStream(
   body: ReadableStream<Uint8Array>,
   contentEncoding: string | null,
   onEnd?: () => void,
+  tagOverride?: string,
 ): void {
   const compressed = contentEncoding !== null;
   const dumpOn = dumpEnabled();
@@ -1188,7 +1199,7 @@ function observeStream(
     const totalMs = endAt - requestSentAt;
     const tokens = metrics.tokens;
     const avgTps = metrics.tokensPerSecond;
-    printRow(reqId, format, meta, status, requestSentAt, requestSentAt + ttfbMs, tokens, avgTps, endAt);
+    printRow(reqId, format, meta, status, requestSentAt, requestSentAt + ttfbMs, tokens, avgTps, endAt, tagOverride);
     if (dumpOn) {
       dumpPhase(reqId, "upstream_stream_summary", {
         status,

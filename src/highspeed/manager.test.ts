@@ -483,4 +483,20 @@ describe("highspeed helpers", () => {
     expect(await isHighspeedCardRejection(new Response("data: hi\n\n", { status: 200, headers: { "content-type": "text/event-stream" } }))).toBeFalse();
     expect(await isHighspeedCardRejection(new Response("plain", { status: 400 }))).toBeFalse();
   });
+
+  // 2026-11-09 实弹：挂卡 reroute 至 highspeed 专属端点后，卡侧配额耗尽以
+  // HTTP 200 + {"code":1005,"msg":"exceed quota limit"} 回应——旧判据（仅
+  // 401/3402）漏判，死卡永不弃卡、非流式翻译当场崩（/v1/responses → 500）。
+  it("isHighspeedCardRejection treats 200-wrapped biz envelopes as rejection (dead-card quota)", async () => {
+    const jsonHeaders = { headers: { "content-type": "application/json" } };
+    expect(await isHighspeedCardRejection(new Response(JSON.stringify({ code: 1005, msg: "exceed quota limit", logid: "x" }), { status: 200, ...jsonHeaders }))).toBeTrue();
+    expect(await isHighspeedCardRejection(new Response(JSON.stringify({ code: 3009, msg: "model concurrency limit exceeded" }), { status: 200, ...jsonHeaders }))).toBeTrue();
+    // 合法 Anthropic 成功体（无顶层 code）不是拒卡；非 JSON 的 200 也不是
+    expect(await isHighspeedCardRejection(new Response(JSON.stringify({ id: "msg_1", type: "message", role: "assistant", content: [{ type: "text", text: "hi" }] }), { status: 200, ...jsonHeaders }))).toBeFalse();
+    expect(await isHighspeedCardRejection(new Response("not json", { status: 200, ...jsonHeaders }))).toBeFalse();
+    // clone 语义：判定后原响应体必须仍可读（弃卡回退前的上游体不复读）
+    const envelope = new Response(JSON.stringify({ code: 1005, msg: "exceed quota limit" }), { status: 200, ...jsonHeaders });
+    expect(await isHighspeedCardRejection(envelope)).toBeTrue();
+    expect(await envelope.json()).toEqual({ code: 1005, msg: "exceed quota limit" });
+  });
 });
