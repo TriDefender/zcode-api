@@ -27,3 +27,10 @@ Android-APP/app/src/main/assets/server_bundle/server.cjs
 # scripts/build-fork-worker.ts (chained into every build:* script), never
 # committed.
 src/proxy/captcha-worker-entry.bundle.js
+
+# Signing material — never commit. The release workflow writes the decoded
+# keystore into the tree (Android-APP/app/release.keystore, see
+# .github/workflows/release.yml build-android); guard local signed builds too.
+*.keystore
+*.jks
+*.p12
