@@ -169,6 +169,13 @@ export interface ClaimConfig {
   pollIntervalMs: number;
   /** Backoff after a failed claim attempt in ms. Default `600000` (10 min). */
   cooldownMs: number;
+  /**
+   * Daily claim window in UTC+8, `"HH:MM-HH:MM"` (24h). Outside the window the
+   * scheduler sends no upstream requests, and a successful claim waits for the
+   * next day's window before polling again (one claim per day). Empty disables
+   * the gate and polls around the clock. Default `""`.
+   */
+  window?: string;
   /** Optional `plan_id` to claim; empty string claims the highest-priority preview. Default `""`. */
   planId: string;
 }

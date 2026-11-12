@@ -9,7 +9,7 @@ import type { ClaimablePlan, ClaimOutcome } from "./types.js";
 import type { Credential } from "../auth/types.js";
 import { credentialString } from "../auth/types.js";
 import { createClaimClient, ClaimPreviewError } from "./client.js";
-import { ClaimScheduler } from "./scheduler.js";
+import { ClaimScheduler, parseClaimWindow } from "./scheduler.js";
 import { getCaptchaToken } from "../proxy/captcha.js";
 import { loadCredential } from "../auth/store.js";
 import { getDefaultEndpointRouting, requiresClaimCaptcha } from "../proxy/endpoint-routing.js";
@@ -79,6 +79,7 @@ export function startAutoClaim(config: ProxyConfig, auth: AuthManager): ClaimSch
       planId: config.claim.planId || undefined,
       pollIntervalMs: config.claim.pollIntervalMs,
       cooldownMs: config.claim.cooldownMs,
+      window: parseClaimWindow(config.claim.window),
     },
     log: (message) => console.log(`[claim] ${message}`),
   });

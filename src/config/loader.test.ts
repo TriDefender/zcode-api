@@ -140,6 +140,7 @@ logging:
       origin: "https://zcode.z.ai",
       pollIntervalMs: 300000,
       cooldownMs: 600000,
+      window: "",
       planId: "",
     });
   });
@@ -304,8 +305,26 @@ claim:
       origin: "https://zcode.z.ai",
       pollIntervalMs: 60000,
       cooldownMs: 120000,
+      window: "",
       planId: "weekend-special",
     });
+  });
+
+  it("claim: window parses and passes through to the scheduler config", () => {
+    const path = writeYaml(`
+claim:
+  window: "19:00-20:30"
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.claim.window).toBe("19:00-20:30");
+  });
+
+  it("claim: malformed window throws at load time", () => {
+    const path = writeYaml(`
+claim:
+  window: "25:00-99:99"
+`);
+    expect(() => loadConfig(path)).toThrow(/claim\.window/);
   });
 
   it("claim: ZCODE_CLAIM_ENABLED / ZCODE_CLAIM_POLL_INTERVAL_MS env override", () => {

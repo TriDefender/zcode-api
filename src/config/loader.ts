@@ -4,6 +4,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
 import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig, AsyncConfig, EndpointRoutingConfig, ClientSigningConfig, HighspeedConfig, ClaimConfig } from "./types.js";
+import { parseClaimWindow } from "../claim/scheduler.js";
 
 /** Environment variable keys that override YAML values. */
 const ENV = {
@@ -77,6 +78,7 @@ const DEFAULTS = {
   CLAIM_ORIGIN: "https://zcode.z.ai",
   CLAIM_POLL_INTERVAL_MS: 300000,
   CLAIM_COOLDOWN_MS: 600000,
+  CLAIM_WINDOW: "",
   CLAIM_PLAN_ID: "",
   ENDPOINT_ROUTING_ENABLED: true,
   ENDPOINT_ROUTING_ORIGIN: "https://zcode.z.ai",
@@ -401,12 +403,17 @@ function resolveClaimConfig(raw: unknown): ClaimConfig {
   const origin = (originEnv ?? (typeof obj.origin === "string" ? obj.origin : DEFAULTS.CLAIM_ORIGIN)).trim() || DEFAULTS.CLAIM_ORIGIN;
   validateOrigin(origin, "claim.origin");
 
+  // Validate the window format at load time (throws on malformed input).
+  const rawWindow = typeof obj.window === "string" ? obj.window : DEFAULTS.CLAIM_WINDOW;
+  const window = parseClaimWindow(rawWindow) ? rawWindow.trim() : DEFAULTS.CLAIM_WINDOW;
+
   return {
     enabled: enabledEnv !== undefined ? resolveBool(enabledEnv, DEFAULTS.CLAIM_ENABLED) : resolveBool(obj.enabled, DEFAULTS.CLAIM_ENABLED),
     auto: autoEnv !== undefined ? resolveBool(autoEnv, DEFAULTS.CLAIM_AUTO) : resolveBool(obj.auto, DEFAULTS.CLAIM_AUTO),
     origin,
     pollIntervalMs: resolvePositiveInt(pollIntervalEnv ?? obj.pollIntervalMs ?? obj.poll_interval_ms, DEFAULTS.CLAIM_POLL_INTERVAL_MS, "claim.pollIntervalMs"),
     cooldownMs: resolvePositiveInt(obj.cooldownMs ?? obj.cooldown_ms, DEFAULTS.CLAIM_COOLDOWN_MS, "claim.cooldownMs"),
+    window,
     planId: typeof obj.planId === "string" ? obj.planId.trim() : DEFAULTS.CLAIM_PLAN_ID,
   };
 }

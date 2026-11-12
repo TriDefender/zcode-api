@@ -170,6 +170,11 @@ claim:
   # Backoff after failed attempts (10 min default); quota_exhausted /
   # already_claimed back off to the server-provided next window instead.
   cooldownMs: 600000
+  # Optional daily claim window in UTC+8, "HH:MM-HH:MM" (end exclusive).
+  # Outside it the scheduler sends no upstream requests at all, and a
+  # successful claim holds until the next day's window opens (one claim per
+  # day). Empty = no gate (poll around the clock). Example: "19:00-20:30".
+  window: ""
   # Optional: claim a specific plan_id. Empty = highest-priority preview.
   planId: ""
 

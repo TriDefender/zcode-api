@@ -28,6 +28,12 @@ interface ClaimSchedulerConfig {
   planId?: string;
   pollIntervalMs: number;
   cooldownMs: number;
+  /**
+   * Daily claim window in UTC+8, `"HH:MM-HH:MM"` (24h). Outside the window
+   * ticks are suppressed (no preview requests) and a successful claim holds
+   * until the NEXT day's window start. `undefined` = gate off (poll always).
+   */
+  window?: { startMin: number; endMin: number };
 }
 
 export interface ClaimSchedulerDeps {
@@ -47,6 +53,43 @@ export type TickResult =
   | { action: "claimed"; planId: string; startsAt?: number; endsAt?: number }
   | { action: "failed"; outcome: Extract<ClaimOutcome, { ok: false }>; holdMs: number }
   | { action: "error"; message: string; holdMs: number };
+
+/** Daily claim window in UTC+8 ("HH:MM-HH:MM"): outside it, don't touch upstream. */
+export function parseClaimWindow(raw: string | undefined): { startMin: number; endMin: number } | undefined {
+  const s = raw?.trim();
+  if (!s) return undefined;
+  const m = /^(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})$/.exec(s);
+  if (!m) throw new Error(`claim.window: expected "HH:MM-HH:MM", got "${s}"`);
+  const startMin = Number(m[1]) * 60 + Number(m[2]);
+  const endMin = Number(m[3]) * 60 + Number(m[4]);
+  if (Number(m[1]) > 23 || Number(m[3]) > 23 || Number(m[2]) > 59 || Number(m[4]) > 59) {
+    throw new Error(`claim.window: time out of range in "${s}"`);
+  }
+  if (startMin === endMin) throw new Error(`claim.window: start equals end in "${s}"`);
+  return { startMin, endMin };
+}
+
+/** Minutes since local midnight mapped into the UTC+8 wall clock. */
+export function utcPlus8MinutesOfDay(nowMs: number): number {
+  const shifted = new Date(nowMs + 8 * 60 * 60 * 1000);
+  return shifted.getUTCHours() * 60 + shifted.getUTCMinutes();
+}
+
+function fmtMinute(min: number): string {
+  return `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+}
+
+/** Minutes until the window opens (startMin inclusive, endMin exclusive); 0 = inside. */
+export function minutesUntilWindow(minutesOfDay: number, win: { startMin: number; endMin: number }): number {
+  if (minutesOfDay < win.startMin) return win.startMin - minutesOfDay;
+  if (minutesOfDay >= win.endMin) return 24 * 60 - minutesOfDay + win.startMin;
+  return 0; // inside the window
+}
+
+/** Minutes until the window NEXT opens (always ≥1 — inside the window counts to tomorrow's start). */
+export function minutesUntilNextStart(minutesOfDay: number, win: { startMin: number; endMin: number }): number {
+  return minutesOfDay < win.startMin ? win.startMin - minutesOfDay : 24 * 60 - minutesOfDay + win.startMin;
+}
 
 export class ClaimScheduler {
   private stopped = false;
@@ -82,6 +125,19 @@ export class ClaimScheduler {
     if (this.stopped) return { action: "stopped" };
     const nowMs = this.now();
     if (nowMs < this.holdUntil) return { action: "skipped_hold" };
+
+    // Daily claim window (UTC+8): outside the window, don't touch upstream.
+    // Hold until the next window opens; scheduleNext clamps to pollIntervalMs,
+    // so the hold re-arms every ~5min without any request being sent.
+    const win = this.deps.config.window;
+    if (win) {
+      const waitMin = minutesUntilWindow(utcPlus8MinutesOfDay(nowMs), win);
+      if (waitMin > 0) {
+        this.holdUntil = nowMs + waitMin * 60_000;
+        this.log(`claim: outside claim window (UTC+8 ${fmtMinute(win.startMin)}-${fmtMinute(win.endMin)}) — next poll at window open (~${waitMin}m)`);
+        return { action: "idle" };
+      }
+    }
 
     let jwt: string | undefined;
     try {
@@ -148,8 +204,16 @@ export class ClaimScheduler {
 
     if (outcome.ok) {
       const endsAtMs = outcome.endsAt !== undefined ? outcome.endsAt * 1000 : undefined;
-      this.holdUntil = endsAtMs ?? nowMs + this.deps.config.pollIntervalMs;
-      this.log(`claim: claimed plan ${target.planId}${outcome.startsAt !== undefined ? ` (activates ${new Date(outcome.startsAt * 1000).toISOString()})` : ""}`);
+      // Claimed: stop polling until the NEXT window opens (success once per
+      // day; re-polling inside the same window would just burn daily quota).
+      const nextWindowMs = win ? minutesUntilNextStart(utcPlus8MinutesOfDay(nowMs), win) * 60_000 : undefined;
+      const holdCandidates: number[] = [];
+      if (endsAtMs !== undefined) holdCandidates.push(endsAtMs);
+      if (nextWindowMs !== undefined) holdCandidates.push(nowMs + nextWindowMs);
+      this.holdUntil = holdCandidates.length > 0
+        ? Math.max(...holdCandidates)
+        : nowMs + this.deps.config.pollIntervalMs;
+      this.log(`claim: claimed plan ${target.planId}${outcome.startsAt !== undefined ? ` (activates ${new Date(outcome.startsAt * 1000).toISOString()})` : ""}${nextWindowMs !== undefined ? ` — next poll at next window open (~${Math.round(nextWindowMs / 60_000)}m)` : ""}`);
       return { action: "claimed", planId: target.planId, startsAt: outcome.startsAt, endsAt: outcome.endsAt };
     }
 

@@ -4,7 +4,7 @@
  * failure kind, credential loss → stop, and error backoff.
  */
 import { describe, it, expect } from "bun:test";
-import { ClaimScheduler, type ClaimSchedulerDeps } from "./scheduler.js";
+import { ClaimScheduler, parseClaimWindow, minutesUntilWindow, type ClaimSchedulerDeps } from "./scheduler.js";
 import { ClaimPreviewError } from "./client.js";
 import type { ClaimOutcome, ClaimablePlan } from "./types.js";
 
@@ -198,6 +198,86 @@ describe("ClaimScheduler.tick", () => {
     h.plans = [];
     await h.scheduler.tick();
     expect(h.captchaCalls).toBe(0);
+  });
+});
+
+describe("ClaimScheduler — daily claim window (UTC+8)", () => {
+  // Window below is the campaign's usual daily slot, 19:00-20:30 UTC+8.
+  function windowHarness() {
+    const h = makeHarness();
+    h.config.window = { startMin: 19 * 60, endMin: 20 * 60 + 30 };
+    return h;
+  }
+
+  it("suppresses upstream requests outside the window and holds until the next open", async () => {
+    const h = windowHarness();
+    // 2026-11-11T12:31:00Z = 20:31 UTC+8 — outside (end is 20:30).
+    h.nowMs = Date.UTC(2026, 10, 11, 12, 31, 0);
+    const res = await h.scheduler.tick();
+    expect(res).toEqual({ action: "idle" });
+    // ~22h29m until tomorrow 19:00; hold must cover it (re-armed every poll by scheduleNext).
+    h.nowMs += 22 * 60 * 60_000 + 29 * 60_000 - 1;
+    expect(await h.scheduler.tick()).toEqual({ action: "skipped_hold" });
+    expect(h.claimCalls).toHaveLength(0);
+  });
+
+  it("polls normally inside the window", async () => {
+    const h = windowHarness();
+    h.nowMs = Date.UTC(2026, 10, 11, 11, 30, 0); // 19:30 UTC+8 — inside
+    const res = await h.scheduler.tick();
+    expect(res).toEqual({ action: "claimed", planId: "weekend-1" });
+  });
+
+  it("after a successful claim, the next tick waits for the NEXT day's window", async () => {
+    const h = windowHarness();
+    h.nowMs = Date.UTC(2026, 10, 11, 11, 30, 0); // 19:30 UTC+8 — inside
+    await h.scheduler.tick();
+    // holdUntil = now + 23.5h (minutes until tomorrow 19:00); endsAt undefined.
+    const expectedHold = 23 * 60 * 60_000 + 30 * 60_000;
+    h.nowMs += expectedHold - 60_000; // 18:59 next day — still held
+    expect(await h.scheduler.tick()).toEqual({ action: "skipped_hold" });
+    h.nowMs = Date.UTC(2026, 10, 12, 11, 30, 0); // 19:30 next day — window open again
+    expect((await h.scheduler.tick()).action).toBe("claimed");
+  });
+
+  it("window start is inclusive", async () => {
+    const h = windowHarness();
+    h.nowMs = Date.UTC(2026, 10, 11, 11, 0, 0); // exactly 19:00 UTC+8
+    expect((await h.scheduler.tick()).action).toBe("claimed");
+  });
+
+  it("window end is exclusive (20:30:00 is outside)", async () => {
+    const h = windowHarness();
+    h.nowMs = Date.UTC(2026, 10, 11, 12, 30, 0); // exactly 20:30 UTC+8
+    expect((await h.scheduler.tick()).action).toBe("idle");
+    expect(h.claimCalls).toHaveLength(0);
+  });
+
+  it("no window configured = legacy always-poll behavior", async () => {
+    const h = makeHarness(); // no window
+    h.nowMs = Date.UTC(2026, 10, 11, 12, 1, 0); // 20:01 UTC+8
+    expect((await h.scheduler.tick()).action).toBe("claimed");
+  });
+});
+
+describe("parseClaimWindow / minutesUntilWindow", () => {
+  it("parses HH:MM-HH:MM and rejects malformed input", () => {
+    expect(parseClaimWindow("19:00-20:30")).toEqual({ startMin: 1140, endMin: 1230 });
+    expect(parseClaimWindow("  0:05-23:59 ")).toEqual({ startMin: 5, endMin: 1439 });
+    expect(parseClaimWindow("")).toBeUndefined();
+    expect(parseClaimWindow(undefined)).toBeUndefined();
+    expect(() => parseClaimWindow("19:00")).toThrow(/HH:MM-HH:MM/);
+    expect(() => parseClaimWindow("24:00-25:00")).toThrow(/out of range/);
+    expect(() => parseClaimWindow("19:00-19:00")).toThrow(/start equals end/);
+  });
+
+  it("minutesUntilWindow handles before/inside/after and midnight wrap", () => {
+    const win = { startMin: 1140, endMin: 1230 }; // 19:00-20:30
+    expect(minutesUntilWindow(1140, win)).toBe(0); // inside (start)
+    expect(minutesUntilWindow(1229, win)).toBe(0); // inside
+    expect(minutesUntilWindow(1230, win)).toBe(22 * 60 + 30); // 20:30 → next 19:00
+    expect(minutesUntilWindow(600, win)).toBe(540); // 10:00 → 19:00
+    expect(minutesUntilWindow(1439, win)).toBe(1141); // 23:59 → 19:00 next day (wrap)
   });
 });
 
