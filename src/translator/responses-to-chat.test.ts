@@ -158,6 +158,44 @@ describe("responsesToChatCompletions", () => {
     expect(msgs[2]).toEqual({ role: "tool", tool_call_id: "call_1", content: "sunny" });
   });
 
+  it("maps function_call_output content-part arrays (input_image) onto Chat tool-message image parts", () => {
+    // The Responses spec allows `output` to be a content-part array (OpenAI's
+    // own docs show {type:"input_image", image_url} inside a tool result so
+    // the model can look at a screenshot the tool returned) — stringly-typed
+    // handling dropped the image.
+    const dataUrl = "data:image/png;base64,aGVsbG8=";
+    const r = responsesToChatCompletions(baseReq({
+      input: [
+        { type: "message", role: "user", content: "read the png" },
+        { type: "function_call", call_id: "call_img", name: "read_file", arguments: '{"path":"a.png"}' },
+        { type: "function_call_output", call_id: "call_img", output: [
+          { type: "input_text", text: "Read image file: a.png" },
+          { type: "input_image", image_url: dataUrl },
+        ] },
+      ],
+    }));
+    const toolMsg = r.chatRequest.messages[2];
+    expect(toolMsg.role).toBe("tool");
+    expect(toolMsg.content).toEqual([
+      { type: "text", text: "Read image file: a.png" },
+      { type: "image_url", image_url: { url: dataUrl } },
+    ]);
+  });
+
+  it("stringifies structured (non-array, non-string) function_call_output output", () => {
+    const r = responsesToChatCompletions(baseReq({
+      input: [
+        { type: "function_call", call_id: "c1", name: "get_data", arguments: "{}" },
+        { type: "function_call_output", call_id: "c1", output: { rows: 3, ok: true } },
+      ],
+    }));
+    expect(r.chatRequest.messages[1]).toEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: '{"rows":3,"ok":true}',
+    });
+  });
+
   it("translates custom_tool_call + output with {input:...} argument shape", () => {
     const r = responsesToChatCompletions(baseReq({
       input: [

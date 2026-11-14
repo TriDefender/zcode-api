@@ -221,11 +221,11 @@ function buildMessagesFromItems(items: ResponsesInputItem[]): OpenAIMessage[] {
       }
       case "function_call_output":
       case "custom_tool_call_output": {
-        const fco = item as { call_id: string; output?: string };
+        const fco = item as { call_id: string; output?: unknown };
         out.push({
           role: "tool",
           tool_call_id: fco.call_id,
-          content: fco.output ?? "",
+          content: toolOutputToChat(fco.output),
         });
         pendingReasoning = "";
         continue;
@@ -300,6 +300,78 @@ function extractReasoningText(item: ResponsesInputItem): string {
     .map((p) => (typeof p.text === "string" ? p.text : ""))
     .filter((t) => t.length > 0)
     .join("\n");
+}
+
+/**
+ * Normalize a `function_call_output` / `custom_tool_call_output` `output` into
+ * a Chat tool-message `content` value.
+ *
+ * The Responses spec allows the output to be a content-part array (OpenAI's
+ * own docs show `{type:"input_image", image_url}` inside a tool result so the
+ * model can look at a screenshot the tool returned); upstream Chat dialects
+ * carry tool images as `image_url` parts on `role:"tool"` — and the downstream
+ * Chat→Anthropic translator maps those onto Anthropic `tool_result` image
+ * blocks. Clients sending read_file image results in the array form had every
+ * image silently dropped when only strings were accepted here.
+ *
+ * Non-array, non-string outputs (structured JSON objects) stringify — matches
+ * OpenAI Chat, where tool-message content is stringly typed.
+ */
+function toolOutputToChat(output: unknown): string | OpenAIContentPart[] {
+  if (typeof output === "string") return output;
+  if (Array.isArray(output)) {
+    const chatParts = outputPartsToChat(output);
+    if (chatParts.every((p) => p.type === "text")) return chatParts.map((p) => p.text ?? "").join("");
+    return chatParts;
+  }
+  if (output === undefined || output === null) return "";
+  try {
+    return JSON.stringify(output);
+  } catch {
+    return String(output);
+  }
+}
+
+/**
+ * Convert content-part objects appearing inside a tool output array to Chat
+ * content parts. Accepts the Responses dialect (`input_image` with
+ * `image_url: string | {url}`, `input_text`, `input_video`, `input_file`)
+ * and the already-Chat-shaped parts some clients emit verbatim. Anything
+ * unknown degrades to a text part carrying its JSON — never dropped, so the
+ * model can still see what the tool returned.
+ */
+function outputPartsToChat(parts: unknown[]): OpenAIContentPart[] {
+  const out: OpenAIContentPart[] = [];
+  for (const part of parts) {
+    if (part === null || typeof part !== "object") {
+      out.push({ type: "text", text: String(part) });
+      continue;
+    }
+    const p = part as ResponsesContentPart;
+    if ((p.type === "input_text" || p.type === "output_text" || p.type === "text") && typeof p.text === "string") {
+      out.push({ type: "text", text: p.text });
+    } else if (p.type === "input_image" || p.type === "image_url") {
+      const url = typeof p.image_url === "string" ? p.image_url : p.image_url?.url;
+      if (!url) continue;
+      out.push({ type: "image_url", image_url: { url } });
+    } else if (p.type === "input_video" || p.type === "video_url") {
+      const url = typeof p.video_url === "string"
+        ? p.video_url
+        : p.video_url?.url ?? (typeof p.data === "string" ? p.data : undefined);
+      if (!url) continue;
+      out.push({ type: "video_url", video_url: { url } });
+    } else if (p.type === "input_file" || p.type === "file") {
+      const fileData = p.file_data ?? p.file?.file_data;
+      if (!fileData) continue;
+      out.push({
+        type: "file",
+        file: { filename: p.filename ?? p.file?.filename, file_data: fileData },
+      });
+    } else {
+      out.push({ type: "text", text: JSON.stringify(p) });
+    }
+  }
+  return out;
 }
 
 /** Convert Responses content parts to a Chat `content` value (string or parts[]). */
