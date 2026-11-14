@@ -45,7 +45,7 @@ function scriptedFetch(handlers: Array<() => Response>): typeof fetch {
 }
 
 describe("loginPageResponse", () => {
-  it("serves the selection page with the two login cards (bigmodel OAuth deprecated)", () => {
+  it("serves the bilingual selection page with the two login cards (bigmodel OAuth deprecated)", () => {
     const page = loginPageResponse();
     expect(page.status).toBe(200);
     expect(page.html).toContain('data-provider="zai"');

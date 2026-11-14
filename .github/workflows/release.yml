@@ -194,19 +194,9 @@ jobs:
       - name: Make gradlew executable
         working-directory: Android-APP
         run: chmod +x gradlew
-      - name: Build debug APK
-        working-directory: Android-APP
-        env:
-          ORG_GRADLE_PROJECT_androidApp_versionCode: ${{ needs.detect.outputs.versionCode }}
-          ORG_GRADLE_PROJECT_androidApp_versionName: ${{ needs.detect.outputs.tag }}
-        run: ./gradlew :app:assembleDebug --no-daemon
-      - name: Upload debug APK
-        uses: actions/upload-artifact@v7
-        with:
-          name: app-debug.apk
-          path: Android-APP/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-
+      # Debug APK no longer built (2026-11-14): releases ship the signed
+      # release APK only; assembleRelease compiles the same Kotlin sources,
+      # so dropping assembleDebug does not lose the compile gate.
       - name: Decode signing keystore
         if: env.KEYSTORE_BASE64 != ''
         env:

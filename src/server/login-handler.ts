@@ -3,16 +3,18 @@
  * the TUI (temporary loopback listener opened by the `l` key) and the serve
  * mode main server (tokenless static page + proxyApiKey-gated flow endpoints).
  *
- * The user picks a login flavor (zai international / zai_cn China / bigmodel);
- * the page jumps to the server-issued authorize URL and polls `/login/status`
- * while the server-mediated poll flow (auth/oauth.ts `startOAuthWithPolling`
- * mirror) completes in the background — the browser never calls back here.
+ * The user picks a login flavor (zai international / zai_cn China); the page
+ * jumps to the server-issued authorize URL IN THE SAME TAB (mobile-friendly —
+ * decision 2026-11-14) and, after the user returns via browser Back, polls
+ * `/login/status` while the server-mediated poll flow (auth/oauth.ts
+ * `startOAuthWithPolling` mirror) completes in the background — the browser
+ * never calls back here.
  *
  * Flavor semantics (NOTEPAD「2026-11-14 增补」): `zai_cn` is the desktop 3.18.2
  * "Z.ai (CN)" login flavor — `cli/init {provider:"zai_cn"}` issues the
  * zchat.z.ai authorize host directly, `zai` keeps the chat.z.ai chain (CN
  * browsers region-bounce to zchat with the same OAuth params), and both fold
- * into the zai credential family downstream.
+ * into the bigmodel credential family downstream.
  *
  * Security: on the main server the flow endpoints sit behind the shared
  * proxyApiKey gate (server.ts route order) — a completed login overwrites the
