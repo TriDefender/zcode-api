@@ -7,6 +7,7 @@ import {
   translateResponseAnthropicToOpenAI,
   anthropicUsageToOpenAI,
 } from "./openai-to-anthropic.js";
+import { responsesToChatCompletions } from "./responses-to-chat.js";
 import {
   translateRequestAnthropicToOpenAI,
   translateResponseOpenAIToAnthropic,
@@ -302,6 +303,37 @@ describe("translateRequestOpenAIToAnthropic", () => {
     expect(blocks[0].type).toBe("tool_result");
     expect(blocks[0].tool_use_id).toBe("call_xyz");
     expect(blocks[0].content).toBe("62°F and sunny");
+  });
+
+  it("end-to-end: Responses tool output with input_image reaches Anthropic as a tool_result image block", () => {
+    // A client sending a read_file image result to /v1/responses goes through
+    // the full chain Responses→Chat→Anthropic, and every hop must preserve
+    // the image (previously dropped at the Responses→Chat hop).
+    const dataUrl = "data:image/png;base64,aGVsbG8=";
+    const responsesReq = {
+      model: "glm-4.6",
+      input: [
+        { type: "message", role: "user", content: "look at the screenshot" },
+        { type: "function_call", call_id: "call_img", name: "read_file", arguments: '{"path":"s.png"}' },
+        { type: "function_call_output", call_id: "call_img", output: [
+          { type: "input_text", text: "Read image file: s.png" },
+          { type: "input_image", image_url: dataUrl },
+        ] },
+      ],
+    } as Parameters<typeof responsesToChatCompletions>[0];
+    const chatReq = responsesToChatCompletions(responsesReq).chatRequest;
+    const anthropicReq = translateRequestOpenAIToAnthropic(chatReq);
+    const toolResultMsg = anthropicReq.messages[2];
+    expect(toolResultMsg.role).toBe("user");
+    const blocks = toolResultMsg.content as any[];
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].type).toBe("tool_result");
+    expect(blocks[0].tool_use_id).toBe("call_img");
+    const inner = blocks[0].content as any[];
+    expect(inner).toEqual([
+      { type: "text", text: "Read image file: s.png" },
+      { type: "image", source: { type: "base64", media_type: "image/png", data: "aGVsbG8=" } },
+    ]);
   });
 
   it("coalesces consecutive role:'tool' messages into a single user message with multiple tool_result blocks", () => {
