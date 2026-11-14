@@ -11,12 +11,16 @@ function bizResponse(data: unknown): Response {
   });
 }
 
-function mockFetch(responses: Record<string, (body?: string) => Response>): typeof fetch {
+function mockFetch(
+  responses: Record<string, (body?: string, authorization?: string, url?: string) => Response>,
+): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === "string" ? input : input.toString();
     const body = init?.body as string | undefined;
+    const headers = (init?.headers ?? {}) as Record<string, string>;
+    const authorization = headers.authorization ?? headers.Authorization;
     for (const [pattern, handler] of Object.entries(responses)) {
-      if (url.includes(pattern)) return handler(body);
+      if (url.includes(pattern)) return handler(body, authorization, url);
     }
     return new Response("not found", { status: 404 });
   }) as typeof fetch;
@@ -189,6 +193,56 @@ describe("KeyResolver", () => {
     const resolver = new KeyResolver(fetchImpl);
     await expect(resolver.resolveCodingPlanCredential("accessTok", "zai"))
       .rejects.toThrow(/missing secretKey/);
+  });
+
+  it("resolveCodingPlanCredential zai_cn uses the LINKED bigmodel token on bigmodel.cn (zai-side token never sent) and keeps the flavor", async () => {
+    let zLoginCalls = 0;
+    let bigmodelHostSeen = false;
+    const fetchImpl = mockFetch({
+      "/auth/z/login": () => {
+        zLoginCalls += 1;
+        return new Response(JSON.stringify({ access_token: "bizTok" }), {
+          status: 200, headers: { "content-type": "application/json" },
+        });
+      },
+      "getCustomerInfo": (_body, auth, url) => {
+        // The bigmodel-family credential is the poll payload's LINKED
+        // data.bigmodel token (host materialFromSnapshot:
+        // `accessToken = linkedBigModel.accessToken`) — live 2026-11-14: the
+        // zai-side accessToken is rejected by bigmodel.cn ("令牌已过期或验证不正确").
+        if (!(url ?? "").includes("bigmodel.cn")) return new Response("wrong host", { status: 404 });
+        bigmodelHostSeen = true;
+        if (auth !== "linked_bm_token") return new Response("unauthorized", { status: 401 });
+        return bizResponse({
+          organizations: [{ organizationId: "o1", organizationName: "默认机构", projects: [{ projectId: "p1", projectName: "默认项目" }] }],
+        });
+      },
+      "api_keys/copy": () => bizResponse({ secretKey: "mySecret" }),
+      "api_keys": (body) => {
+        if (body) return bizResponse({ apiKey: "myApiKey" });
+        return bizResponse([]);
+      },
+    });
+    const resolver = new KeyResolver(fetchImpl);
+    const cred = await resolver.resolveCodingPlanCredential("zai_side_token", "zai_cn", undefined, {
+      customerId: "bm_customer_1",
+      accessToken: "linked_bm_token",
+    });
+    // Mirror of the host adapter: NO z/login exchange for the CN flavor.
+    expect(zLoginCalls).toBe(0);
+    expect(bigmodelHostSeen).toBe(true);
+    expect(cred.apiKey).toBe("myApiKey.mySecret");
+    // The credential keeps its flavor; consumers fold zai_cn into the bigmodel family.
+    expect(cred.provider).toBe("zai_cn");
+    // The LINKED token rides along for the bigmodel JWT-mint signing plane.
+    expect(cred.oauthAccessToken).toBe("linked_bm_token");
+  });
+
+  it("resolveCodingPlanCredential zai_cn without a linked bigmodel credential fails with a clear message", async () => {
+    const fetchImpl = mockFetch({});
+    const resolver = new KeyResolver(fetchImpl);
+    await expect(resolver.resolveCodingPlanCredential("zai_side_token", "zai_cn"))
+      .rejects.toThrow(/no linked BigModel credential/);
   });
 
   it("resolveCodingPlanCredential bigmodel tolerates a missing secretKey (bundle keeps requireSecretKey unset)", async () => {

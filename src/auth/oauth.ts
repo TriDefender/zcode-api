@@ -16,20 +16,29 @@
  * - Poll error semantics mirror the bundle: 4xx (except 408/429), envelope
  *   `code !== 0`, or an unknown status are fatal; 5xx / network errors /
  *   malformed 200 bodies are retried as if `pending`.
- * - Bigmodel keeps a **classic auth-code flow** (`BigmodelOAuthClient`) for
- *   the headless `--paste` login only — the desktop no longer uses it as the
- *   primary path but the protocol (authorize at `bigmodel.cn/login`, exchange
- *   at the shared zcode.z.ai token endpoint) is unchanged.
- * - 3.18.0 adds a `zai_cn` login flavor on the desktop; `isZaiOAuthProvider`
- *   treats it as zai and it reuses this exact chain (same authorize/userinfo/
- *   token endpoints — no dedicated URL templates exist in the bundle), so no
- *   separate client is mirrored here. See NOTEPAD「3.18.0 增补」§D.
+ * - The bigmodel OAuth login (bigmodel.cn auth-code + poll) is DEPRECATED
+ *   (decision 2026-11-14: superseded by the zai_cn "Z.ai (CN)" zchat login;
+ *   the bigmodel flavor survives as a config/credential family only).
+ * - 3.18.0 added a `zai_cn` login flavor on the desktop; as of 3.18.2 (live
+ *   probes 2026-11-14) it is a first-class poll-login provider: `cli/init`
+ *   `{provider:"zai_cn"}` returns a **China-region authorize host**,
+ *   `zchat.z.ai/api/oauth/authorize` (plain `zai` still gets `chat.z.ai`),
+ *   with callback `/oauth/cli/callback/zai_cn`; the interstitial keeps the
+ *   `redirect_uri` param name (zai family) plus an extra `provider=zai_cn`
+ *   query param (host bundle `t===Qr&&_.searchParams.set("provider",t)`).
+ *   The poll payload is FAMILY-folded — the ready token sits under `data.zai`
+ *   for the whole zai family (host poll normalizer `_c(provider)` branch; a
+ *   live zai_cn ready poll carried no `data.zai_cn` key). DOWNSTREAM the
+ *   zai_cn credential is BIGMODEL-family: `resolveStartPlanFamilyFromOAuthProvider`
+ *   maps zai_cn → "bigmodel", the polled token is used AS-IS (no z/login
+ *   exchange — `normalizePolledTokenSet`), and it authorizes the bigmodel.cn
+ *   biz chain, surfacing the user's BigModel subscription (live-verified).
+ *   See NOTEPAD「2026-11-14 增补」§D.
  *
  * @see _reverse/NOTEPAD.md "4. OAuth 流程"
  */
-import type { ProviderId } from "../provider/types.js";
+import type { LoginProviderId, ProviderId } from "../provider/types.js";
 import { DEFAULT_APP_VERSION } from "../config/loader.js";
-import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 import { randomBytes } from "node:crypto";
 
 // ---------------------------------------------------------------------------
@@ -39,12 +48,6 @@ import { randomBytes } from "node:crypto";
 /** zcode.z.ai API base (bundle `A3o`; cli-login + token endpoints hang off it). */
 const ZCODE_API_BASE_ORIGIN = "https://zcode.z.ai";
 const ZCODE_API_BASE = `${ZCODE_API_BASE_ORIGIN}/api/v1`;
-/** Shared token-exchange endpoint (bigmodel auth-code flow). Bundle: `tokenUrl`. */
-const ZCODE_TOKEN_ENDPOINT = `${ZCODE_API_BASE}/oauth/token`;
-/** Default Bigmodel authorize host (bundle `BIGMODEL_OAUTH_AUTHORIZE_URL`). */
-const BIGMODEL_HOST = "https://bigmodel.cn";
-/** Default Bigmodel app id (bundle `BIGMODEL_OAUTH_APP_ID`). */
-const BIGMODEL_APP_ID = "zcode";
 
 /** Overall login timeout shared by both flows (bundle `tln`). */
 export const LOGIN_TIMEOUT_MS = 300_000;
@@ -60,6 +63,8 @@ export interface OAuthResult {
   userId?: string;
   /** ZCode plan JWT for start-plan (zcode.z.ai). The token-exchange response includes this alongside the provider access_token. */
   jwt?: string;
+  /** Zai-family poll payload linked BigModel credential — required by the zai_cn credential resolution. */
+  linkedBigModel?: { customerId: string; accessToken: string };
 }
 
 export type FetchFn = typeof fetch;
@@ -78,6 +83,14 @@ export interface OAuthFlowTokens {
   accessToken: string;
   userId?: string;
   jwt?: string;
+  /**
+   * Zai-family poll payload `data.bigmodel` (host: `x = _c(provider) ? Rw(l.bigmodel) : void 0`)
+   * — the linked BigModel credential `{customer_id, access_token}` a Z.ai account carries
+   * when linked to a BigModel account. The zai_cn credential's bigmodel-family material
+   * resolves through THIS token (materialFromSnapshot: bigmodel-family
+   * `accessToken = linkedBigModel.accessToken`), NOT through the zai-side accessToken.
+   */
+  linkedBigModel?: { customerId: string; accessToken: string };
 }
 
 /** Shape of the zcode.z.ai `{code, data, msg}` envelope (token + cli-login endpoints). */
@@ -117,7 +130,13 @@ export abstract class OAuthFlowClient {
     onAuthorizeUrl?.(started.authorizeUrl);
     try {
       const tokens = await this.complete(started, timeoutMs);
-      return { accessToken: tokens.accessToken, provider: this.provider, userId: tokens.userId, jwt: tokens.jwt };
+      return {
+        accessToken: tokens.accessToken,
+        provider: this.provider,
+        userId: tokens.userId,
+        jwt: tokens.jwt,
+        linkedBigModel: tokens.linkedBigModel,
+      };
     } finally {
       await this.close();
     }
@@ -166,8 +185,14 @@ interface CliPollData {
   status: string;
   token?: string;
   user?: { user_id?: unknown };
+  /** Family bucket: BOTH zai and zai_cn flows surface their access_token here (host poll normalizer `_c(provider)` branch). */
   zai?: { access_token?: unknown };
-  bigmodel?: { access_token?: unknown };
+  /**
+   * Dual role: the login bucket for bigmodel flows, and — for zai-family
+   * flows — the LINKED BigModel credential `{customer_id, access_token}`
+   * (host `Rw(data.bigmodel)`), consumed by the zai_cn downstream chain.
+   */
+  bigmodel?: { access_token?: unknown; customer_id?: unknown };
 }
 
 /**
@@ -181,6 +206,13 @@ function buildDesktopOAuthRedirectParam(appVersion: string): string {
   const url = new URL("/app/oauth/login", ZCODE_API_BASE_ORIGIN);
   url.searchParams.set("redirect", "zcode://oauth/callback");
   url.searchParams.set("app_version", appVersion);
+  return url.toString();
+}
+
+/** zai_cn interstitial: the desktop interstitial plus `provider=zai_cn` (3.18.2 host `t===Qr` branch). */
+function buildZaiCnInterstitialParam(appVersion: string): string {
+  const url = new URL(buildDesktopOAuthRedirectParam(appVersion));
+  url.searchParams.set("provider", "zai_cn");
   return url.toString();
 }
 
@@ -242,13 +274,18 @@ class PollOAuthClient extends OAuthFlowClient {
     })();
   }
 
-  /** Append the desktop interstitial param (bundle: `redirect_uri` for zai, `redirect` for bigmodel). */
+  /**
+   * Append the desktop interstitial param (3.18.2 host: `redirect_uri` for the
+   * zai family — zai AND zai_cn, `redirect` for bigmodel). The zai_cn flavor
+   * additionally carries `provider=zai_cn` ON the interstitial URL itself.
+   */
   private applyInterstitial(authorizeUrl: string): string {
     const url = new URL(authorizeUrl);
-    url.searchParams.set(
-      this.provider === "zai" ? "redirect_uri" : "redirect",
-      buildDesktopOAuthRedirectParam(this.appVersion),
-    );
+    const interstitial =
+      this.provider === "zai_cn"
+        ? buildZaiCnInterstitialParam(this.appVersion)
+        : buildDesktopOAuthRedirectParam(this.appVersion);
+    url.searchParams.set(this.provider === "bigmodel" ? "redirect" : "redirect_uri", interstitial);
     return url.toString();
   }
 
@@ -270,16 +307,50 @@ class PollOAuthClient extends OAuthFlowClient {
       const data = outcome.data;
 
       if (data?.status === "ready") {
-        const providerPayload = data[this.provider] as { access_token?: unknown } | undefined;
+        // Payload keys are FAMILY-folded, not per-providerId: the 3.18.2 host
+        // poll normalizer reads `data.zai` for the whole zai family —
+        // `g = _c(provider) ? data.zai.access_token : data.bigmodel.access_token`
+        // — so a zai_cn flow surfaces its token under `data.zai` too (the
+        // per-providerId `e[t]` read found in the older glm CLI parser does
+        // NOT match the host; verified live 2026-11-14: a zai_cn ready poll
+        // carries no `data.zai_cn` key).
+        const familyPayload = (
+          this.provider === "bigmodel" ? data.bigmodel : data.zai
+        ) as { access_token?: unknown } | undefined;
         const accessToken =
-          typeof providerPayload?.access_token === "string" ? providerPayload.access_token.trim() : "";
+          typeof familyPayload?.access_token === "string" ? familyPayload.access_token.trim() : "";
         if (!accessToken) {
-          throw new Error(`${this.provider} login poll: response missing data.${this.provider}.access_token`);
+          const expectedKey = this.provider === "bigmodel" ? "bigmodel" : "zai";
+          throw new Error(
+            `${this.provider} login poll: response missing data.${expectedKey}.access_token ` +
+            `(payload keys: ${Object.keys(data).join(", ") || "(none)"})`,
+          );
+        }
+        // Mirror host `x = _c(n.provider) ? Rw(l.bigmodel) : void 0`: the whole
+        // zai family also carries a linked BigModel credential in the SAME
+        // payload. Rw semantics: absent → undefined; present-but-malformed →
+        // throw (both customer_id and access_token required).
+        let linkedBigModel: OAuthFlowTokens["linkedBigModel"];
+        if (this.provider !== "bigmodel") {
+          const raw = data.bigmodel;
+          if (raw !== undefined && raw !== null) {
+            if (typeof raw !== "object" || Array.isArray(raw)) {
+              throw new Error("BigModel linked response invalid (not an object)");
+            }
+            const linkedRaw = raw as { customer_id?: unknown; access_token?: unknown };
+            const customerId = typeof linkedRaw.customer_id === "string" ? linkedRaw.customer_id.trim() : "";
+            const linkedToken = typeof linkedRaw.access_token === "string" ? linkedRaw.access_token.trim() : "";
+            if (!customerId || !linkedToken) {
+              throw new Error("BigModel linked response invalid: customer_id/access_token missing or empty");
+            }
+            linkedBigModel = { customerId, accessToken: linkedToken };
+          }
         }
         return {
           accessToken,
           jwt: typeof data.token === "string" ? data.token.trim() : undefined,
           userId: typeof data.user?.user_id === "string" ? data.user.user_id : undefined,
+          linkedBigModel,
         };
       }
       if (data?.status === "failed") {
@@ -339,318 +410,34 @@ export class ZaiOAuthClient extends PollOAuthClient {
   }
 }
 
-/** Bigmodel poll-flow login client — the 3.12.3 desktop default for bigmodel. */
-export class BigmodelPollOAuthClient extends PollOAuthClient {
+/** Z.ai (CN) poll-flow login client — 3.18.2 desktop "Z.ai (CN)" flavor; cli/init issues the zchat.z.ai authorize host. */
+export class ZaiCnOAuthClient extends PollOAuthClient {
   constructor(
     fetchImpl: FetchFn = fetch,
     sleep: (ms: number) => Promise<void> = defaultSleep,
     appVersion: string = DEFAULT_APP_VERSION,
   ) {
-    super("bigmodel", fetchImpl, sleep, appVersion);
+    super("zai_cn", fetchImpl, sleep, appVersion);
   }
 }
 
-// ---------------------------------------------------------------------------
-// Bigmodel — classic auth-code flow with a localhost callback server
-// (paste-login fallback; the primary path for both providers is the poll
-// flow above, mirroring the 3.12.3 desktop)
-// ---------------------------------------------------------------------------
-
 /**
- * Per-provider auth-code configuration (Bigmodel paste login only — both
- * providers moved to the poll flow as their primary login).
+ * Poll-login client factory shared by every entrypoint (CLI / TUI / Android
+ * control / login page) — replaces the per-call-site `provider === "bigmodel"`
+ * ternaries. The provider id is sent verbatim to `cli/init` and keys the poll
+ * payload, so adding a flavor only needs a `PollOAuthClient` subclass.
  */
-interface AuthCodeConfig {
-  readonly provider: ProviderId;
-  /** Base authorize URL (`?appId=&redirect=&state=` appended). */
-  readonly authorizeUrl: string;
-  readonly appId: string;
-  /** Shared zcode.z.ai token-exchange endpoint. */
-  readonly tokenUrl: string;
-  /** Path served by the localhost callback server. */
-  readonly callbackPath: string;
-  /** Key under `data` holding the provider access token: `data[field].access_token`. */
-  readonly accessTokenField: string;
-}
-
-/** Shape of the zcode.z.ai token-exchange response (`{code, data, msg}`). */
-interface TokenExchangeResponse {
-  code?: number;
-  data?: {
-    token?: string;
-    user?: { user_id?: string };
-  } & Record<string, unknown>;
-  msg?: string;
-}
-
-/**
- * Auth-code OAuth client: localhost callback server + token exchange.
- *
- * Flow (mirrors the ZCode desktop `loginBigmodelCodingPlan`):
- *   1. Start localhost HTTP server on a random port
- *   2. Build authorize URL: `{authorizeUrl}?appId={appId}&redirect={localhost}&state={state}`
- *   3. User opens the URL, authorizes on the provider's site
- *   4. Provider redirects to localhost callback with `?authCode=...&state=...`
- *   5. POST `{tokenUrl}` body `{provider, code, redirect_uri, state}`
- *   6. zcode.z.ai exchanges (holding the app secret server-side) and returns
- *      `{code:0, data:{token:<jwt>, <provider>:{access_token}, user:{user_id}}}`
- */
-export class AuthCodeOAuthClient extends OAuthFlowClient {
-  private server: Server | null = null;
-  private callbackResult: { code: string; error: string | null } | null = null;
-  private callbackWaiters: Array<(result: { code: string; error: string | null }) => void> = [];
-
-  constructor(
-    config: AuthCodeConfig,
-    fetchImpl: FetchFn = fetch,
-  ) {
-    super(config.provider, fetchImpl);
-    this.config = config;
+export function createPollLoginClient(
+  provider: LoginProviderId,
+  fetchImpl: FetchFn = fetch,
+  sleep: (ms: number) => Promise<void> = defaultSleep,
+): OAuthFlowClient {
+  switch (provider) {
+    case "zai":
+      return new ZaiOAuthClient(fetchImpl, sleep);
+    case "zai_cn":
+      return new ZaiCnOAuthClient(fetchImpl, sleep);
   }
-
-  private readonly config: AuthCodeConfig;
-
-  /** Build the provider authorize URL with the localhost redirect + state. */
-  protected buildAuthorizeUrl(callbackUrl: string, state: string): string {
-    const params = new URLSearchParams({
-      appId: this.config.appId,
-      redirect: callbackUrl,
-      state,
-    });
-    return `${this.config.authorizeUrl}?${params.toString()}`;
-  }
-
-  /**
-   * Start the localhost callback server and return the authorize URL.
-   * Call `waitForCallback()` (or `authorize()`) afterwards, then `close()`.
-   *
-   * The bind port is `0` (OS-assigned random) unless the env var
-   * `ZCODE_OAUTH_CALLBACK_PORT` is set, in which case that exact port is used.
-   * The Android entry sets the env var so the Custom Tabs redirect URL is
-   * predictable across launches.
-   */
-  start(): Promise<OAuthFlowStart> {
-    const state = randomBytes(32).toString("hex");
-    const requestedPort = Number(process.env.ZCODE_OAUTH_CALLBACK_PORT ?? 0) || 0;
-
-    return new Promise((resolve, reject) => {
-      this.server = createServer((req: IncomingMessage, res: ServerResponse) => {
-        this.handleCallback(req, res, state);
-      });
-
-      this.server.on("error", (err) => {
-        this.server = null;
-        reject(err);
-      });
-      this.server.listen(requestedPort, "127.0.0.1", () => {
-        const addr = this.server!.address();
-        if (!addr || typeof addr !== "object") {
-          reject(new Error("Failed to bind localhost callback server"));
-          return;
-        }
-        const callbackUrl = `http://127.0.0.1:${addr.port}${this.config.callbackPath}`;
-        const authorizeUrl = this.buildAuthorizeUrl(callbackUrl, state);
-        resolve({ authorizeUrl, callbackUrl, state });
-      });
-    });
-  }
-
-  private handleCallback(req: IncomingMessage, res: ServerResponse, expectedState: string): void {
-    const url = new URL(req.url ?? "/", "http://127.0.0.1");
-    if (url.pathname !== this.config.callbackPath) {
-      res.writeHead(404, { "Content-Type": "text/plain" });
-      res.end("Not found");
-      return;
-    }
-
-    const state = url.searchParams.get("state") ?? "";
-    const code = url.searchParams.get("authCode") ?? url.searchParams.get("code") ?? "";
-
-    if (state !== expectedState || !code) {
-      res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
-      res.end("Authorization failed: state mismatch or missing code.");
-      if (!this.callbackResult) {
-        this.callbackResult = { code: "", error: "OAuth callback state mismatch or missing code." };
-        this.callbackWaiters.forEach((fn) => fn(this.callbackResult!));
-      }
-      return;
-    }
-
-    res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" });
-    res.end("Authorization successful! You may close this window and return to the CLI.");
-
-    if (!this.callbackResult) {
-      this.callbackResult = { code, error: null };
-      this.callbackWaiters.forEach((fn) => fn(this.callbackResult!));
-    }
-  }
-
-  /** Wait for the OAuth callback redirect. Resolves with the auth code. */
-  waitForCallback(timeoutMs: number = LOGIN_TIMEOUT_MS): Promise<string> {
-    if (this.callbackResult?.code) {
-      return Promise.resolve(this.callbackResult.code);
-    }
-    if (this.callbackResult?.error) {
-      return Promise.reject(new Error(this.callbackResult.error));
-    }
-
-    return new Promise<string>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        reject(new Error("Authorization timed out. Please retry login."));
-      }, timeoutMs);
-
-      this.callbackWaiters.push((result) => {
-        clearTimeout(timer);
-        if (result.error) {
-          reject(new Error(result.error));
-        } else {
-          resolve(result.code);
-        }
-      });
-    });
-  }
-
-  /**
-   * Exchange the auth code at the shared zcode.z.ai token endpoint.
-   * The ZCode server holds the app secret and performs the real provider exchange.
-   * Returns `{ accessToken, userId, jwt }`.
-   */
-  async exchangeCode(
-    authCode: string,
-    redirectUri: string,
-    state: string,
-  ): Promise<OAuthFlowTokens> {
-    const resp = await this.fetchImpl(this.config.tokenUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        provider: this.config.provider,
-        code: authCode,
-        redirect_uri: redirectUri,
-        state,
-      }),
-    });
-
-    const raw = safeJsonParse(await resp.text()) as TokenExchangeResponse | null;
-
-    if (!resp.ok || (raw && typeof raw.code === "number" && raw.code !== 0)) {
-      const label = this.config.provider;
-      throw new Error(
-        `${label} token exchange failed: status=${resp.status} msg=${raw?.msg ?? "(none)"}`,
-      );
-    }
-
-    const providerToken = raw?.data?.[this.config.accessTokenField] as
-      | { access_token?: string }
-      | undefined;
-    const accessToken = providerToken?.access_token?.trim() ?? "";
-
-    if (!accessToken) {
-      throw new Error(`${this.config.provider} token response missing data.${this.config.accessTokenField}.access_token`);
-    }
-
-    const userId = raw?.data?.user?.user_id;
-    const jwt = raw?.data?.token?.trim() ?? undefined;
-    return { accessToken, userId: typeof userId === "string" ? userId : undefined, jwt };
-  }
-
-  /** Wait for the browser callback, then exchange the code. */
-  async complete(started: OAuthFlowStart, timeoutMs: number = LOGIN_TIMEOUT_MS): Promise<OAuthFlowTokens> {
-    const code = await this.waitForCallback(timeoutMs);
-    return this.exchangeCode(code, started.callbackUrl, started.state);
-  }
-
-  async close(): Promise<void> {
-    if (this.server) {
-      const server = this.server;
-      this.server = null;
-      // Drop idle keep-alive connections so the port is released immediately
-      // (plain close() would wait for them to time out).
-      server.closeAllConnections?.();
-      await new Promise<void>((resolve) => {
-        server.close(() => resolve());
-      });
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Provider clients
-// ---------------------------------------------------------------------------
-
-/**
- * Bigmodel auth-code config.
- * Bundle `ed`: authorizeUrl `bigmodel.cn/login`, appId `zcode`,
- * token field `data.bigmodel.access_token`.
- */
-const BIGMODEL_AUTH_CODE_CONFIG: AuthCodeConfig = {
-  provider: "bigmodel",
-  authorizeUrl: `${BIGMODEL_HOST}/login`,
-  appId: BIGMODEL_APP_ID,
-  tokenUrl: ZCODE_TOKEN_ENDPOINT,
-  callbackPath: "/oauth/callback/bigmodel",
-  accessTokenField: "bigmodel",
-};
-
-/**
- * Bigmodel OAuth client (auth-code flow via bigmodel.cn + zcode.z.ai token
- * exchange). `host`/`appId` are overridable to mirror the bundle's env vars
- * (`BIGMODEL_OAUTH_AUTHORIZE_URL`, `BIGMODEL_OAUTH_APP_ID`).
- */
-export class BigmodelOAuthClient extends AuthCodeOAuthClient {
-  constructor(
-    fetchImpl: FetchFn = fetch,
-    host: string = BIGMODEL_HOST,
-    appId: string = BIGMODEL_APP_ID,
-  ) {
-    super(
-      { ...BIGMODEL_AUTH_CODE_CONFIG, authorizeUrl: `${host}/login`, appId },
-      fetchImpl,
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Headless paste login (auth-code flow)
-// ---------------------------------------------------------------------------
-
-/**
- * Parse a callback URL the user pasted back into the terminal (headless
- * `--paste` login, mirroring gcloud/gh CLI). Only the query string is
- * inspected — the pathname/host are whatever the browser's address bar shows
- * and are never validated. Tolerates copy artifacts from web pages: wrapping
- * quotes/brackets, surrounding whitespace, and `&amp;` entities (a paste from
- * a rendered page splits the query at the `&` inside `&amp;`, which breaks
- * `state`). Returns the auth code (`authCode` or `code` param); throws on a
- * CSRF `state` mismatch or a missing code.
- */
-export function parsePastedCallbackUrl(raw: string, expectedState: string): string {
-  let text = raw.trim().replace(/^["'`<([{]+/, "").replace(/["'`>\])}]+$/, "");
-  text = text.replace(/&amp;/gi, "&");
-
-  const q = text.indexOf("?");
-  const query = (q >= 0 ? text.slice(q + 1) : text).split("#")[0];
-  const params = new URLSearchParams(query);
-
-  const state = params.get("state") ?? "";
-  if (!state || state !== expectedState) {
-    throw new Error(
-      "OAuth state mismatch — the pasted URL does not belong to this login " +
-      "session (possible CSRF). Retry the login.",
-    );
-  }
-
-  const providerError = params.get("error");
-  const code = params.get("authCode") ?? params.get("code") ?? "";
-  if (!code) {
-    throw new Error(
-      providerError
-        ? `Authorization failed: provider returned error=${providerError}`
-        : "No authorization code in the pasted URL — paste the redirected " +
-          "127.0.0.1 callback URL (the one that failed to load), not the authorize URL.",
-    );
-  }
-  return code;
 }
 
 // ---------------------------------------------------------------------------

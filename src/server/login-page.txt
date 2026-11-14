@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZCode Proxy 登录</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f4f5f7; color: #1f2328;
+  }
+  @media (prefers-color-scheme: dark) { body { background: #16181d; color: #e6e8eb; } }
+  main { width: min(560px, calc(100vw - 32px)); padding: 28px 0 48px; }
+  h1 { font-size: 20px; margin: 0 0 6px; }
+  .muted { color: #6e7681; font-size: 13px; line-height: 1.6; margin: 0 0 20px; }
+  @media (prefers-color-scheme: dark) { .muted { color: #8b949e; } }
+  .cards { display: grid; gap: 12px; }
+  .card {
+    display: block; width: 100%; text-align: left; cursor: pointer;
+    padding: 14px 16px; border-radius: 10px; border: 1px solid #d0d7de;
+    background: #ffffff; transition: border-color .15s, box-shadow .15s;
+  }
+  @media (prefers-color-scheme: dark) {
+    .card { background: #1d2126; border-color: #30363d; }
+    .card:hover { border-color: #58a6ff; }
+  }
+  .card:hover { border-color: #0969da; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+  .card:disabled { opacity: .55; cursor: default; }
+  .card .name { display: block; font-size: 15px; font-weight: 600; }
+  .card .host { display: inline-block; font-size: 12px; font-family: ui-monospace, Consolas, monospace;
+    color: #0969da; background: rgba(9,105,218,.08); border-radius: 4px; padding: 1px 6px; margin: 4px 0; }
+  @media (prefers-color-scheme: dark) { .card .host { color: #58a6ff; background: rgba(88,166,255,.1); } }
+  .card .desc { display: block; font-size: 12px; color: #6e7681; }
+  @media (prefers-color-scheme: dark) { .card .desc { color: #8b949e; } }
+  .status {
+    margin-top: 20px; padding: 12px 14px; border-radius: 8px; font-size: 13px; line-height: 1.7;
+    background: rgba(127,127,127,.08); min-height: 20px; word-break: break-all;
+  }
+  .status.ok { background: rgba(46,160,67,.12); }
+  .status.err { background: rgba(218,54,51,.12); }
+  .manual { margin-top: 12px; font-size: 13px; line-height: 1.7; word-break: break-all; }
+  .hidden { display: none; }
+  a { color: #0969da; }
+  @media (prefers-color-scheme: dark) { a { color: #58a6ff; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>ZCode Proxy 登录</h1>
+  <p class="muted">选择要登录的站点。授权页由服务端下发（国际站 chat.z.ai / 中国站 zchat.z.ai），
+  在浏览器里完成登录后流程自动结束——无需本地回调，登录结果实时显示在本页。
+  BigModel / 智谱账号请使用「中国版」登录（账号已互链，订阅自动识别）。</p>
+  <div class="cards">
+    <button class="card" data-provider="zai" type="button">
+      <span class="name">Z.ai 国际版</span>
+      <span class="host">chat.z.ai</span>
+      <span class="desc">国际站账号 · 国内网络会经区域跳转到达中国站登录页</span>
+    </button>
+    <button class="card" data-provider="zai_cn" type="button">
+      <span class="name">Z.ai 中国版</span>
+      <span class="host">zchat.z.ai</span>
+      <span class="desc">中国站账号（含 BigModel/智谱订阅） · 直达中国站登录页，无需中转</span>
+    </button>
+  </div>
+  <div id="status" class="status muted">正在连接…</div>
+  <div id="manual" class="manual hidden"></div>
+</main>
+<script>
+(function () {
+  "use strict";
+  var KEY_STORAGE = "zcode-login-key";
+  var key = sessionStorage.getItem(KEY_STORAGE) || "";
+  var statusEl = document.getElementById("status");
+  var manualEl = document.getElementById("manual");
+  var cards = Array.prototype.slice.call(document.querySelectorAll(".card"));
+  var pollTimer = null;
+
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function authHeaders() {
+    return key ? { "authorization": "Bearer " + key } : {};
+  }
+  function setStatus(text, kind) {
+    statusEl.textContent = text;
+    statusEl.className = "status" + (kind ? " " + kind : "");
+  }
+  function setCardsDisabled(disabled) {
+    cards.forEach(function (c) { c.disabled = disabled; });
+  }
+  // api(): shared fetch wrapper — on 401 (main-server proxyApiKey gate) prompt
+  // once for the key, remember it in sessionStorage, and retry.
+  async function api(path, opts) {
+    var r = await fetch(path, opts);
+    if (r.status === 401 && !key) {
+      var k = prompt("此端点需要 Proxy API Key（config.yaml 中的 proxyApiKey）：");
+      if (k && k.trim()) {
+        key = k.trim();
+        sessionStorage.setItem(KEY_STORAGE, key);
+        var retryOpts = Object.assign({}, opts, { headers: Object.assign({}, (opts && opts.headers) || {}, authHeaders()) });
+        r = await fetch(path, retryOpts);
+      }
+    }
+    var parsed = null;
+    try { parsed = await r.json(); } catch (e) { /* non-JSON */ }
+    if (!parsed || typeof parsed.ok !== "boolean") {
+      return { ok: false, error: r.status === 401 ? "unauthorized（API Key 不正确）" : "HTTP " + r.status };
+    }
+    return parsed;
+  }
+
+  async function start(provider) {
+    setCardsDisabled(true);
+    manualEl.classList.add("hidden");
+    setStatus("正在获取授权地址…");
+    var r = await api("/login/start", {
+      method: "POST",
+      headers: Object.assign({ "content-type": "application/json" }, authHeaders()),
+      body: JSON.stringify({ provider: provider })
+    });
+    if (!r.ok) {
+      setStatus("启动登录失败：" + (r.error || "unknown") + "（重试请刷新页面）", "err");
+      setCardsDisabled(false);
+      return;
+    }
+    // Jump to the OAuth login page in a new tab; the status page keeps
+    // polling here. If the popup is blocked the manual link below is the way in.
+    window.open(r.authorizeUrl, "_blank", "noopener");
+    manualEl.innerHTML = '授权页：<a href="' + esc(r.authorizeUrl) + '" target="_blank" rel="noreferrer">点此打开</a>' +
+      "（完成站点登录后回到本页查看结果；浏览器提示无法打开 zcode:// 链接属正常，忽略即可）";
+    manualEl.classList.remove("hidden");
+    setStatus("等待授权完成…");
+    startPolling();
+  }
+
+  function stopPolling() {
+    if (pollTimer !== null) { clearInterval(pollTimer); pollTimer = null; }
+  }
+  function startPolling() {
+    stopPolling();
+    pollOnce();
+    pollTimer = setInterval(pollOnce, 2000);
+  }
+  var pollInFlight = false;
+  async function pollOnce() {
+    if (pollInFlight) return;
+    pollInFlight = true;
+    try {
+      var r = await api("/login/status", { headers: authHeaders() });
+      if (!r.ok) return; // transient — next tick retries
+      if (r.phase === "authorizing") {
+        setStatus("等待授权完成…（在浏览器里完成站点登录即可）");
+      } else if (r.phase === "ready") {
+        setStatus("✅ 登录成功，可以关闭此页", "ok");
+        stopPolling();
+        setCardsDisabled(true);
+      } else if (r.phase === "failed") {
+        setStatus("❌ 登录失败：" + (r.error || "unknown") + "（刷新页面可重试）", "err");
+        stopPolling();
+        setCardsDisabled(false);
+      } else {
+        setStatus("请选择上方站点开始登录");
+      }
+    } finally {
+      pollInFlight = false;
+    }
+  }
+
+  cards.forEach(function (card) {
+    card.addEventListener("click", function () { start(card.getAttribute("data-provider")); });
+  });
+  // Resume an in-flight flow after a page reload (browser Back from the
+  // authorize page lands here).
+  pollOnce();
+})();
+</script>
+</body>
+</html>

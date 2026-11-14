@@ -38,6 +38,7 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
     endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
     clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
     mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+    media: { enabled: false, upstreamOrigin: "https://zcode.chatglm.site" },
     async: {
       enabled: true,
       origin: "https://zcode.z.ai",

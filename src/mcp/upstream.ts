@@ -282,8 +282,10 @@ export class OfficialMcpUpstream {
 /**
  * Decode the first SSE frame whose JSON-RPC id matches (or the first frame
  * with an id at all). Streamable-HTTP POST responses are single messages.
+ * Exported for the media plane (`src/media/video-edit.ts`) which speaks the
+ * same stateless streamable-HTTP dialect against `/api/v1/mcp/server/video_edit`.
  */
-function decodeSseFrame(text: string, wantId: unknown): JsonRpcResponse {
+export function decodeSseFrame(text: string, wantId: unknown): JsonRpcResponse {
   for (const line of text.split("\n")) {
     if (!line.startsWith("data:")) continue;
     const data = line.slice(5).trim();

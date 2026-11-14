@@ -1,5 +1,4 @@
-import { describe, it, expect, afterEach } from "bun:test";
-import net from "node:net";
+import { describe, it, expect } from "bun:test";
 import { Readable } from "node:stream";
 import {
   handleControlRequestForTest,
@@ -8,7 +7,7 @@ import {
   type ControlState,
   type HandlerContext,
 } from "./control.js";
-import { BigmodelOAuthClient } from "../auth/oauth.js";
+import { OAuthFlowClient, type OAuthFlowTokens } from "../auth/oauth.js";
 
 function makeStubRequest(opts: {
   method?: string;
@@ -112,7 +111,7 @@ describe("android control listener", () => {
     }
   });
 
-  it("returns error for deliverOAuthCode without an active flow", async () => {
+  it("deliverOAuthCode is retired (bigmodel auth-code flow deprecated) — unknown_cmd", async () => {
     const req = makeStubRequest({
       body: JSON.stringify({ cmd: "deliverOAuthCode", provider: "bigmodel", code: "x", state: "y" }),
     });
@@ -120,7 +119,7 @@ describe("android control listener", () => {
     expect(result.status).toBe(200);
     expect(result.body.ok).toBe(false);
     if (!result.body.ok) {
-      expect(result.body.error).toContain("no_matching_oauth_flow");
+      expect(result.body.error).toContain("unknown_cmd");
     }
   });
 });
@@ -205,6 +204,26 @@ describe("android control listener — setConfig", () => {
     if (!result.body.ok) {
       expect(result.body.error).toBe("config_update_unavailable");
     }
+  });
+
+  it("rejects provider zai_cn — a login flavor, never a config provider (official folding)", async () => {
+    const state: ControlState = { provider: "zai", plan: "coding-plan", proxyPort: 0 };
+    const applied: Array<{ provider?: string }> = [];
+    const ctx: HandlerContext = {
+      logBuffer: new LogBuffer(),
+      onSetConfig: async (changes) => {
+        applied.push(changes);
+        return { ok: true, provider: changes.provider ?? state.provider, plan: changes.plan ?? state.plan };
+      },
+    };
+    const result = await post({ cmd: "setConfig", provider: "zai_cn" }, state, ctx);
+    expect(result.body.ok).toBe(false);
+    if (!result.body.ok) {
+      expect(result.body.error).toBe("invalid_provider");
+    }
+    // The hook must never see the invalid value.
+    expect(applied).toEqual([]);
+    expect(state.provider).toBe("zai");
   });
 });
 
@@ -296,81 +315,71 @@ describe("android control listener — quota", () => {
   });
 });
 
-describe("android control startOAuth callback-port lifecycle", () => {
-  /** Find a free loopback TCP port (bind port 0, read back, close). */
-  async function freePort(): Promise<number> {
-    
-    return new Promise((resolve, reject) => {
-      const srv = net.createServer();
-      srv.on("error", reject);
-      srv.listen(0, "127.0.0.1", () => {
-        const { port } = srv.address() as net.AddressInfo;
-        srv.close(() => resolve(port));
+describe("android control startOAuth — zai_cn flavor (3.18.2 \"Z.ai (CN)\")", () => {
+  /** Never-resolving poll-flow stub: start() reports the authorize URL, complete() hangs. */
+  class StubZaiCnClient extends OAuthFlowClient {
+    constructor() {
+      super("zai_cn", (async () => new Response("{}")) as unknown as typeof fetch);
+    }
+    start() {
+      return Promise.resolve({
+        authorizeUrl: "https://zchat.z.ai/api/oauth/authorize?client_id=c&state=s",
+        callbackUrl: "",
+        state: "stub_flow",
       });
-    });
+    }
+    complete(): Promise<OAuthFlowTokens> {
+      return new Promise(() => {});
+    }
+    async close(): Promise<void> {}
   }
 
-  /** True when nothing is listening on `port` anymore. */
-  async function portIsFree(port: number): Promise<boolean> {
-    
-    return new Promise((resolve) => {
-      const srv = net.createServer();
-      srv.once("error", () => resolve(false));
-      srv.listen(port, "127.0.0.1", () => srv.close(() => resolve(true)));
-    });
-  }
-
-  afterEach(() => {
-    delete process.env.ZCODE_OAUTH_CALLBACK_PORT;
-  });
-
-  it("releases the callback port when the flow is rejected (abandoned login)", async () => {
-    const port = await freePort();
-    process.env.ZCODE_OAUTH_CALLBACK_PORT = String(port);
-    const state: ControlState = { provider: "bigmodel", plan: "coding-plan", proxyPort: 0 };
-    // Inject the classic (localhost-callback) client: the port-lifecycle
-    // guarantee is a callback-flow property; the default bigmodel login is
-    // the network-bound poll flow, which binds nothing.
+  it("accepts provider zai_cn and surfaces the server-issued authorize URL", async () => {
+    const state: ControlState = { provider: "zai", plan: "coding-plan", proxyPort: 0 };
     const ctx: HandlerContext = {
       logBuffer: new LogBuffer(),
-      createLoginClient: () => new BigmodelOAuthClient(),
+      createLoginClient: () => new StubZaiCnClient(),
     };
 
-    const started = await post({ cmd: "startOAuth", provider: "bigmodel" }, state, ctx);
-    expect(started.body.ok).toBe(true);
+    const result = await post({ cmd: "startOAuth", provider: "zai_cn" }, state, ctx);
+    expect(result.body.ok).toBe(true);
+    if (result.body.ok && "authorizeUrl" in result.body) {
+      // The URL is whatever the flow issued — the client never hardcodes zchat.
+      expect(result.body.authorizeUrl).toContain("zchat.z.ai/api/oauth/authorize");
+      // Poll flow binds no callback port (unlike the bigmodel auth-code flow).
+      expect(result.body.callbackPort).toBe(0);
+    }
     expect(state.activeOauth).toBeDefined();
+    expect(state.activeOauth?.state).toBe("stub_flow");
 
-    // Simulate the user abandoning the flow: a callback with a bad state
-    // rejects every waitForCallback waiter.
-    const resp = await fetch(`http://127.0.0.1:${port}/oauth/callback/bigmodel?state=bad&code=x`);
-    expect(resp.status).toBe(400);
-    await Bun.sleep(50);
-
-    expect(state.activeOauth).toBeUndefined();
-    expect(await portIsFree(port)).toBe(true);
-  });
-
-  it("a second startOAuth tears down the previous flow instead of hitting EADDRINUSE", async () => {
-    const port = await freePort();
-    process.env.ZCODE_OAUTH_CALLBACK_PORT = String(port);
-    const state: ControlState = { provider: "bigmodel", plan: "coding-plan", proxyPort: 0 };
-    const ctx: HandlerContext = {
-      logBuffer: new LogBuffer(),
-      createLoginClient: () => new BigmodelOAuthClient(),
-    };
-
-    const first = await post({ cmd: "startOAuth", provider: "bigmodel" }, state, ctx);
-    expect(first.body.ok).toBe(true);
-
-    // Previously this threw EADDRINUSE (500) because the first flow still
-    // held the fixed callback port.
-    const second = await post({ cmd: "startOAuth", provider: "bigmodel" }, state, ctx);
-    expect(second.body.ok).toBe(true);
-
-    // Clean up the flow started by the second command.
+    // Tear down the never-resolving flow for cleanliness.
     state.activeOauth?.client.close().catch(() => {});
     state.activeOauth = undefined;
-    await Bun.sleep(50);
+  });
+
+  it("rejects an unknown provider in-band and leaves an in-flight flow untouched", async () => {
+    const state: ControlState = { provider: "zai", plan: "coding-plan", proxyPort: 0 };
+    const ctx: HandlerContext = {
+      logBuffer: new LogBuffer(),
+      createLoginClient: () => new StubZaiCnClient(),
+    };
+
+    // Seed an in-flight flow, then send a tampered provider value (the JSON
+    // transport bypasses the type system).
+    const first = await post({ cmd: "startOAuth", provider: "zai_cn" }, state, ctx);
+    expect(first.body.ok).toBe(true);
+
+    const bad = await post({ cmd: "startOAuth", provider: "nope" }, state, ctx);
+    expect(bad.status).toBe(200);
+    if (!bad.body.ok) {
+      expect(bad.body.error).toBe("invalid_provider");
+    }
+    // The in-flight flow must survive the invalid command (gate runs before
+    // the tear-down).
+    expect(state.activeOauth).toBeDefined();
+
+    state.activeOauth?.client.close().catch(() => {});
+    state.activeOauth = undefined;
   });
 });
 

@@ -5,6 +5,7 @@ import { describe, it, expect } from "bun:test";
 import { createFetchHandler } from "./server.js";
 import { handleListModels } from "./routes-openai.js";
 import type { ProxyConfig } from "../config/types.js";
+import type { LoginFlowHost } from "./login-handler.js";
 import { AuthManager } from "../auth/manager.js";
 
 /** AuthManager with a preset oauth credential (replaces the removed apikey mode). */
@@ -33,6 +34,7 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
     endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
     clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
     mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+    media: { enabled: false, upstreamOrigin: "https://zcode.chatglm.site" },
   async: { enabled: false, origin: "https://zcode.z.ai", pollIntervalMs: 5000, keepAliveIntervalMs: 3000, maxWaitMs: 0, maxRetries: 3, settleTimeoutMs: 8000, controlTimeoutMs: 15000, defaultModel: "" },
   claim: { enabled: false, auto: true, origin: "https://zcode.z.ai", pollIntervalMs: 300000, cooldownMs: 600000, planId: "" },
     logging: { level: "info" },
@@ -245,6 +247,102 @@ describe("web UI", () => {
     const resp = await handler(new Request("http://localhost/webui", { method: "POST" }));
     // POST falls through to the auth gate (proxyApiKey set, no creds) -> 401.
     expect(resp.status).toBe(401);
+  });
+});
+
+describe("login page routes", () => {
+  /** Scripted LoginFlowHost — the OAuth flow itself is covered in login-handler.test.ts. */
+  function fakeLoginHost(): LoginFlowHost {
+    return {
+      start: async (provider) => ({ authorizeUrl: `https://example.com/authorize?provider=${provider}` }),
+      status: async () => ({ phase: "idle" }),
+    };
+  }
+
+  it("without loginHost the /login routes stay unregistered (TUI hosts its own listener)", async () => {
+    const config = makeConfig();
+    const auth = oauthAuth("test");
+    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream() });
+
+    const resp = await handler(new Request("http://localhost/login", { method: "GET" }));
+    expect(resp.status).toBe(404);
+  });
+
+  it("GET /login serves the selection page tokenless; flow endpoints sit behind the proxyApiKey gate", async () => {
+    const config = makeConfig({ auth: { proxyApiKey: "proxy-secret" } });
+    const auth = oauthAuth("test");
+    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream(), loginHost: fakeLoginHost() });
+
+    // Static page: tokenless, like /webui (the page itself is inert).
+    const page = await handler(new Request("http://localhost/login", { method: "GET" }));
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    expect(await page.text()).toContain('data-provider="zai_cn"');
+
+    // Flow endpoints: a completed login overwrites the stored credential, so
+    // starting one MUST carry the key (401 without it).
+    const unauthorized = await handler(
+      new Request("http://localhost/login/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: "zai_cn" }),
+      }),
+    );
+    expect(unauthorized.status).toBe(401);
+
+    const authorized = await handler(
+      new Request("http://localhost/login/start", {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: "Bearer proxy-secret" },
+        body: JSON.stringify({ provider: "zai_cn" }),
+      }),
+    );
+    expect(authorized.status).toBe(200);
+    expect(await authorized.json()).toEqual({
+      ok: true,
+      authorizeUrl: "https://example.com/authorize?provider=zai_cn",
+    });
+
+    // Body cap: /login/start only ever carries `{provider}` — a large body is
+    // rejected 413 before the handler sees it (TUI listener has the same cap).
+    const oversized = await handler(
+      new Request("http://localhost/login/start", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer proxy-secret",
+          "content-length": String(9000),
+        },
+        body: "x".repeat(9000),
+      }),
+    );
+    expect(oversized.status).toBe(413);
+    expect(await oversized.json()).toEqual({ ok: false, error: "body_too_large" });
+
+    const status = await handler(
+      new Request("http://localhost/login/status", {
+        method: "GET",
+        headers: { authorization: "Bearer proxy-secret" },
+      }),
+    );
+    expect(status.status).toBe(200);
+    expect(await status.json()).toEqual({ ok: true, phase: "idle" });
+  });
+
+  it("without a proxyApiKey the flow endpoints are open (loopback default deployment)", async () => {
+    const config = makeConfig();
+    const auth = oauthAuth("test");
+    const handler = createFetchHandler({ config, auth, fetchImpl: mockUpstream(), loginHost: fakeLoginHost() });
+
+    const resp = await handler(
+      new Request("http://localhost/login/start", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ provider: "zai" }),
+      }),
+    );
+    expect(resp.status).toBe(200);
+    expect(await resp.json()).toEqual({ ok: true, authorizeUrl: "https://example.com/authorize?provider=zai" });
   });
 });
 

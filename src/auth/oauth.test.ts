@@ -3,19 +3,15 @@
  *
  * Both providers use the server-mediated CLI login (init + poll at
  * zcode.z.ai, 3.12.3 desktop parity — no local callback; the authorize URL
- * carries the `/app/oauth/login` interstitial param). Bigmodel additionally
- * keeps the classic auth-code flow for the headless `--paste` login. All
- * upstream calls are mocked via `fetchImpl` injection.
+ * carries the `/app/oauth/login` interstitial param). The bigmodel OAuth
+ * login is deprecated (superseded by zai_cn — the bigmodel FLAVOR survives
+ * as a config/credential family). All upstream calls are mocked via
+ * `fetchImpl` injection.
  *
  * @see _reverse/NOTEPAD.md "4. OAuth 流程"
  */
 import { describe, it, expect } from "bun:test";
-import {
-  ZaiOAuthClient,
-  BigmodelPollOAuthClient,
-  BigmodelOAuthClient,
-  parsePastedCallbackUrl,
-} from "./oauth.js";
+import { ZaiOAuthClient, ZaiCnOAuthClient, createPollLoginClient } from "./oauth.js";
 
 /** Wrap data in the zcode.z.ai `{code, data, msg}` envelope as a JSON Response. */
 function envelopeResponse(data: Record<string, unknown>, status = 200): Response {
@@ -239,222 +235,133 @@ describe("ZaiOAuthClient (server-mediated cli login)", () => {
   });
 });
 
-describe("BigmodelPollOAuthClient (server-mediated cli login)", () => {
-  it("start() inits with provider bigmodel and appends the interstitial as `redirect`", async () => {
+describe("ZaiCnOAuthClient (3.18.2 desktop \"Z.ai (CN)\" flavor — NOTEPAD「2026-11-14 增补」)", () => {
+  it("start() POSTs provider zai_cn and the init issues the zchat.z.ai authorize host", async () => {
     const { impl, calls } = scriptedFetch([
       () =>
         envelopeResponse(
-          initData({ authorize_url: "https://bigmodel.cn/login?appId=zcode&state=s" }),
+          initData({
+            authorize_url:
+              "https://zchat.z.ai/api/oauth/authorize?client_id=c&redirect_uri=https://zcode.z.ai/api/v1/oauth/cli/callback/zai_cn&state=s",
+          }),
         ),
     ]);
-    const client = new BigmodelPollOAuthClient(impl, async () => {});
+    const client = new ZaiCnOAuthClient(impl, async () => {});
+
     const started = await client.start();
     try {
-      expect(JSON.parse(String(calls[0].init.body))).toEqual({ provider: "bigmodel" });
-
-      const url = new URL(started.authorizeUrl);
-      expect(url.origin + url.pathname).toBe("https://bigmodel.cn/login");
-      const interstitial = url.searchParams.get("redirect") ?? "";
-      expect(interstitial).toStartWith("https://zcode.z.ai/app/oauth/login?");
-      expect(new URL(interstitial).searchParams.get("app_version")).toBe("3.18.2");
-      expect(url.searchParams.get("redirect_uri")).toBeNull();
-      expect(started.callbackUrl).toBe("");
+      expect(calls).toHaveLength(1);
+      expect(calls[0].url).toBe("https://zcode.z.ai/api/v1/oauth/cli/init");
+      expect(JSON.parse(String(calls[0].init.body))).toEqual({ provider: "zai_cn" });
+      // The authorize_url is whatever the server issued — the client never
+      // hardcodes the zchat host (same server-driven discipline as zai).
+      expect(started.authorizeUrl).toContain("zchat.z.ai/api/oauth/authorize");
+      expect(started.state).toBe("flow_abc");
     } finally {
       await client.close();
     }
   });
 
-  it("authorize() maps data.bigmodel.access_token on ready", async () => {
+  it("start() keeps the zai-family `redirect_uri` interstitial and adds provider=zai_cn ON the interstitial", async () => {
     const { impl } = scriptedFetch([
       () =>
         envelopeResponse(
-          initData({ authorize_url: "https://bigmodel.cn/login?appId=zcode&state=s" }),
+          initData({
+            authorize_url: "https://zchat.z.ai/api/oauth/authorize?client_id=c&state=s",
+          }),
+        ),
+    ]);
+    const client = new ZaiCnOAuthClient(impl, async () => {});
+    const started = await client.start();
+    try {
+      const url = new URL(started.authorizeUrl);
+      // Param NAME stays redirect_uri (zai family), unlike bigmodel's `redirect`.
+      const interstitial = url.searchParams.get("redirect_uri") ?? "";
+      expect(interstitial).toStartWith("https://zcode.z.ai/app/oauth/login?");
+      const inner = new URL(interstitial);
+      expect(inner.searchParams.get("redirect")).toBe("zcode://oauth/callback");
+      expect(inner.searchParams.get("app_version")).toBe("3.18.2");
+      // 3.18.2 host `t===Qr` branch: the interstitial itself carries the flavor.
+      expect(inner.searchParams.get("provider")).toBe("zai_cn");
+    } finally {
+      await client.close();
+    }
+  });
+
+  it("authorize() polls until ready and reads the FAMILY-FOLDED data.zai bucket + linked bigmodel credential", async () => {
+    const { impl, calls } = scriptedFetch([
+      () =>
+        envelopeResponse(
+          initData({
+            authorize_url: "https://zchat.z.ai/api/oauth/authorize?client_id=c&state=s",
+          }),
         ),
       () => envelopeResponse({ status: "pending" }),
       () =>
         envelopeResponse({
           status: "ready",
-          token: "jwt_bm",
-          user: { user_id: "bm_user" },
-          bigmodel: { access_token: "bm_at", refresh_token: "bm_rt" },
+          token: "jwt_final",
+          user: { user_id: "user_cn" },
+          // Live-verified 2026-11-14: the ready payload carries NO data.zai_cn
+          // key — the host poll normalizer reads data.zai for the whole zai family.
+          zai: { access_token: "zai_cn_at" },
+          // The linked BigModel credential rides the same payload
+          // (host `x = _c(provider) ? Rw(l.bigmodel) : void 0`).
+          bigmodel: { customer_id: "bm_customer_1", access_token: "linked_bm_at" },
         }),
     ]);
-    const client = new BigmodelPollOAuthClient(impl, async () => {});
+    const client = new ZaiCnOAuthClient(impl, async () => {});
+
     const result = await client.authorize();
-    expect(result.provider).toBe("bigmodel");
-    expect(result.accessToken).toBe("bm_at");
-    expect(result.jwt).toBe("jwt_bm");
-    expect(result.userId).toBe("bm_user");
+
+    expect(result.provider).toBe("zai_cn");
+    expect(result.accessToken).toBe("zai_cn_at");
+    expect(result.jwt).toBe("jwt_final");
+    expect(result.userId).toBe("user_cn");
+    // The bigmodel-family downstream resolves through THIS token, not the zai-side one.
+    expect(result.linkedBigModel).toEqual({ customerId: "bm_customer_1", accessToken: "linked_bm_at" });
+    expect(calls.length).toBe(3);
+    expect(calls[1].url).toBe("https://zcode.z.ai/api/v1/oauth/cli/poll/flow_abc");
   });
 
-  it("ready response without bigmodel.access_token rejects", async () => {
+  it("a malformed data.bigmodel on a zai-family ready payload rejects (host Rw semantics)", async () => {
+    const { impl } = scriptedFetch([
+      () => envelopeResponse(initData()),
+      () =>
+        envelopeResponse({
+          status: "ready",
+          token: "j",
+          user: { user_id: "u" },
+          zai: { access_token: "at" },
+          bigmodel: { access_token: "only_token_no_customer_id" },
+        }),
+    ]);
+    const client = new ZaiCnOAuthClient(impl, async () => {});
+    expect(client.authorize()).rejects.toThrow(/BigModel linked response invalid/);
+  });
+
+  it("ready response missing data.zai.access_token rejects naming the folded key + actual payload keys", async () => {
     const { impl } = scriptedFetch([
       () =>
         envelopeResponse(
-          initData({ authorize_url: "https://bigmodel.cn/login?appId=zcode&state=s" }),
+          initData({ authorize_url: "https://zchat.z.ai/api/oauth/authorize?client_id=c&state=s" }),
         ),
-      () => envelopeResponse({ status: "ready", token: "j", user: { user_id: "u" }, zai: { access_token: "wrong" } }),
+      () =>
+        envelopeResponse({ status: "ready", token: "jwt_only", user: { user_id: "u" }, stray: 1 }),
     ]);
-    const client = new BigmodelPollOAuthClient(impl, async () => {});
+    const client = new ZaiCnOAuthClient(impl, async () => {});
     const started = await client.start();
-    await expect(client.complete(started)).rejects.toThrow(/data\.bigmodel\.access_token/);
-  });
-});
-
-describe("BigmodelOAuthClient (auth-code flow)", () => {
-  it("start() builds the bigmodel.cn authorize URL with appId/redirect/state", async () => {
-    const client = new BigmodelOAuthClient();
-    const started = await client.start();
-    try {
-      const url = new URL(started.authorizeUrl);
-      expect(url.origin + url.pathname).toBe("https://bigmodel.cn/login");
-      expect(url.searchParams.get("appId")).toBe("zcode");
-      expect(url.searchParams.get("redirect")).toStartWith("http://127.0.0.1:");
-      expect(url.searchParams.get("redirect")).toEndWith("/oauth/callback/bigmodel");
-      expect(url.searchParams.get("state") ?? "").toMatch(/^[0-9a-f]{64}$/);
-    } finally {
-      await client.close();
-    }
+    expect(client.complete(started)).rejects.toThrow(
+      /missing data\.zai\.access_token .*payload keys: status, token, user, stray/s,
+    );
   });
 
-  it("exchangeCode unwraps the envelope and extracts bigmodel.access_token + jwt + userId", async () => {
-    const mockFetch = (async (_input: RequestInfo | URL): Promise<Response> => {
-      return envelopeResponse({
-        token: "jwt_zcode",
-        bigmodel: { access_token: "bm_access_123" },
-        user: { user_id: "u1", name: "test" },
-      });
-    }) as typeof fetch;
-
-    const client = new BigmodelOAuthClient(mockFetch);
-    const result = await client.exchangeCode("code_xyz", "http://127.0.0.1:9/callback/bigmodel", "st");
-    expect(result.accessToken).toBe("bm_access_123");
-    expect(result.jwt).toBe("jwt_zcode");
-    expect(result.userId).toBe("u1");
-  });
-
-  it("exchangeCode throws when data.bigmodel.access_token is missing", async () => {
-    const mockFetch = (async (_input: RequestInfo | URL): Promise<Response> => {
-      return envelopeResponse({ token: "jwt_only" });
-    }) as typeof fetch;
-
-    const client = new BigmodelOAuthClient(mockFetch);
-    expect(client.exchangeCode("code", "redirect", "st")).rejects.toThrow(/data\.bigmodel\.access_token/);
-  });
-
-  it("exchangeCode throws on non-zero business code", async () => {
-    const mockFetch = (async (_input: RequestInfo | URL): Promise<Response> => {
-      return new Response(JSON.stringify({ code: 3004, msg: "invalid_code" }), { status: 200 });
-    }) as typeof fetch;
-
-    const client = new BigmodelOAuthClient(mockFetch);
-    expect(client.exchangeCode("code", "redirect", "st")).rejects.toThrow(/invalid_code/);
-  });
-
-  it("authorize() runs the full flow: callback redirect + token exchange", async () => {
-    // Mock fetch only answers the token-exchange POST.
-    const exchangeFetch = (async (input: RequestInfo | URL): Promise<Response> => {
-      const url = typeof input === "string" ? input : input.toString();
-      expect(url).toBe("https://zcode.z.ai/api/v1/oauth/token");
-      return envelopeResponse({
-        token: "jwt_full",
-        bigmodel: { access_token: "resolved_token" },
-        user: { user_id: "user_42" },
-      });
-    }) as typeof fetch;
-
-    const client = new BigmodelOAuthClient(exchangeFetch);
-
-    // Simulate the provider redirecting to the localhost callback by hitting
-    // the authorize URL's `redirect` + `state` as soon as it is known.
-    let capturedUrl = "";
-    const result = await client.authorize((url) => {
-      capturedUrl = url;
-      const parsed = new URL(url);
-      const redirectUri = parsed.searchParams.get("redirect") ?? "";
-      const state = parsed.searchParams.get("state") ?? "";
-      fetch(`${redirectUri}?authCode=code_from_provider&state=${state}`).catch(() => {});
-    });
-
-    expect(capturedUrl).toContain("bigmodel.cn/login");
-    expect(result.accessToken).toBe("resolved_token");
-    expect(result.provider).toBe("bigmodel");
-    expect(result.userId).toBe("user_42");
-    expect(result.jwt).toBe("jwt_full");
-  });
-});
-
-describe("parsePastedCallbackUrl (headless paste login)", () => {
-  const state = "a".repeat(64);
-
-  it("extracts authCode from a full callback URL", () => {
-    const pasted = `http://127.0.0.1:49152/oauth/callback/bigmodel?authCode=code_1&state=${state}`;
-    expect(parsePastedCallbackUrl(pasted, state)).toBe("code_1");
-  });
-
-  it("accepts the `code` param name as well", () => {
-    expect(parsePastedCallbackUrl(`http://127.0.0.1/cb?code=code_2&state=${state}`, state)).toBe("code_2");
-  });
-
-  it("only inspects the query — pathname/host are not validated", () => {
-    const pasted = `https://anything.example/whatever/path?code=c&state=${state}`;
-    expect(parsePastedCallbackUrl(pasted, state)).toBe("c");
-  });
-
-  it("throws on a CSRF state mismatch", () => {
-    const pasted = `http://127.0.0.1/?code=x&state=${"b".repeat(64)}`;
-    expect(() => parsePastedCallbackUrl(pasted, state)).toThrow(/state mismatch/i);
-  });
-
-  it("throws when the state param is absent", () => {
-    expect(() => parsePastedCallbackUrl("http://127.0.0.1/?code=x", state)).toThrow(/state mismatch/i);
-  });
-
-  it("throws when the code is missing", () => {
-    const pasted = `http://127.0.0.1/?state=${state}`;
-    expect(() => parsePastedCallbackUrl(pasted, state)).toThrow(/authorization code/i);
-  });
-
-  it("unescapes &amp; entities from a copy out of a rendered page", () => {
-    const pasted = `http://127.0.0.1/cb?authCode=amp_code&amp;state=${state}`;
-    expect(parsePastedCallbackUrl(pasted, state)).toBe("amp_code");
-  });
-
-  it("trims whitespace and wrapping quotes/brackets", () => {
-    expect(parsePastedCallbackUrl(`  "http://127.0.0.1/?code=q&state=${state}"\n`, state)).toBe("q");
-    expect(parsePastedCallbackUrl(`(<http://127.0.0.1/?code=p&state=${state}>)`, state)).toBe("p");
-  });
-
-  it("surfaces the provider error param when authorization was denied", () => {
-    const pasted = `http://127.0.0.1/?error=access_denied&state=${state}`;
-    expect(() => parsePastedCallbackUrl(pasted, state)).toThrow(/access_denied/);
-  });
-
-  it("paste round-trip: the exchange redirect_uri equals the authorize redirect param", async () => {
-    const { impl, calls } = scriptedFetch([
-      () => envelopeResponse({
-        token: "jwt_paste",
-        bigmodel: { access_token: "bm_paste" },
-        user: { user_id: "u9" },
-      }),
-    ]);
-    const client = new BigmodelOAuthClient(impl);
-    const started = await client.start();
-    try {
-      // The browser appends the code to the authorize URL's exact `redirect`;
-      // the user pastes that unreachable URL back.
-      const redirect = new URL(started.authorizeUrl).searchParams.get("redirect") ?? "";
-      expect(started.callbackUrl).toBe(redirect);
-      const pasted = `${redirect}?authCode=paste_code&state=${started.state}`;
-      const code = parsePastedCallbackUrl(pasted, started.state);
-      await client.exchangeCode(code, started.callbackUrl, started.state);
-
-      const exchange = JSON.parse(String(calls[0].init.body));
-      expect(exchange.redirect_uri).toBe(redirect);
-      expect(exchange.code).toBe("paste_code");
-      expect(exchange.state).toBe(started.state);
-    } finally {
-      await client.close();
-    }
+  it("createPollLoginClient() covers every login flavor", async () => {
+    const { impl } = scriptedFetch([() => envelopeResponse(initData())]);
+    const zai = createPollLoginClient("zai", impl);
+    const zaiCn = createPollLoginClient("zai_cn", impl);
+    expect(zai).toBeInstanceOf(ZaiOAuthClient);
+    expect(zaiCn).toBeInstanceOf(ZaiCnOAuthClient);
+    await Promise.all([zai, zaiCn].map((c) => c.close()));
   });
 });

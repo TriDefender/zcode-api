@@ -17,9 +17,21 @@ import { handleMessages } from "./routes-anthropic.js";
 import { handleResponsesRoute } from "./routes-responses.js";
 import { handleAsyncMessagesRoute, handleAsyncChatRoute, handleAsyncHealthRoute } from "./routes-async.js";
 import { handleMcpRoute, type McpRouteOptions } from "./routes-mcp.js";
+import {
+  handleAsrFlash,
+  handleAsrSubmitQueryUnsupported,
+  handleImagesGenerations,
+  handleTtsCreate,
+  handleVideoTaskCreate,
+  handleVideoTaskDelete,
+  handleVideoTaskQuery,
+  type MediaRouteOptions,
+} from "./routes-media.js";
 import { handleQuota } from "./routes-quota.js";
 import { errorResponse } from "../proxy/handler.js";
+import { arkErrorResponse } from "../media/shared.js";
 import type { ResponseStore } from "../responses/store.js";
+import { handleLoginApi, loginPageResponse, type LoginFlowHost } from "./login-handler.js";
 
 interface ServerOptions {
   config: ProxyConfig;
@@ -30,6 +42,14 @@ interface ServerOptions {
   debug?: boolean;
   /** Responses-API state store. When absent, `/v1/responses` runs stateless (`previous_response_id` returns 404). */
   responseStore?: ResponseStore;
+  /** Media routes: ToolHub same-key retry backoff (production 5s; tests ~1ms). */
+  mediaRetryDelayMs?: number;
+  /**
+   * `/login` selection-page backend (serve mode). When absent the `/login`
+   * routes are not registered at all — the TUI hosts the same page on its own
+   * temporary listener instead.
+   */
+  loginHost?: LoginFlowHost;
 }
 
 /** Minimal server handle: what the caller needs to print URLs and shut down. */
@@ -64,6 +84,12 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
     auth,
     ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
   };
+  const mediaOpts: MediaRouteOptions = {
+    config,
+    auth,
+    ...(opts.fetchImpl ? { fetchImpl: opts.fetchImpl } : {}),
+    ...(opts.mediaRetryDelayMs !== undefined ? { retryDelayMs: opts.mediaRetryDelayMs } : {}),
+  };
 
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
@@ -83,11 +109,46 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
       });
     }
 
+    // /login selection page: static HTML is tokenless (like /webui — the page
+    // itself is inert), but the flow endpoints below sit AFTER the proxyApiKey
+    // gate: a completed login overwrites the stored credential, so starting
+    // one must never be unauthenticated.
+    if (opts.loginHost && method === "GET" && path === "/login") {
+      const page = loginPageResponse();
+      return new Response(page.html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-cache" },
+      });
+    }
+
     if (config.auth.proxyApiKey) {
       const authHeader = req.headers.get("authorization") ?? req.headers.get("x-api-key");
       if (!authHeader || !checkProxyKey(authHeader, config.auth.proxyApiKey)) {
         return errorResponse(401, "authentication_error", "Invalid or missing proxy API key");
       }
+    }
+
+    if (opts.loginHost && (path === "/login/start" || path === "/login/status")) {
+      // Body cap mirroring the TUI listener's 8KB limit (login-handler.ts
+      // readBodyText): /login/start only ever carries `{provider}`. The
+      // content-length precheck answers 413 before reading; a lying header is
+      // caught by the post-read check and surfaces as the handler's 400.
+      const declaredLength = Number(req.headers.get("content-length") ?? "0");
+      if (method === "POST" && Number.isFinite(declaredLength) && declaredLength > 8192) {
+        return new Response(JSON.stringify({ ok: false, error: "body_too_large" }), {
+          status: 413,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      const { status, json } = await handleLoginApi(method, path, async () => {
+        const body = await req.text();
+        if (body.length > 8192) throw new Error("body_too_large");
+        return body;
+      }, opts.loginHost);
+      return new Response(JSON.stringify(json), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
     }
 
     // --- Routing ---
@@ -144,6 +205,38 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
       }
     }
 
+    if (config.media.enabled) {
+      // Seed-family media faces — Volcano-shaped REST endpoints translated to
+      // the ToolHub / official video_edit MCP upstreams (coding-plan only;
+      // the handlers enforce the plan gate with an explicit 400).
+      if (path === "/api/v3/images/generations" && method === "POST") {
+        return handleImagesGenerations(req, mediaOpts);
+      }
+      if (path === "/api/v3/contents/generations/tasks" && method === "POST") {
+        return handleVideoTaskCreate(req, mediaOpts);
+      }
+      const taskId = path.startsWith("/api/v3/contents/generations/tasks/")
+        ? decodeTaskIdSegment(path.slice("/api/v3/contents/generations/tasks/".length))
+        : undefined;
+      if (taskId !== undefined && (method === "GET" || method === "DELETE")) {
+        if (!/^[A-Za-z0-9_-]{1,128}$/.test(taskId)) {
+          return arkErrorResponse(400, "invalid_parameter", "task id must be 1-128 characters of [A-Za-z0-9_-]");
+        }
+        if (method === "GET") return handleVideoTaskQuery(mediaOpts, taskId);
+        return handleVideoTaskDelete(mediaOpts);
+      }
+      if (path === "/api/v3/auc/bigmodel/recognize/flash" && method === "POST") {
+        return handleAsrFlash(req, mediaOpts);
+      }
+      // Official async ASR pair — sync-only upstream, 501 with the alternative.
+      if ((path === "/api/v3/auc/bigmodel/submit" || path === "/api/v3/auc/bigmodel/query") && method === "POST") {
+        return handleAsrSubmitQueryUnsupported();
+      }
+      if (path === "/api/v3/tts/create" && method === "POST") {
+        return handleTtsCreate(req, mediaOpts);
+      }
+    }
+
     if (path === "/health" || path === "/") {
       return new Response(JSON.stringify({ status: "ok", provider: config.provider }), {
         status: 200,
@@ -153,6 +246,22 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
 
     return errorResponse(404, "not_found_error", `No route for ${method} ${path}`);
   };
+}
+
+/**
+ * Decode the task-id path segment, falling back to the RAW segment on a
+ * malformed percent-sequence: decodeURIComponent throws URIError for `%`,
+ * `%80`, `%zz` (verified on the pinned Bun 1.4.0), and letting that escape
+ * the router would surface as a 500 that bypasses the route's own Ark 400
+ * validation. The raw fallback keeps every invalid character, so the
+ * `^[A-Za-z0-9_-]{1,128}$` guard below rejects it with the intended 400.
+ */
+function decodeTaskIdSegment(raw: string): string {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }
 
 /**
@@ -179,9 +288,15 @@ export function startServer(opts: ServerOptions): Promise<ProxyServer> {
     // waiting for an off-peak ticket. Lift the per-request socket timeout from
     // the default 600s (set below via server.requestTimeout) to 24h so the long
     // queue wait + LLM stream doesn't get killed mid-flight. `/mcp/*` GET SSE
-    // streams are equally long-lived. Other routes keep the default timeout.
+    // streams are equally long-lived. `/api/v3/*` media faces block on the
+    // speech/video/image upstreams (flash ASR legitimately runs minutes on
+    // long audio). Other routes keep the default timeout.
     const pathForTimeout = req.url ?? "";
-    if (pathForTimeout.startsWith("/async/") || pathForTimeout.startsWith("/mcp/")) {
+    if (
+      pathForTimeout.startsWith("/async/") ||
+      pathForTimeout.startsWith("/mcp/") ||
+      pathForTimeout.startsWith("/api/v3/")
+    ) {
       req.setTimeout(24 * 60 * 60 * 1000);
     }
 
@@ -352,8 +467,8 @@ function corsHeaders(corsEnabled: boolean): Record<string, string> {
   return {
     "access-control-allow-origin": "*",
     "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
-    "access-control-allow-headers": "Content-Type, Authorization, x-api-key, anthropic-version, anthropic-beta, mcp-session-id, mcp-protocol-version, last-event-id",
-    "access-control-expose-headers": "mcp-session-id, mcp-protocol-version",
+    "access-control-allow-headers": "Content-Type, Authorization, x-api-key, x-api-request-id, x-api-resource-id, anthropic-version, anthropic-beta, mcp-session-id, mcp-protocol-version, last-event-id",
+    "access-control-expose-headers": "mcp-session-id, mcp-protocol-version, x-api-request-id, x-api-status-code",
     "access-control-max-age": "86400",
   };
 }

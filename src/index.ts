@@ -29,15 +29,16 @@ import {
 } from "./android/control.js";
 import { collectQuotaSnapshot } from "./server/routes-quota.js";
 import { loadCredential, saveCredential, clearCredential, getStorePath } from "./auth/store.js";
-import { ZaiOAuthClient, BigmodelOAuthClient, BigmodelPollOAuthClient, LOGIN_TIMEOUT_MS, parsePastedCallbackUrl, type OAuthResult } from "./auth/oauth.js";
+import { createPollLoginClient, type OAuthResult } from "./auth/oauth.js";
 import { KeyResolver } from "./auth/resolver.js";
 import type { Credential } from "./auth/types.js";
-import type { ProviderId } from "./provider/types.js";
+import type { LoginProviderId, ProviderId } from "./provider/types.js";
 import type { ProxyConfig } from "./config/types.js";
 import { updateConfigYaml, ensureConfigFile } from "./config/edit.js";
 import { openBrowser } from "./runtime/open-browser.js";
-import { pasteLoginInstructions, readPastedLine, boldIfTTY } from "./runtime/paste-login.js";
 import { buildServerOptions } from "./server/server-options.js";
+import { createPollLoginHost, type LoginFlowHost } from "./server/login-handler.js";
+import { credentialFamily } from "./provider/providers.js";
 import {
   resolvePanelSettings,
   startPanelServer,
@@ -249,9 +250,18 @@ async function startServePanel(
     logBuffer: LogBuffer;
     /** Unwind the process; independent of whether the proxy is still running. */
     shutdown: () => void;
+    /** `/login` page backend carried across panel-driven proxy restarts. */
+    loginHost?: LoginFlowHost;
+    /**
+     * Shared store-fingerprint holder (serve() owns it): the /login completion
+     * path pre-bumps it after applying its own swap, so the two hot-swap
+     * writers agree and syncAuthWithDisk stays a no-op for already-applied
+     * changes.
+     */
+    authFingerprint: { current: string };
   },
 ): Promise<PanelServer> {
-  const { config, path, auth, serverRef, logBuffer, shutdown } = ctx;
+  const { config, path, auth, serverRef, logBuffer, shutdown, loginHost, authFingerprint } = ctx;
 
   // The panel can log out (or log in another account) while `serve` keeps
   // running, but AuthManager caches the credential in memory and auto-claim
@@ -259,13 +269,14 @@ async function startServePanel(
   // auto-claim serving the account that was just replaced (issue #58 review,
   // P2). Fingerprint the store and re-sync after every panel command: the
   // page polls `getLogs` every 2s, so a background login lands within one poll.
-  let authFingerprint = JSON.stringify((await loadCredential().catch(() => null)) ?? null);
+  // The fingerprint holder itself lives in serve() (initialized from the boot
+  // credential) so the /login completion path can pre-bump it.
 
   async function syncAuthWithDisk(): Promise<void> {
     const onDisk = await loadCredential().catch(() => null);
     const fingerprint = JSON.stringify(onDisk ?? null);
-    if (fingerprint === authFingerprint) return;
-    authFingerprint = fingerprint;
+    if (fingerprint === authFingerprint.current) return;
+    authFingerprint.current = fingerprint;
     if (onDisk) {
       auth.setOAuthCredential(onDisk);
       console.log("auth: switched to the account now on disk");
@@ -286,9 +297,9 @@ async function startServePanel(
     const cred = await loadCredential().catch(() => null);
     if (!cred) return { ok: false, error: "not_logged_in" };
     auth.setOAuthCredential(cred);
-    authFingerprint = JSON.stringify(cred);
+    authFingerprint.current = JSON.stringify(cred);
     try {
-      const s = await startServer(buildServerOptions(config, auth, false));
+      const s = await startServer(buildServerOptions(config, auth, false, loginHost));
       serverRef.current = s;
       console.log(`zcode-proxy listening on http://${s.hostname}:${s.port}`);
       return { ok: true, port: s.port };
@@ -315,6 +326,12 @@ async function startServePanel(
     plan?: "coding-plan" | "start-plan";
   }): Promise<{ ok: true; provider: ProviderId; plan: "coding-plan" | "start-plan" } | { ok: false; error: string }> {
     if (serverRef.current) return { ok: false, error: "stop_proxy_first" };
+    // Config surface stays zai|bigmodel — zai_cn is a login flavor, never a
+    // config provider (official folding). Runtime check: the control JSON
+    // path bypasses the type system.
+    if (changes.provider && changes.provider !== "zai" && changes.provider !== "bigmodel") {
+      return { ok: false, error: "invalid_provider" };
+    }
     if (changes.provider) config.provider = changes.provider;
     if (changes.plan) config.plan = changes.plan;
     updateConfigYaml(path, { provider: config.provider, plan: config.plan });
@@ -408,9 +425,47 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   }
   auth.setOAuthCredential(cred);
 
+  // Shared store-fingerprint holder: the panel's syncAuthWithDisk and the
+  // /login completion path must agree on what's already applied, or every
+  // /login login is followed ~2s later by a spurious "auth: switched to the
+  // account now on disk" line (review 2026-11-14 P2).
+  const authFingerprint = { current: JSON.stringify(cred) };
+
   if (debug) printDebugBanner(config, path, cred);
 
-  const server = await startServer(buildServerOptions(config, auth, debug));
+  // Serve-mode `/login` backend (login-handler.ts): the same selection page
+  // the TUI hosts on a temporary listener, served by the proxy itself. A
+  // completed login saves the credential and hot-swaps the live one — serve
+  // mode runs the proxy continuously, and panel-driven re-login already
+  // hot-swaps the same way (syncAuthWithDisk).
+  const serveLoginHost: LoginFlowHost = createPollLoginHost({
+    onTokens: async (flavor, tokens) => {
+      const resolver = new KeyResolver();
+      const cred = await resolver.resolveCodingPlanCredential(tokens.accessToken, flavor, tokens.userId, tokens.linkedBigModel);
+      if (tokens.jwt) cred.jwt = tokens.jwt;
+      await saveCredential(cred);
+      auth.setOAuthCredential(cred);
+      // The swap is already applied — pre-bump the fingerprint so the next
+      // panel poll's syncAuthWithDisk is a no-op instead of re-setting the
+      // identical credential and logging a phantom switch.
+      authFingerprint.current = JSON.stringify(cred);
+      // Family sync (zai_cn→zai folding): keep config.yaml's provider on the
+      // credential's family so upstream endpoint selection stays coherent.
+      const family = credentialFamily(flavor);
+      if (config.provider !== family) {
+        config.provider = family;
+        try {
+          updateConfigYaml(path, { provider: family, plan: config.plan });
+          console.log(`config synced: provider=${family} (matches credential family)`);
+        } catch (err) {
+          console.error(`config sync failed: ${(err as Error).message}`);
+        }
+      }
+      console.log(`OAuth completed for ${flavor}`);
+    },
+  });
+
+  const server = await startServer(buildServerOptions(config, auth, debug, serveLoginHost));
   // The optional panel can stop and restart the proxy, so the signal handlers
   // and the lifecycle hooks go through this ref rather than the initial handle.
   const serverRef: { current: ProxyServer | null } = { current: server };
@@ -517,6 +572,8 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
         serverRef,
         logBuffer: panelLogBuffer,
         shutdown,
+        loginHost: serveLoginHost,
+        authFingerprint,
       });
     } catch (err) {
       // The panel is a convenience layer; it must never take the proxy down.
@@ -553,8 +610,7 @@ export function applyAndroidIdentityDefaults(): void {
 
 /**
  * Android entry — starts the proxy plus a localhost control listener.
- * Caller (Kotlin shell) must set env: ZCODE_CONTROL_PORT (control listener),
- * ZCODE_OAUTH_CALLBACK_PORT (fixed OAuth callback port for WebView redirect).
+ * Caller (Kotlin shell) must set env: ZCODE_CONTROL_PORT (control listener).
  */
 async function runAndroid(): Promise<void> {
   applyAndroidIdentityDefaults();
@@ -630,6 +686,12 @@ async function runAndroid(): Promise<void> {
     plan?: "coding-plan" | "start-plan";
   }): Promise<{ ok: true; provider: ProviderId; plan: "coding-plan" | "start-plan" } | { ok: false; error: string }> {
     if (serverRef.current) return { ok: false, error: "stop_proxy_first" };
+    // Config surface stays zai|bigmodel — zai_cn is a login flavor, never a
+    // config provider (official folding). Runtime check: the control JSON
+    // path bypasses the type system.
+    if (changes.provider && changes.provider !== "zai" && changes.provider !== "bigmodel") {
+      return { ok: false, error: "invalid_provider" };
+    }
     if (changes.provider) config.provider = changes.provider;
     if (changes.plan) config.plan = changes.plan;
     updateConfigYaml(path, { provider: config.provider, plan: config.plan });
@@ -807,23 +869,24 @@ function fmtQuotaExpiry(expiresAt: number): string {
 async function authLogin(args: string[]): Promise<void> {
   const provider = args[0] as ProviderId | undefined;
   const importMode = args.includes("--import");
-  // Headless paste login: --paste flag or ZCODE_OAUTH_PASTE=1 (docker-friendly).
-  const pasteMode =
-    args.includes("--paste") || /^(1|true|yes)$/i.test(process.env.ZCODE_OAUTH_PASTE ?? "");
 
-  if (!provider || (provider !== "zai" && provider !== "bigmodel")) {
-    console.error("Usage: zcode-proxy auth login <zai|bigmodel> [--import] [--paste]");
+  if (!provider || (provider !== "zai" && provider !== "zai_cn" && provider !== "bigmodel")) {
+    console.error("Usage: zcode-proxy auth login <zai|zai_cn|bigmodel> [--import]");
     process.exit(1);
   }
-  if (pasteMode && provider !== "bigmodel") {
-    console.error("--paste applies to the bigmodel auth-code flow only.");
-    console.error("zai login is server-mediated (no localhost callback) and already works headless.");
+  // The bigmodel OAuth login (bigmodel.cn auth-code/poll) is deprecated —
+  // superseded by the zai_cn "Z.ai (CN)" zchat login (decision 2026-11-14).
+  // --import of an existing bigmodel key stays supported.
+  if (!importMode && provider === "bigmodel") {
+    console.error("bigmodel OAuth login is deprecated — use 'zai_cn' (Z.ai 中国版; linked BigModel login) instead,");
+    console.error("or pass --import to register an existing bigmodel API key.");
     process.exit(1);
   }
 
   ensureConfigWithDeviceMid();
+  const configPath = process.env.ZCODE_PROXY_CONFIG ?? "config.yaml";
 
-  const mode = importMode ? "(import)" : pasteMode ? "(OAuth, paste)" : "(OAuth)";
+  const mode = importMode ? "(import)" : "(OAuth)";
   console.log(`Logging in: ${provider} ${mode}\n`);
 
   let cred: Credential;
@@ -831,14 +894,31 @@ async function authLogin(args: string[]): Promise<void> {
   if (importMode) {
     cred = importFromZCodeConfig(provider);
   } else {
-    const { accessToken, userId, jwt } = await runOAuth(provider, pasteMode);
+    // The guard above exits on bigmodel+!importMode — only zai|zai_cn reach OAuth.
+    const { accessToken, userId, jwt, linkedBigModel } = await runOAuth(provider as LoginProviderId);
     console.log("\nResolving API key...");
     const resolver = new KeyResolver();
-    cred = await resolver.resolveCodingPlanCredential(accessToken, provider, userId);
+    cred = await resolver.resolveCodingPlanCredential(accessToken, provider, userId, linkedBigModel);
     if (jwt) cred.jwt = jwt;
   }
 
   await saveCredential(cred);
+
+  // Family sync — same discipline as the TUI finalizeLogin / serve onTokens
+  // paths: serving a zai-family credential through bigmodel endpoints (or vice
+  // versa, e.g. a zai_cn login while config says bigmodel) 401s every request
+  // with nothing pointing at the mismatch.
+  try {
+    const config = loadConfig(configPath);
+    const family = credentialFamily(provider);
+    if (config.provider !== family) {
+      updateConfigYaml(configPath, { provider: family, plan: config.plan });
+      console.log(`config synced: provider=${family} (matches credential family)`);
+    }
+  } catch (err) {
+    console.error(`config sync failed: ${(err as Error).message}`);
+  }
+
   console.log(`\nLogged in as ${provider}.`);
   console.log(`  API Key: ${cred.apiKey.substring(0, 12)}...`);
   if (cred.userId) console.log(`  User ID: ${cred.userId}`);
@@ -916,16 +996,11 @@ async function authStatus(): Promise<void> {
   console.log(`  Store:   ${getStorePath()}`);
 }
 
-async function runOAuth(provider: ProviderId, pasteMode: boolean): Promise<OAuthResult> {
-  if (provider === "bigmodel" && pasteMode) {
-    const oauth = new BigmodelOAuthClient();
-    return runPasteLogin(oauth);
-  }
-
-  // Both providers use the server-mediated poll login (ZCode 3.12.3 default):
-  // the browser never calls back here — open the URL on ANY device and the
-  // flow completes server-side while we poll.
-  const oauth = provider === "bigmodel" ? new BigmodelPollOAuthClient() : new ZaiOAuthClient();
+async function runOAuth(provider: LoginProviderId): Promise<OAuthResult> {
+  // Both login flavors use the server-mediated poll login (ZCode 3.12.3
+  // default; zai_cn since 3.18.2): the browser never calls back here — open
+  // the URL on ANY device and the flow completes server-side while we poll.
+  const oauth = createPollLoginClient(provider);
   const result = await oauth.authorize((url) => {
     console.log("Open this URL to authorize (any device/browser works):\n");
     console.log(`  ${url}\n`);
@@ -937,31 +1012,6 @@ async function runOAuth(provider: ProviderId, pasteMode: boolean): Promise<OAuth
     openBrowser(url);
   });
   return result;
-}
-
-/**
- * Headless bigmodel login (`auth login bigmodel --paste`): the localhost
- * callback server is still bound — it defines the redirect port and the
- * browser can never reach it from inside a container anyway — but instead of
- * waiting on it, the user pastes the redirected URL back. The exact
- * `started.callbackUrl` string is used BOTH as the authorize `redirect` param
- * and as the exchange `redirect_uri` (the token endpoint requires them to
- * match), so the pair stays consistent by construction.
- */
-async function runPasteLogin(oauth: BigmodelOAuthClient): Promise<OAuthResult> {
-  const started = await oauth.start();
-  try {
-    console.log(pasteLoginInstructions(started.authorizeUrl, started.callbackUrl, LOGIN_TIMEOUT_MS));
-    openBrowser(started.authorizeUrl);
-    process.stdout.write("\n" + boldIfTTY("Paste the FULL redirected URL here, then press Enter:") + "\n> ");
-    const pasted = await readPastedLine(LOGIN_TIMEOUT_MS);
-    const code = parsePastedCallbackUrl(pasted, started.state);
-    console.log("\nExchanging authorization code...");
-    const tokens = await oauth.exchangeCode(code, started.callbackUrl, started.state);
-    return { accessToken: tokens.accessToken, provider: "bigmodel", userId: tokens.userId, jwt: tokens.jwt };
-  } finally {
-    await oauth.close();
-  }
 }
 
 function importFromZCodeConfig(provider: ProviderId): Credential {
@@ -979,7 +1029,11 @@ function importFromZCodeConfig(provider: ProviderId): Credential {
     provider?: Record<string, { options?: { apiKey?: string }; enabled?: boolean }>;
   };
 
-  const providerKey = `builtin:${provider}-coding-plan`;
+  // The official config.json keys by FAMILY — even after a zai_cn login the
+  // entries stay `builtin:zai-*` (live-verified 2026-11-14; resolveCodingPlan
+  // ProviderName folds zai_cn into Z.ai). The credential keeps the zai_cn flavor.
+  const family = provider === "zai_cn" ? "zai" : provider;
+  const providerKey = `builtin:${family}-coding-plan`;
   const entry = config.provider?.[providerKey];
   const apiKey = entry?.options?.apiKey?.trim();
 
@@ -988,7 +1042,7 @@ function importFromZCodeConfig(provider: ProviderId): Credential {
     process.exit(1);
   }
 
-  const startPlanKey = `builtin:${provider}-start-plan`;
+  const startPlanKey = `builtin:${family}-start-plan`;
   const jwt = config.provider?.[startPlanKey]?.options?.apiKey?.trim() || undefined;
 
   console.log(`Imported from ${configPath}`);

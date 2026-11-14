@@ -3,7 +3,7 @@
  */
 import { readFileSync, existsSync } from "node:fs";
 import { parse } from "yaml";
-import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig, AsyncConfig, EndpointRoutingConfig, ClientSigningConfig, HighspeedConfig, ClaimConfig } from "./types.js";
+import type { ClientIdentityConfig, ProxyConfig, ProviderEndpoints, ProxyIdentity, ResponsesConfig, McpConfig, AsyncConfig, EndpointRoutingConfig, ClientSigningConfig, HighspeedConfig, ClaimConfig, MediaConfig } from "./types.js";
 
 /** Environment variable keys that override YAML values. */
 const ENV = {
@@ -25,6 +25,8 @@ const ENV = {
   HIGHSPEED_ENABLED: "ZCODE_HIGHSPEED_ENABLED",
   MCP_GATEWAY_ENABLED: "ZCODE_MCP_GATEWAY",
   MCP_GATEWAY_ORIGIN: "ZCODE_MCP_GATEWAY_ORIGIN",
+  MEDIA_ENABLED: "ZCODE_MEDIA_GATEWAY",
+  MEDIA_ORIGIN: "ZCODE_MEDIA_GATEWAY_ORIGIN",
 } as const;
 
 /**
@@ -63,6 +65,10 @@ const DEFAULTS = {
   // bundle `jee`; the `sYe` fallback "https://zcode.chatglm.site" is the TEST
   // env origin — NOT for production traffic. 3.14.3 `p1`/`air`).
   MCP_GATEWAY_ORIGIN: "https://zcode.z.ai",
+  // Seed 系媒体兼容面（/api/v3/images|contents|auc|tts）上游 origin：ToolHub
+  // 与官方 video_edit MCP 同宿于 zcode.z.ai（插件 ZCODE_BASE_URL 生产兜底）。
+  MEDIA_ENABLED: true,
+  MEDIA_ORIGIN: "https://zcode.z.ai",
   ASYNC_ENABLED: false,
   ASYNC_ORIGIN: "https://zcode.z.ai",
   ASYNC_POLL_INTERVAL_MS: 5000,
@@ -139,6 +145,7 @@ export function loadConfig(path: string): ProxyConfig {
   const clientIdentity = resolveClientIdentity(parsed?.clientIdentity);
   const responses = resolveResponsesConfig(parsed?.responses);
   const mcp = resolveMcpConfig(parsed?.mcp);
+  const media = resolveMediaConfig(parsed?.media);
   const asyncCfg = resolveAsyncConfig(parsed?.async);
   const claimCfg = resolveClaimConfig(parsed?.claim);
   const endpointRouting = resolveEndpointRoutingConfig(parsed?.endpointRouting);
@@ -160,6 +167,7 @@ export function loadConfig(path: string): ProxyConfig {
     clientSigning,
   highspeed,
     mcp,
+    media,
     async: asyncCfg,
     claim: claimCfg,
     logging: { level: logLevel },
@@ -210,6 +218,20 @@ function resolveMcpConfig(raw: unknown): McpConfig {
       enabled: gwEnabledEnv !== undefined ? resolveBool(gwEnabledEnv, DEFAULTS.MCP_GATEWAY_ENABLED) : resolveBool(gwRaw.enabled, DEFAULTS.MCP_GATEWAY_ENABLED),
       upstreamOrigin: gwOrigin,
     },
+  };
+}
+
+function resolveMediaConfig(raw: unknown): MediaConfig {
+  const obj = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
+  const enabledEnv = process.env[ENV.MEDIA_ENABLED];
+  const originEnv = process.env[ENV.MEDIA_ORIGIN];
+  const origin = (originEnv ?? (typeof obj.upstreamOrigin === "string" ? obj.upstreamOrigin : DEFAULTS.MEDIA_ORIGIN)).trim()
+    || DEFAULTS.MEDIA_ORIGIN;
+  validateOrigin(origin, "media.upstreamOrigin");
+  return {
+    // enabled 位 env-优先防遮蔽陷阱（naive ?? 会把 YAML false 被 env 空串覆盖）。
+    enabled: enabledEnv !== undefined ? resolveBool(enabledEnv, DEFAULTS.MEDIA_ENABLED) : resolveBool(obj.enabled, DEFAULTS.MEDIA_ENABLED),
+    upstreamOrigin: origin,
   };
 }
 

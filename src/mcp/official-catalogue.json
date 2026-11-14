@@ -148,6 +148,24 @@
       "category": "finance"
     },
     {
+      "key": "video-edit",
+      "routeId": "video_edit",
+      "path": "/api/v1/mcp/server/video_edit",
+      "plugin": "video-agent-kit",
+      "version": "0.4.3",
+      "marketplace": "zcode-plugins-official",
+      "requiresPaidPlan": true,
+      "displayName": {
+        "en": "Video Agent Kit Speech",
+        "zh-CN": "视频剪辑工具包语音能力"
+      },
+      "description": {
+        "en": "Official speech MCP behind the video-agent-kit plugin: cloud speech transcription (ASR) and synthesis (TTS).",
+        "zh-CN": "video-agent-kit 插件背后的官方语音 MCP：云端语音转录（ASR）与合成（TTS）。"
+      },
+      "category": "media"
+    },
+    {
       "key": "wind-bond",
       "routeId": "finance_wind_bond",
       "path": "/api/v1/mcp/server/finance_wind_bond",

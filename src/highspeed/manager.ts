@@ -28,6 +28,7 @@ import { randomUUID } from "node:crypto";
 import type { UpstreamHeaderPair } from "../proxy/upstream.js";
 import type { Credential } from "../auth/types.js";
 import { credentialString } from "../auth/types.js";
+import { credentialFamily } from "../provider/providers.js";
 import { warmHighspeedProviderConfig } from "./provider-config.js";
 
 const DRAW_PATH = "/api/v1/highspeed/draw";
@@ -578,6 +579,8 @@ export function highspeedAuthFrom(cred: Credential): HighspeedAuth | null {
   return {
     jwt: cred.jwt,
     codingPlanAuth: credentialString(cred),
-    family: cred.provider === "bigmodel" ? "bigmodel" : "zai",
+    // zai_cn folds into the BIGMODEL family (desktop
+    // resolveStartPlanFamilyFromOAuthProvider: zai_cn → "bigmodel").
+    family: credentialFamily(cred.provider),
   };
 }

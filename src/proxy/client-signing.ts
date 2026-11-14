@@ -37,6 +37,7 @@
  * Full protocol: `_reverse/NOTEPAD.md` "Client Request Signing V4".
  */
 import { DEFAULT_APP_VERSION } from "../config/loader.js";
+import type { ProviderId } from "../provider/types.js";
 import type { UpstreamHeaderPair } from "./upstream.js";
 
 const HANDSHAKE_PATH = "/api/paas/c1f3a7e2/v2/client";
@@ -81,7 +82,8 @@ export interface SigningCredential {
    * 3.15.1 client signs OAuth-provisioned accounts with that JWT.
    */
   oauthAccessToken?: string;
-  provider?: "zai" | "bigmodel";
+  /** Credential flavor — the `oauthAccessToken` JWT-mint path branches on bigmodel AND zai_cn (bigmodel family). */
+  provider?: ProviderId;
 }
 
 export interface SignOutcome {
@@ -465,7 +467,10 @@ export class ClientSigningManager {
   private async resolveParsedCredential(cred: SigningCredential, stateKey: string): Promise<ParsedSigningCredential | undefined> {
     const direct = parseSigningCredentialForm(cred.credential);
     if (direct?.handshakeField === "accessToken") return direct;
-    if (!cred.oauthAccessToken || cred.provider !== "bigmodel") return direct;
+    // zai_cn folds into the BIGMODEL signing path (the raw OAuth token mints
+    // the project-access JWT — desktop resolveStartPlanFamilyFromOAuthProvider
+    // maps zai_cn → "bigmodel"; NOTEPAD「2026-11-14 增补」§D).
+    if (!cred.oauthAccessToken || (cred.provider !== "bigmodel" && cred.provider !== "zai_cn")) return direct;
 
     const now = this.now();
     if (this.projectJwt && this.projectJwt.credentialKey === cred.credential && this.projectJwt.expMs - 5 * 60_000 > now) {
@@ -644,9 +649,10 @@ export interface SendWithSigningParams {
   headerPairs: UpstreamHeaderPair[];
   credential: string;
   appVersion: string;
-  /** Raw provider OAuth token — enables the project-access JWT signing form (bigmodel). */
+  /** Raw provider OAuth token — enables the project-access JWT signing form (bigmodel family incl. zai_cn). */
   oauthAccessToken?: string;
-  provider?: "zai" | "bigmodel";
+  /** Credential flavor — the JWT-mint path branches on bigmodel AND zai_cn (bigmodel family). */
+  provider?: ProviderId;
   send: (headerPairs: UpstreamHeaderPair[]) => Promise<Response>;
   debug?: (message: string) => void;
 }

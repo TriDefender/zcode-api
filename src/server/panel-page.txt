@@ -167,7 +167,7 @@
         <h2>Account</h2>
         <div class="row">
           <button id="login">Login (zai)</button>
-          <button id="login-bm">Login (bigmodel)</button>
+          <button id="login-cn">Login (zai_cn · 中国版)</button>
           <button id="logout">Logout</button>
         </div>
         <div id="login-body" class="row muted"></div>
@@ -389,7 +389,7 @@
       $("apply").onclick = () =>
         guard("apply", { cmd: "setConfig", provider: $("cfg-provider").value, plan: $("cfg-plan").value });
       $("login").onclick = () => startLogin("zai");
-      $("login-bm").onclick = () => startLogin("bigmodel");
+      $("login-cn").onclick = () => startLogin("zai_cn");
       $("logout").onclick = () => {
         if (
           confirm("Log out and delete the stored credential? The proxy stops using it immediately and is stopped if it is running.")

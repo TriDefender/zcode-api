@@ -137,6 +137,8 @@ export class KeyResolver {
     accessToken: string,
     provider: ProviderId,
     userId?: string,
+    /** Zai-family poll payload `data.bigmodel` — REQUIRED for zai_cn. */
+    linkedBigModel?: { customerId: string; accessToken: string },
   ): Promise<Credential> {
     if (provider === "zai") {
       const bizToken = await this.resolveZaiBizToken(accessToken);
@@ -153,11 +155,29 @@ export class KeyResolver {
         throw new Error("zai API key copy response is missing secretKey");
       }
 
-      return { apiKey, secret, provider: "zai", userId };
+      // The credential keeps the login flavor — the family folding happens per
+      // consumer (credentialFamily in providers.ts: zai_cn → bigmodel).
+      return { apiKey, secret, provider, userId };
     }
 
+    // zai_cn AND bigmodel walk the bigmodel chain: the raw OAuth token is the
+    // Authorization itself against bigmodel.cn. For zai_cn the raw token is
+    // NOT the zai-side accessToken (live 2026-11-14: bigmodel.cn rejects it
+    // with "令牌已过期或验证不正确") but the LINKED BigModel credential from
+    // the poll payload `data.bigmodel` — mirror of host materialFromSnapshot:
+    // bigmodel-family `accessToken = linkedBigModel.accessToken` (the Z.ai CN
+    // account is linked to the user's BigModel account; the poll returns both
+    // tokens). Live-verified: a zai_cn login surfaces the user's BigModel
+    // subscription (resolveStartPlanFamilyFromOAuthProvider: zai_cn → bigmodel).
+    const rawToken = provider === "zai_cn" ? linkedBigModel?.accessToken : accessToken;
+    if (provider === "zai_cn" && !rawToken) {
+      throw new Error(
+        "zai_cn login: no linked BigModel credential in the poll response (data.bigmodel missing) — " +
+        "this CN account is not linked to a BigModel account; use the zai or bigmodel login instead",
+      );
+    }
     const host = "https://bigmodel.cn";
-    const authorization = accessToken;
+    const authorization = rawToken as string;
 
     const { orgId, projectId } = await this.resolveCustomerInfo(host, authorization);
     const { apiKey } = await this.findOrCreateApiKey(host, authorization, orgId, projectId);
@@ -171,6 +191,6 @@ export class KeyResolver {
     // 3.15.1 project-access-token plane: the raw OAuth token mints the signing
     // JWT (`…/access_tokens`); without it signing falls back to the apiKey
     // form and fails open on the bigmodel handshake.
-    return { apiKey: fullKey, provider: "bigmodel", userId, oauthAccessToken: accessToken };
+    return { apiKey: fullKey, provider, userId, oauthAccessToken: rawToken };
   }
 }

@@ -445,7 +445,7 @@ export function buildFrame(s: FrameState): Frame {
 
   if (s.loginInFlight && s.loginHint) {
     // High-contrast attention chip (black on bright yellow): the headless
-    // paste fallback hint must not be missed — plain amber text reads as
+    // /login page hint must not be missed — plain amber text reads as
     // ordinary on many terminal palettes.
     emit((composeRow(w, lines.length, "Login", [{ t: ` ▸ ${s.loginHint} `, c: HINT_CHIP }])).line);
   }

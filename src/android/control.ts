@@ -16,14 +16,9 @@
  * (provider/plan), poll logs, and shut down the Node process.
  */
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
-import type { ProviderId } from "../provider/types.js";
+import type { LoginProviderId, ProviderId } from "../provider/types.js";
 import type { Credential } from "../auth/types.js";
-import {
-  ZaiOAuthClient,
-  BigmodelPollOAuthClient,
-  AuthCodeOAuthClient,
-  type OAuthFlowClient,
-} from "../auth/oauth.js";
+import { createPollLoginClient, type OAuthFlowClient } from "../auth/oauth.js";
 import { KeyResolver } from "../auth/resolver.js";
 import { saveCredential, clearCredential, loadCredential } from "../auth/store.js";
 import type { QuotaSnapshot } from "../server/routes-quota.js";
@@ -34,8 +29,7 @@ type PlanTier = "coding-plan" | "start-plan";
 /** The control protocol: request shape for `POST /control`. */
 export type ControlCommand =
   | { cmd: "status" }
-  | { cmd: "startOAuth"; provider: ProviderId }
-  | { cmd: "deliverOAuthCode"; provider: ProviderId; code: string; state: string }
+  | { cmd: "startOAuth"; provider: LoginProviderId }
   | { cmd: "logout" }
   | { cmd: "setConfig"; provider?: ProviderId; plan?: PlanTier }
   | { cmd: "startProxy" }
@@ -84,7 +78,6 @@ export interface ControlState {
   /** Active OAuth client while a flow is in flight; nulled on completion. */
   activeOauth?: {
     client: OAuthFlowClient;
-    callbackUrl: string;
     state: string;
   };
 }
@@ -277,30 +270,37 @@ async function dispatch(
     }
 
     case "startOAuth": {
+      // Protocol-level gate (same rationale as setConfig): the JSON transport
+      // bypasses the type system — an unknown provider must fail in-band
+      // ({ok:false}; the contract the Kotlin shell relies on) instead of
+      // surfacing as a TypeError → HTTP 500, which reads as a silent hang.
+      // Checked BEFORE the tear-down so a bad command cannot kill an
+      // in-flight flow.
+      if (cmd.provider !== "zai" && cmd.provider !== "zai_cn" && cmd.provider !== "bigmodel") {
+        return { ok: false, error: "invalid_provider" };
+      }
       // Tear down any previous in-flight flow so its callback port is released.
       if (state.activeOauth) {
         await state.activeOauth.client.close().catch(() => {});
         state.activeOauth = undefined;
       }
-      // Both providers use the server-mediated poll login (ZCode 3.12.3
-      // default) — no local callback; the flow completes server-side.
+      // All three flavors use the server-mediated poll login (ZCode 3.12.3
+      // default; zai_cn since 3.18.2) — no local callback; the flow completes
+      // server-side.
       const client: OAuthFlowClient = ctx.createLoginClient
         ? ctx.createLoginClient(cmd.provider)
-        : cmd.provider === "bigmodel"
-          ? new BigmodelPollOAuthClient()
-          : new ZaiOAuthClient();
+        : createPollLoginClient(cmd.provider);
       const started = await client.start();
-      const callbackPort = started.callbackUrl
-        ? Number(new URL(started.callbackUrl).port) || 80
-        : 0;
+      // The auth-code flow (the only callback-URL producer) is removed — poll
+      // flows bind nothing, so the Kotlin-facing port is always 0.
+      const callbackPort = 0;
       state.activeOauth = {
         client,
-        callbackUrl: started.callbackUrl,
         state: started.state,
       };
       client.complete(started).then(async (tokens) => {
         const resolver = new KeyResolver();
-        const cred: Credential = await resolver.resolveCodingPlanCredential(tokens.accessToken, cmd.provider, tokens.userId);
+        const cred: Credential = await resolver.resolveCodingPlanCredential(tokens.accessToken, cmd.provider, tokens.userId, tokens.linkedBigModel);
         if (tokens.jwt) cred.jwt = tokens.jwt;
         await saveCredential(cred);
         console.log(`OAuth completed for ${cmd.provider}`);
@@ -322,33 +322,6 @@ async function dispatch(
       };
     }
 
-    case "deliverOAuthCode": {
-      const active = state.activeOauth;
-      // Code delivery only applies to callback-based (auth-code) flows — the
-      // Z.AI cli login completes via server polling and has no code to deliver.
-      if (!(active?.client instanceof AuthCodeOAuthClient) || active.state !== cmd.state) {
-        return { ok: false, error: "no_matching_oauth_flow" };
-      }
-      try {
-        const { accessToken, userId, jwt } = await active.client.exchangeCode(
-          cmd.code,
-          active.callbackUrl,
-          cmd.state,
-        );
-        const resolver = new KeyResolver();
-        const cred: Credential = await resolver.resolveCodingPlanCredential(accessToken, cmd.provider, userId);
-        if (jwt) cred.jwt = jwt;
-        await saveCredential(cred);
-        state.activeOauth = undefined;
-        await active.client.close().catch(() => {});
-        return { ok: true, event: "loginOk", provider: cmd.provider };
-      } catch (err) {
-        state.activeOauth = undefined;
-        await active.client.close().catch(() => {});
-        return { ok: false, error: `oauth_exchange_failed: ${(err as Error).message}` };
-      }
-    }
-
     case "logout": {
       await clearCredential();
       return { ok: true, event: "loggedOut" };
@@ -356,6 +329,12 @@ async function dispatch(
 
     case "setConfig": {
       if (!ctx.onSetConfig) return { ok: false, error: "config_update_unavailable" };
+      // Protocol-level gate: the config surface stays zai|bigmodel — zai_cn is
+      // a login flavor, never a config provider (official folding). The JSON
+      // transport bypasses the type system, so validate before the hook.
+      if (cmd.provider && cmd.provider !== "zai" && cmd.provider !== "bigmodel") {
+        return { ok: false, error: "invalid_provider" };
+      }
       const result = await ctx.onSetConfig({ provider: cmd.provider, plan: cmd.plan });
       if (!result.ok) return result;
       state.provider = result.provider;

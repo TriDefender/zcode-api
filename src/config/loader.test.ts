@@ -31,6 +31,8 @@ beforeEach(() => {
   delete process.env.ZCODE_CLAIM_POLL_INTERVAL_MS;
   delete process.env.ZCODE_MCP_GATEWAY;
   delete process.env.ZCODE_MCP_GATEWAY_ORIGIN;
+  delete process.env.ZCODE_MEDIA_GATEWAY;
+  delete process.env.ZCODE_MEDIA_GATEWAY_ORIGIN;
 });
 
 afterEach(() => {
@@ -228,6 +230,70 @@ mcp:
 `);
     const cfg = loadConfig(path);
     expect(cfg.mcp.gateway).toEqual({ enabled: true, upstreamOrigin: "https://yaml.example.com" });
+  });
+});
+
+describe("media", () => {
+  it("defaults to enabled + zcode.z.ai when the section is absent", () => {
+    const path = writeYaml(`
+server:
+  port: 9090
+provider: zai
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.media).toEqual({ enabled: true, upstreamOrigin: "https://zcode.z.ai" });
+  });
+
+  it("YAML overrides enabled and upstreamOrigin", () => {
+    const path = writeYaml(`
+server:
+  port: 9090
+provider: zai
+media:
+  enabled: false
+  upstreamOrigin: "https://mirror.example.com"
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.media).toEqual({ enabled: false, upstreamOrigin: "https://mirror.example.com" });
+  });
+
+  it("env overrides beat YAML", () => {
+    process.env.ZCODE_MEDIA_GATEWAY = "false";
+    process.env.ZCODE_MEDIA_GATEWAY_ORIGIN = "https://env.example.com";
+    const path = writeYaml(`
+server:
+  port: 9090
+provider: zai
+media:
+  enabled: true
+  upstreamOrigin: "https://yaml.example.com"
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.media).toEqual({ enabled: false, upstreamOrigin: "https://env.example.com" });
+  });
+
+  it("env enabled=true does not shadow the YAML origin", () => {
+    process.env.ZCODE_MEDIA_GATEWAY = "true";
+    const path = writeYaml(`
+server:
+  port: 9090
+provider: zai
+media:
+  upstreamOrigin: "https://yaml.example.com"
+`);
+    const cfg = loadConfig(path);
+    expect(cfg.media).toEqual({ enabled: true, upstreamOrigin: "https://yaml.example.com" });
+  });
+
+  it("rejects a non-https non-loopback upstreamOrigin", () => {
+    const path = writeYaml(`
+server:
+  port: 9090
+provider: zai
+media:
+  upstreamOrigin: "http://zcode.example.com"
+`);
+    expect(() => loadConfig(path)).toThrow("media.upstreamOrigin");
   });
 });
 

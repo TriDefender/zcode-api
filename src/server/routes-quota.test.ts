@@ -33,6 +33,7 @@ function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
     endpointRouting: { enabled: false, origin: "https://zcode.z.ai" },
     clientSigning: { enabled: false }, highspeed: { enabled: false, origin: "https://zcode.z.ai", models: [] },
     mcp: { enabled: true, webSearch: true, webReader: false, zread: false, gateway: { enabled: true, upstreamOrigin: "https://zcode.chatglm.site" } },
+    media: { enabled: false, upstreamOrigin: "https://zcode.chatglm.site" },
     async: {
       enabled: false,
       origin: "https://zcode.z.ai",
@@ -273,6 +274,17 @@ describe("collectQuotaSnapshot coding plane", () => {
     const monitor = planeCalls(calls, "monitor");
     expect(monitor[0].url).toBe("https://open.bigmodel.cn/api/monitor/usage/quota/limit");
     expect(monitor[0].headers["authorization"]).toBe("bm-key-123");
+  });
+
+  it("zai_cn credential folds into the bigmodel family → open.bigmodel.cn monitor origin", async () => {
+    // The config providers map has no zai_cn key — desktop
+    // resolveStartPlanFamilyFromOAuthProvider maps zai_cn → "bigmodel".
+    const zaiCnCred: Credential = { apiKey: "cn-key-x.secret-y", provider: "zai_cn", jwt: makeJwt() };
+    const { fetchImpl, calls } = makeBillingFetch();
+    await collectQuotaSnapshot(makeConfig(), fetchImpl, async () => zaiCnCred);
+    const monitor = planeCalls(calls, "monitor");
+    expect(monitor[0].url).toBe("https://open.bigmodel.cn/api/monitor/usage/quota/limit");
+    expect(monitor[0].headers["authorization"]).toBe("cn-key-x.secret-y");
   });
 
   it("monitor endpoint failure degrades to codingPlan null + errors entry, credits data intact", async () => {

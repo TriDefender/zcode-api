@@ -108,6 +108,25 @@ mcp:
     # chatglm.site variant is the TEST env origin.
     upstreamOrigin: https://zcode.z.ai
 
+# Seed-family media faces — Volcano-shaped REST endpoints translated to the
+# ToolHub / official video_edit MCP upstreams (same identity headers as /mcp,
+# coding-plan only — start-plan gets 400 `plan_unsupported`):
+#   POST /api/v3/images/generations              (Seedream-shaped image gen)
+#   POST /api/v3/contents/generations/tasks      (SeedDance-shaped video tasks)
+#   GET  /api/v3/contents/generations/tasks/{id} (task polling; DELETE → 501)
+#   POST /api/v3/auc/bigmodel/recognize/flash    (Seed-ASR, sync blocking only;
+#                                                 submit/query → 501)
+#   POST /api/v3/tts/create                      (Seed-Audio-shaped TTS)
+# Images: data: references must fit the 14 MiB request-body cap (a 10 MiB
+# image base64-encodes to ≈13.3 MiB); videos: data: audio ≤2 MiB inline; ASR
+# request body ≤45 MiB (the upstream nginx cap — chunk oversized audio
+# client-side, one flash request per piece). Every call spends paid plan
+# entitlements, so auth.proxyApiKey is strongly recommended.
+# Env overrides: ZCODE_MEDIA_GATEWAY, ZCODE_MEDIA_GATEWAY_ORIGIN.
+media:
+  enabled: true
+  upstreamOrigin: https://zcode.z.ai
+
 # Async (off-peak / "idle plan") bridge.
 # When enabled, exposes POST /async/v1/messages and /async/v1/chat/completions
 # that route through ZCode's off-peak ticket-queue backend — free compute when

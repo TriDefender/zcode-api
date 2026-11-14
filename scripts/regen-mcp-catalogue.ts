@@ -242,7 +242,41 @@ async function main(): Promise<void> {
   };
   await Promise.all(Array.from({ length: DOWNLOAD_CONCURRENCY }, worker));
 
+  // Hand-maintained catalogue entries that marketplace zips cannot produce.
+  // The official video_edit speech MCP (video-agent-kit's ASR/TTS upstream) is
+  // consumed PROGRAMMATICALLY by the plugin (ve_tools/zcode_speech.py
+  // hardcodes /api/v1/mcp/server/video_edit) — no plugin .mcp.json declares it
+  // as a remote pointer, so the zip-parsing pass above will never emit it.
+  // Keep this list in sync with src/media/ (the Seed-family REST faces ride
+  // the same upstream).
+  const MANUAL_ENTRIES: CatalogueServer[] = [
+    {
+      key: "video-edit",
+      routeId: "video_edit",
+      path: "/api/v1/mcp/server/video_edit",
+      plugin: "video-agent-kit",
+      version: "0.4.3",
+      marketplace: "zcode-plugins-official",
+      requiresPaidPlan: true,
+      displayName: { en: "Video Agent Kit Speech", "zh-CN": "视频剪辑工具包语音能力" },
+      description: {
+        en: "Official speech MCP behind the video-agent-kit plugin: cloud speech transcription (ASR) and synthesis (TTS).",
+        "zh-CN": "video-agent-kit 插件背后的官方语音 MCP：云端语音转录（ASR）与合成（TTS）。",
+      },
+      category: "media",
+    },
+  ];
+  // Marketplace entries, key-sorted; manual entries are merged BEFORE the
+  // single sort so the written JSON is idempotent against the hand-edited
+  // file (appending after the sort would place them at the end and produce
+  // diff noise on every regen).
+  for (const manual of MANUAL_ENTRIES) {
+    const dup = results.find((r) => r.key === manual.key || r.routeId === manual.routeId);
+    if (dup) throw new Error(`manual catalogue entry "${manual.key}" collides with marketplace server "${dup.key}" (${dup.routeId})`);
+    results.push(manual);
+  }
   results.sort((a, b) => a.key.localeCompare(b.key));
+
   const catalogue = {
     generatedAt: new Date().toISOString(),
     marketplaceUrl: MARKETPLACE_URL,

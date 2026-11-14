@@ -220,6 +220,23 @@ export interface HighspeedConfig {
   models: string[];
 }
 
+/**
+ * Seed 系媒体兼容面（`/api/v3/images/generations`、
+ * `/api/v3/contents/generations/tasks`、`/api/v3/auc/bigmodel/recognize/flash`、
+ * `/api/v3/tts/create`）——对外是火山官方 URL/响应形状，对内翻译成
+ * ToolHub（image_generate / video_generate）与官方 Server MCP
+ * （`/api/v1/mcp/server/video_edit` 的 speech_transcribe/speech_synthesize）
+ * 调用。与 /mcp 面共用同一套 official 身份头与 coding-plan 门禁。
+ *
+ * @see src/media/（翻译层），_reverse/NOTEPAD.md "Official plugin MCP"（头契约）
+ */
+export interface MediaConfig {
+  /** Expose the four `/api/v3/...` media faces. Default `true`. */
+  enabled: boolean;
+  /** Base origin of the ToolHub + video_edit upstreams. Default `"https://zcode.z.ai"`. */
+  upstreamOrigin: string;
+}
+
 /** Top-level proxy configuration. */
 export interface ProxyConfig {
   server: {
@@ -257,6 +274,8 @@ export interface ProxyConfig {
   highspeed: HighspeedConfig;
   /** GLM MCP hosted-tool configuration. */
   mcp: McpConfig;
+  /** Seed-family media faces (Volcano-shaped REST → ToolHub/video_edit upstreams). */
+  media: MediaConfig;
   /** Async (off-peak / idle-plan) bridge configuration. */
   async: AsyncConfig;
   /** Manual claim ("weekend plan") configuration. */
