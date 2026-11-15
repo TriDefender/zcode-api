@@ -181,8 +181,16 @@ export async function solveViaWorkerOrInProcess(req: {
   scene: string;
   region: string;
   prefix: string;
+  signal?: AbortSignal;
 }): Promise<string> {
+  const throwIfAborted = () => {
+    if (req.signal?.aborted) {
+      throw req.signal.reason instanceof Error ? req.signal.reason : new Error("captcha solve aborted");
+    }
+  };
+  throwIfAborted();
   const entryPath = await getWorkerEntryPath();
+  throwIfAborted();
   if (entryPath === null) {
     if (strictWorkerRequired()) {
       const looked = resolveWorkerEntryCandidates({
@@ -209,7 +217,7 @@ export async function solveViaWorkerOrInProcess(req: {
  */
 async function solveInWorkerDegrading(
   entryPath: string,
-  req: { scene: string; region: string; prefix: string },
+  req: { scene: string; region: string; prefix: string; signal?: AbortSignal },
 ): Promise<string> {
   try {
     return await solveInWorker(entryPath, req);
@@ -368,9 +376,17 @@ function acquireWarm(entryPath: string): { handle?: WarmHandle; spawnError?: Err
   return spawnWarm(entryPath);
 }
 
-function dispatchToWarm(h: WarmHandle, req: { scene: string; region: string; prefix: string }): Promise<string> {
+function dispatchToWarm(
+  h: WarmHandle,
+  req: { scene: string; region: string; prefix: string; signal?: AbortSignal },
+): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const id = ++nextSolveId;
+    const onAbort = () => {
+      killWarm(h, req.signal?.reason instanceof Error ? req.signal.reason.message : "captcha solve aborted");
+      dropFromPool(h);
+      reject(req.signal?.reason instanceof Error ? req.signal.reason : new Error("captcha solve aborted"));
+    };
     const timer = setTimeout(() => {
       killWarm(h, `captcha worker timeout (${SOLVE_WORKER_TIMEOUT_MS}ms)`);
       dropFromPool(h);
@@ -378,11 +394,12 @@ function dispatchToWarm(h: WarmHandle, req: { scene: string; region: string; pre
     }, SOLVE_WORKER_TIMEOUT_MS);
     h.busy = true;
     h.pending = { id, timer, resolve, reject };
+    req.signal?.addEventListener("abort", onAbort, { once: true });
     h.worker.postMessage({ id, scene: req.scene, region: req.region, prefix: req.prefix });
   });
 }
 
-async function warmSolve(entryPath: string, req: { scene: string; region: string; prefix: string }): Promise<string> {
+async function warmSolve(entryPath: string, req: { scene: string; region: string; prefix: string; signal?: AbortSignal }): Promise<string> {
   const acq = acquireWarm(entryPath);
   if (acq.spawnError) {
     if (strictWorkerRequired()) {
@@ -448,22 +465,28 @@ export function stopCaptchaWorkers(): void {
  */
 function solveInWorker(
   entryPath: string,
-  req: { scene: string; region: string; prefix: string },
+  req: { scene: string; region: string; prefix: string; signal?: AbortSignal },
 ): Promise<string> {
   const id = ++nextSolveId;
   return new Promise<string>((resolve, reject) => {
     let settled = false;
     let worker: Worker | null = null;
+    let timer!: ReturnType<typeof setTimeout>;
     const settle = (fn: () => void) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      req.signal?.removeEventListener("abort", onAbort);
       try { worker?.terminate(); } catch {}
       fn();
     };
-    const timer = setTimeout(() => {
+    const onAbort = () => {
+      settle(() => reject(req.signal?.reason instanceof Error ? req.signal.reason : new Error("captcha solve aborted")));
+    };
+    timer = setTimeout(() => {
       settle(() => reject(new Error(`captcha worker timeout (${SOLVE_WORKER_TIMEOUT_MS}ms)`)));
     }, SOLVE_WORKER_TIMEOUT_MS);
+    req.signal?.addEventListener("abort", onAbort, { once: true });
 
     try {
       worker = new Worker(entryPath);
@@ -473,7 +496,7 @@ function solveInWorker(
       settle(() => reject(new WorkerUnavailableError(msg)));
       return;
     }
-    const msg: SolveRequest = { id, ...req };
+    const msg: SolveRequest = { id, scene: req.scene, region: req.region, prefix: req.prefix };
     worker.on("message", (m: SolveResponse) => {
       if (!m || m.id !== id) return;
       if (m.ok) settle(() => resolve(m.param));

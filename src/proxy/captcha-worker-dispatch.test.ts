@@ -134,6 +134,7 @@ describe("warm worker pool", () => {
   const warmDir = fs.mkdtempSync(path.join(os.tmpdir(), "cap-warm-"));
   const markerPath = path.join(warmDir, "spawns.txt");
   const warmFixture = path.join(warmDir, "warm-worker.mjs");
+  const hangingFixture = path.join(warmDir, "hanging-worker.mjs");
   fs.writeFileSync(
     warmFixture,
     [
@@ -145,6 +146,11 @@ describe("warm worker pool", () => {
       "  parentPort.postMessage({ id: m.id, ok: true, param: `warm:${m.scene}` });",
       "});",
     ].join("\n"),
+    "utf8",
+  );
+  fs.writeFileSync(
+    hangingFixture,
+    ['import { parentPort } from "node:worker_threads";', "if (!parentPort) throw new Error('fixture requires parent port');"].join("\n"),
     "utf8",
   );
   const spawnCount = (): number =>
@@ -181,6 +187,23 @@ describe("warm worker pool", () => {
     expect(c).toBe("warm:w3");
     // The pool was emptied -> the next solve had to spawn a fresh worker.
     expect(spawnCount()).toBe(2);
+  });
+
+  test("aborting a solve terminates a hung worker immediately", async () => {
+    process.env.ZCODE_CAPTCHA_WORKER = hangingFixture;
+    delete process.env.ZCODE_CAPTCHA_WARM_WORKERS;
+    mock.module("./captcha-worker-asset.js", () => ({ default: null }));
+    __resetCaptchaWorkerDispatchForTest();
+
+    const controller = new AbortController();
+    const pending = solveViaWorkerOrInProcess({
+      scene: "abort",
+      region: "r",
+      prefix: "p",
+      signal: controller.signal,
+    });
+    controller.abort(new Error("request deadline"));
+    await expect(pending).rejects.toThrow("request deadline");
   });
 });
 

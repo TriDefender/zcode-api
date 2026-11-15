@@ -10,11 +10,11 @@ import { solveViaWorkerOrInProcess, stopCaptchaWorkers } from "./captcha-worker-
 
 const BACKEND = process.env.ZCODE_CAPTCHA_BACKEND?.trim().toLowerCase() || "happy";
 
-export async function runCaptchaSolve(scene: string, region: string, prefix: string): Promise<string> {
+export async function runCaptchaSolve(scene: string, region: string, prefix: string, signal?: AbortSignal): Promise<string> {
   if (BACKEND !== "happy") {
     throw new Error(`captcha backend "${BACKEND}" is not available; use ZCODE_CAPTCHA_BACKEND=happy`);
   }
-  return solveViaWorkerOrInProcess({ scene, region, prefix });
+  return solveViaWorkerOrInProcess({ scene, region, prefix, signal });
 }
 
 /** Worker-per-solve needs no concurrency plumbing — kept for the pool API. */
