@@ -58,7 +58,9 @@ cd Android-APP
 - `Android-APP/app/src/main/assets/server_bundle/` — generated `server.cjs`
   plus `captcha-worker-entry.cjs` (start-plan captchas are solved strictly in
   worker processes on Android); the web UI, system prompt and config template
-  are inlined into the bundle. It is gitignored build output — regenerate via
+  are inlined into the bundle. `server.cjs` is gitignored build output;
+  `captcha-worker-entry.cjs` is committed to the repo (a regenerated copy
+  must be re-committed) — regenerate via
   `bun run build:android-bundle` + copy both files from `dist/android/` into
   it before building (Gradle's `checkServerBundle` preBuild task fails with a
   hint if either is missing).

@@ -149,6 +149,7 @@ body:
       options:
         - OpenAI（POST /v1/chat/completions）
         - Anthropic（POST /v1/messages）
+        - Responses（POST /v1/responses，Codex 等）
     validations:
       required: true
 

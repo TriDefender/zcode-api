@@ -8,7 +8,7 @@ auth:
   proxyApiKey: "your-proxy-secret"
 
   # Upstream credentials come from the OAuth login flow — run this first:
-  #   bun run src/index.ts auth login <zai|bigmodel>
+  #   bun run src/index.ts auth login <zai|zai_cn>
   # Parsed but currently not honored — the credential store path is fixed at
   # ~/.zcode-proxy/credentials.json:
   # oauthCredentialsPath: "~/.zcode-proxy/credentials.json"
@@ -170,7 +170,7 @@ async:
 # client version or the server rejects with `ineligible` — an app_version
 # below the floor can also surface as a silently empty preview list
 # (measured floor 3.14.0 for the 2026-09 campaign; the built-in appVersion
-# "3.17.1" satisfies it).
+# "3.18.2" satisfies it).
 #
 # Env overrides: ZCODE_CLAIM_ENABLED, ZCODE_CLAIM_AUTO, ZCODE_CLAIM_ORIGIN,
 # ZCODE_CLAIM_POLL_INTERVAL_MS.

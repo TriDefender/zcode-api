@@ -26,6 +26,7 @@
 - 💬 **自带网页聊天** —— 打开 `/webui` 就是一个本地 ChatGPT 风格聊天页，随手测试模型。
 - 🌙 **闲时通道 & 套餐秒抢**（可选）—— 错峰时段的免费额度通道、限量体验套餐自动领取，都是内置功能。
 - 🔌 **套餐内 MCP 聚合端点** —— ZCode 官方插件 MCP（天眼查 / Wind / 同花顺 iFinD…，134+ 工具）聚合到**单一** `/mcp` 端点（streamable HTTP，工具名 `{plugin}__{tool}` 命名空间化——客户端只配一个 MCP server 即可，需 coding-plan 登录，浏览器 `GET /mcp` 查看目录）；自带网页聊天还能外挂你自己的 MCP 服务器给模型当工具用。
+- 🎨 **套餐内 Seed 系媒体接口** —— 生图（Seedream）、生视频（SeedDance 任务式）、语音识别 / 语音合成（Seed-ASR / Seed-Audio）以火山方舟同形状的 `/api/v3/*` REST 端点暴露在本机（默认开启，翻译到官方 ToolHub / video_edit 网关；需 coding-plan 登录，消耗套餐内额度，端点与体限详见 [`config.example.yaml`](config.example.yaml)）。
 - 🪟 **全平台** —— Windows / macOS / Linux 一份代码直接跑，也能编译成单文件程序或 Docker 部署。
 
 ## 🚀 一分钟上手
@@ -47,8 +48,7 @@
 | 按键 | 作用 |
 |------|------|
 | <kbd>s</kbd> | 启动 / 停止代理 |
-| <kbd>l</kbd> | 登录当前服务商（打开浏览器授权） |
-| <kbd>L</kbd> | bigmodel 粘贴登录（回退模式；`l` 登录本身就免回调，无头可用） |
+| <kbd>l</kbd> | 打开登录页（选 Z.ai 国际版 / 中国版，浏览器完成授权后自动回填；需先停代理） |
 | <kbd>o</kbd> | 退出登录 |
 | <kbd>p</kbd> / <kbd>t</kbd> | 切换服务商（Z.AI ↔ 智谱）/ 套餐（coding-plan ↔ start-plan） |
 | <kbd>r</kbd> | 刷新套餐用量 |
@@ -242,7 +242,7 @@ ssh -N -L 8090:127.0.0.1:8090 user@host
 ## ❓ 常见问题
 
 **启动就退出，提示 Not logged in？**
-先登录：`bun run src/index.ts auth login zai`（或 bigmodel）。登录一次即可，凭据加密保存。
+先登录：`bun run src/index.ts auth login zai`（或 `zai_cn`——BigModel / 智谱账号请用中国版，账号互链自动识别订阅）。登录一次即可，凭据加密保存。
 
 **端口 8080 被占了？**
 环境变量换一个：`ZCODE_PROXY_PORT=8081 bun run src/index.ts`，或改 `config.yaml` 的 `server.port`。
@@ -254,7 +254,7 @@ ssh -N -L 8090:127.0.0.1:8090 user@host
 要。凭据加密时绑定了本机信息。跨机器迁移可以两边都设 `ZCODE_PROXY_CREDENTIAL_SECRET` 为同一个值再登录/拷贝 `~/.zcode-proxy/credentials.json`。
 
 **服务器上没有浏览器怎么登录？**
-直接登录即可：`bun run src/index.ts auth login zai`（或 bigmodel）。登录链接在任何设备的浏览器打开都行，授权后本机自动完成（无需回调页面）。若想手动交换，也有粘贴模式：`auth login bigmodel --paste`，把跳转后的完整网址粘回来即可。
+直接登录即可：`bun run src/index.ts auth login zai`（或 `zai_cn`）。登录链接在任何设备的浏览器打开都行，授权后本机自动完成（无需回调页面）。存量 bigmodel API key 可用 `auth login bigmodel --import` 导入（bigmodel OAuth 登录与粘贴模式已移除）。
 
 **它在后台到底做了什么？**
 它就是一个"翻译官 + 传话员"：把你的工具发出的标准请求翻译成官方客户端的同款请求转发上去，再把回复原样翻译回来。所有流量都只在你本机和官方服务器之间，不经过任何第三方。
