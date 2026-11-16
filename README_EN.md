@@ -27,6 +27,7 @@ Codex, Silly Tavern … can all use your plan quota directly.
 - 💬 **Web chat included** — open `/webui` for a local ChatGPT-style chat page to try out models.
 - 🌙 **Off-peak channel & plan grabber** (optional) — a free-quota channel for off-peak hours and automatic claiming of limited trial plans are both built in.
 - 🔌 **In-plan MCP aggregate endpoint** — official ZCode plugin MCPs (Tianyancha / Wind / iFinD…, 134+ tools) are merged behind a **single** `/mcp` endpoint (streamable HTTP, tools namespaced `{plugin}__{tool}` — clients configure just one MCP server; requires a coding-plan login, `GET /mcp` in a browser shows the catalogue); the built-in web chat can also attach your own MCP servers as tools for the model.
+- 🎨 **In-plan Seed media endpoints** — image generation (Seedream), video generation (SeedDance task-based), speech recognition / synthesis (Seed-ASR / Seed-Audio) are exposed as Volcano Ark-shaped `/api/v3/*` REST endpoints on the local proxy (on by default; translated to the official ToolHub / video_edit gateways — requires a coding-plan login and spends plan entitlements; endpoints and body limits are documented in [`config.example.yaml`](config.example.yaml)).
 - 🪟 **Cross-platform** — Windows / macOS / Linux run from one codebase; can also be compiled into a single-file executable or deployed with Docker.
 
 ## 🚀 Quick Start
@@ -48,8 +49,7 @@ The panel has four cards: **Login & Settings** (provider / plan / login), **Quot
 | Key | Action |
 |------|------|
 | <kbd>s</kbd> | Start / stop the proxy |
-| <kbd>l</kbd> | Log in to the current provider (opens the browser for authorization) |
-| <kbd>L</kbd> | bigmodel paste login (fallback mode; the `l` login itself is callback-free and works headless) |
+| <kbd>l</kbd> | Open the login page (pick Z.ai International / China, authorize in the browser; stop the proxy first) |
 | <kbd>o</kbd> | Log out |
 | <kbd>p</kbd> / <kbd>t</kbd> | Switch provider (Z.AI ↔ Zhipu) / plan (coding-plan ↔ start-plan) |
 | <kbd>r</kbd> | Refresh the quota card |
@@ -243,7 +243,7 @@ The table below is for reference only:
 ## ❓ FAQ
 
 **It exits right after startup saying "Not logged in"?**
-Log in first: `bun run src/index.ts auth login zai` (or bigmodel). Logging in once is enough; credentials are stored encrypted.
+Log in first: `bun run src/index.ts auth login zai` (or `zai_cn` — BigModel / Zhipu accounts use the China option; linked accounts get their plan recognized automatically). Logging in once is enough; credentials are stored encrypted.
 
 **Port 8080 is already taken?**
 Pick another one via an environment variable: `ZCODE_PROXY_PORT=8081 bun run src/index.ts`, or change `server.port` in `config.yaml`.
@@ -255,7 +255,7 @@ If you've set `ZCODE_PROXY_API_KEY`, your tool must send the same value; without
 Yes. Credentials are encrypted with machine-bound information. To migrate across machines, set the same `ZCODE_PROXY_CREDENTIAL_SECRET` on both sides, then log in / copy `~/.zcode-proxy/credentials.json`.
 
 **No browser on my server — how do I log in?**
-Just log in directly: `bun run src/index.ts auth login zai` (or bigmodel). The login link can be opened in any device's browser; after you authorize, the local side completes automatically (no callback page needed). If you prefer a manual exchange, there's also a paste mode: `auth login bigmodel --paste` — paste back the full URL you're redirected to.
+Just log in directly: `bun run src/index.ts auth login zai` (or `zai_cn`). The login link can be opened in any device's browser; after you authorize, the local side completes automatically (no callback page needed). An existing bigmodel API key can be imported with `auth login bigmodel --import` (bigmodel OAuth login and the paste mode have been removed).
 
 **What does it actually do in the background?**
 It's a "translator + courier": it translates the standard requests from your tools into the same requests the official client sends, forwards them, and translates the responses back as-is. All traffic stays between your machine and the official servers — it never passes through any third party.
