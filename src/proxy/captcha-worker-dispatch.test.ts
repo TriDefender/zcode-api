@@ -159,6 +159,21 @@ describe("warm worker pool", () => {
     ].join("\n"),
     "utf8",
   );
+  const failThenHangFixture = path.join(warmDir, "fail-then-hang-worker.mjs");
+  fs.writeFileSync(
+    failThenHangFixture,
+    [
+      'import { parentPort } from "node:worker_threads";',
+      'import { appendFileSync } from "node:fs";',
+      `appendFileSync(${JSON.stringify(markerPath)}, "spawn\\n");`,
+      "if (!parentPort) throw new Error('fixture requires parent port');",
+      "let n = 0;",
+      "parentPort.on('message', (m) => {",
+      "  if (n++ === 0) parentPort.postMessage({ id: m.id, ok: false, error: 'boom' });",
+      "});",
+    ].join("\n"),
+    "utf8",
+  );
   const spawnCount = (): number =>
     fs.existsSync(markerPath)
       ? fs.readFileSync(markerPath, "utf8").split("\n").filter((l) => l === "spawn").length
@@ -235,6 +250,37 @@ describe("warm worker pool", () => {
     await abortAfterDispatch("warm-abort-1");
     await abortAfterDispatch("warm-abort-2");
     expect(spawnCount() - baseline).toBe(2);
+  });
+
+  test("a late abort from a finished warm solve does not kill the next take on the same handle", async () => {
+    process.env.ZCODE_CAPTCHA_WORKER = failThenHangFixture;
+    process.env.ZCODE_CAPTCHA_WARM_WORKERS = "1";
+    mock.module("./captcha-worker-asset.js", () => ({ default: null }));
+    __resetCaptchaWorkerDispatchForTest();
+    const baseline = spawnCount();
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    const controllerA = new AbortController();
+    await expect(
+      solveViaWorkerOrInProcess({ scene: "a", region: "r", prefix: "p", signal: controllerA.signal }),
+    ).rejects.toThrow("boom");
+
+    const controllerB = new AbortController();
+    let settledB = false;
+    const pendingB = solveViaWorkerOrInProcess({ scene: "b", region: "r", prefix: "p", signal: controllerB.signal });
+    pendingB.then(
+      () => { settledB = true; },
+      () => { settledB = true; },
+    );
+    await sleep(100);
+
+    controllerA.abort(new Error("late abort A"));
+    await sleep(100);
+    expect(settledB).toBe(false);
+
+    controllerB.abort(new Error("B deadline"));
+    await expect(pendingB).rejects.toThrow("B deadline");
+    expect(spawnCount() - baseline).toBe(1);
   });
 });
 
