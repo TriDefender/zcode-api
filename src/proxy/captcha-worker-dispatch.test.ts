@@ -155,6 +155,7 @@ describe("warm worker pool", () => {
       'import { appendFileSync } from "node:fs";',
       `appendFileSync(${JSON.stringify(markerPath)}, "spawn\\n");`,
       "if (!parentPort) throw new Error('fixture requires parent port');",
+      "parentPort.on('message', () => {});",
     ].join("\n"),
     "utf8",
   );
