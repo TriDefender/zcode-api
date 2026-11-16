@@ -134,6 +134,7 @@ describe("warm worker pool", () => {
   const warmDir = fs.mkdtempSync(path.join(os.tmpdir(), "cap-warm-"));
   const markerPath = path.join(warmDir, "spawns.txt");
   const warmFixture = path.join(warmDir, "warm-worker.mjs");
+  const hangingFixture = path.join(warmDir, "hanging-worker.mjs");
   fs.writeFileSync(
     warmFixture,
     [
@@ -143,6 +144,32 @@ describe("warm worker pool", () => {
       "if (!parentPort) throw new Error('warm fixture requires parent port');",
       "parentPort.on('message', (m) => {",
       "  parentPort.postMessage({ id: m.id, ok: true, param: `warm:${m.scene}` });",
+      "});",
+    ].join("\n"),
+    "utf8",
+  );
+  fs.writeFileSync(
+    hangingFixture,
+    [
+      'import { parentPort } from "node:worker_threads";',
+      'import { appendFileSync } from "node:fs";',
+      `appendFileSync(${JSON.stringify(markerPath)}, "spawn\\n");`,
+      "if (!parentPort) throw new Error('fixture requires parent port');",
+      "parentPort.on('message', () => {});",
+    ].join("\n"),
+    "utf8",
+  );
+  const failThenHangFixture = path.join(warmDir, "fail-then-hang-worker.mjs");
+  fs.writeFileSync(
+    failThenHangFixture,
+    [
+      'import { parentPort } from "node:worker_threads";',
+      'import { appendFileSync } from "node:fs";',
+      `appendFileSync(${JSON.stringify(markerPath)}, "spawn\\n");`,
+      "if (!parentPort) throw new Error('fixture requires parent port');",
+      "let n = 0;",
+      "parentPort.on('message', (m) => {",
+      "  if (n++ === 0) parentPort.postMessage({ id: m.id, ok: false, error: 'boom' });",
       "});",
     ].join("\n"),
     "utf8",
@@ -181,6 +208,79 @@ describe("warm worker pool", () => {
     expect(c).toBe("warm:w3");
     // The pool was emptied -> the next solve had to spawn a fresh worker.
     expect(spawnCount()).toBe(2);
+  });
+
+  test("aborting a worker-per-solve solve mid-flight terminates the hung worker", async () => {
+    process.env.ZCODE_CAPTCHA_WORKER = hangingFixture;
+    delete process.env.ZCODE_CAPTCHA_WARM_WORKERS;
+    mock.module("./captcha-worker-asset.js", () => ({ default: null }));
+    __resetCaptchaWorkerDispatchForTest();
+
+    const controller = new AbortController();
+    const pending = solveViaWorkerOrInProcess({
+      scene: "abort",
+      region: "r",
+      prefix: "p",
+      signal: controller.signal,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const t0 = Date.now();
+    controller.abort(new Error("request deadline"));
+    await expect(pending).rejects.toThrow("request deadline");
+    expect(Date.now() - t0).toBeLessThan(5_000);
+  });
+
+  test("aborting a warm solve mid-flight drops the handle; the next solve respawns", async () => {
+    process.env.ZCODE_CAPTCHA_WORKER = hangingFixture;
+    process.env.ZCODE_CAPTCHA_WARM_WORKERS = "1";
+    mock.module("./captcha-worker-asset.js", () => ({ default: null }));
+    __resetCaptchaWorkerDispatchForTest();
+    const baseline = spawnCount();
+
+    const abortAfterDispatch = async (scene: string): Promise<void> => {
+      const controller = new AbortController();
+      const pending = solveViaWorkerOrInProcess({ scene, region: "r", prefix: "p", signal: controller.signal });
+      await new Promise((r) => setTimeout(r, 100));
+      const t0 = Date.now();
+      controller.abort(new Error("request deadline"));
+      await expect(pending).rejects.toThrow("request deadline");
+      expect(Date.now() - t0).toBeLessThan(5_000);
+    };
+
+    await abortAfterDispatch("warm-abort-1");
+    await abortAfterDispatch("warm-abort-2");
+    expect(spawnCount() - baseline).toBe(2);
+  });
+
+  test("a late abort from a finished warm solve does not kill the next take on the same handle", async () => {
+    process.env.ZCODE_CAPTCHA_WORKER = failThenHangFixture;
+    process.env.ZCODE_CAPTCHA_WARM_WORKERS = "1";
+    mock.module("./captcha-worker-asset.js", () => ({ default: null }));
+    __resetCaptchaWorkerDispatchForTest();
+    const baseline = spawnCount();
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    const controllerA = new AbortController();
+    await expect(
+      solveViaWorkerOrInProcess({ scene: "a", region: "r", prefix: "p", signal: controllerA.signal }),
+    ).rejects.toThrow("boom");
+
+    const controllerB = new AbortController();
+    let settledB = false;
+    const pendingB = solveViaWorkerOrInProcess({ scene: "b", region: "r", prefix: "p", signal: controllerB.signal });
+    pendingB.then(
+      () => { settledB = true; },
+      () => { settledB = true; },
+    );
+    await sleep(100);
+
+    controllerA.abort(new Error("late abort A"));
+    await sleep(100);
+    expect(settledB).toBe(false);
+
+    controllerB.abort(new Error("B deadline"));
+    await expect(pendingB).rejects.toThrow("B deadline");
+    expect(spawnCount() - baseline).toBe(1);
   });
 });
 

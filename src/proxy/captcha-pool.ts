@@ -259,15 +259,21 @@ export class CaptchaTokenPool {
       // grind through its retry budget (~30-45s) — cap the client-facing wait
       // and let the background waves finish the job instead.
       const raceDeadlineMs = Number(process.env.CAPTCHA_SOLVE_RACE_DEADLINE_MS || 35_000);
-      param = await Promise.race([
-        this.solveRaced(cfg),
-        new Promise<never>((_, rej) =>
-          setTimeout(
-            () => rej(new Error(`captcha take deadline (${raceDeadlineMs}ms)`)),
-            Math.max(1_000, raceDeadlineMs),
-          ),
-        ),
-      ]);
+      const solveAbort = new AbortController();
+      let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        param = await Promise.race([
+          this.solveRaced(cfg, solveAbort.signal),
+          new Promise<never>((_, rej) => {
+            deadlineTimer = setTimeout(() => {
+              solveAbort.abort(new Error(`captcha take deadline (${raceDeadlineMs}ms)`));
+              rej(new Error(`captcha take deadline (${raceDeadlineMs}ms)`));
+            }, Math.max(1_000, raceDeadlineMs));
+          }),
+        ]);
+      } finally {
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      }
     } catch (err) {
       // Mints fail in clusters (pe-stall storms, F008 velocity). Background
       // refill waves keep retrying — give them a short window to land a
@@ -578,7 +584,7 @@ export class CaptchaTokenPool {
     }
   }
 
-  private async solveFresh(cfg: CaptchaConfig): Promise<string> {
+  private async solveFresh(cfg: CaptchaConfig, signal?: AbortSignal): Promise<string> {
     this.activeSolves += 1;
     this.lastSolveAt = Date.now();
     try {
@@ -586,7 +592,10 @@ export class CaptchaTokenPool {
       let sawIpBlock = false;
       for (let attempt = 1; attempt <= this.opts.solveRetries; attempt += 1) {
         try {
-          const param = await runCaptchaSolve(cfg.sceneId, cfg.region, cfg.prefix);
+          if (signal?.aborted) {
+            throw signal.reason instanceof Error ? signal.reason : new Error("captcha solve aborted");
+          }
+          const param = await runCaptchaSolve(cfg.sceneId, cfg.region, cfg.prefix, signal);
           if (!param) {
             lastErr = "solver returned empty";
             continue;
@@ -599,6 +608,7 @@ export class CaptchaTokenPool {
           return param;
         } catch (err) {
           lastErr = err instanceof Error ? err.message : String(err);
+          if (signal?.aborted) throw err;
           if (isCaptchaDuplicateError(lastErr)) {
             lastErr = `duplicate certifyId (F008)`;
           } else if (isCaptchaIpBlockError(lastErr)) {
@@ -633,16 +643,16 @@ export class CaptchaTokenPool {
    * sequential retry chain. Extra successes are banked into the pool instead
    * of being wasted; the race only rejects when every racer fails.
    */
-  private solveRaced(cfg: CaptchaConfig): Promise<string> {
+  private solveRaced(cfg: CaptchaConfig, signal?: AbortSignal): Promise<string> {
     const racers = Math.max(1, Math.min(this.opts.emptyTakeRace, this.opts.solveConcurrency));
-    if (racers <= 1) return this.solveFresh(cfg);
+    if (racers <= 1) return this.solveFresh(cfg, signal);
 
     return new Promise<string>((resolve, reject) => {
       let pending = racers;
       let served = false;
       let lastErr: unknown = null;
       for (let i = 0; i < racers; i += 1) {
-        this.solveFresh(cfg).then(
+        this.solveFresh(cfg, signal).then(
           (param) => {
             if (served) {
               // Lost the race but minted a valid token — bank it.
