@@ -194,8 +194,6 @@ describe("warm worker pool", () => {
     expect(spawnCount()).toBe(2);
   });
 
-  // Not warm-pool behaviour: this covers the worker-per-solve path and lives
-  // here only to share the hanging fixture.
   test("aborting a worker-per-solve solve mid-flight terminates the hung worker", async () => {
     process.env.ZCODE_CAPTCHA_WORKER = hangingFixture;
     delete process.env.ZCODE_CAPTCHA_WARM_WORKERS;
@@ -209,12 +207,10 @@ describe("warm worker pool", () => {
       prefix: "p",
       signal: controller.signal,
     });
-    // Let the worker spawn and the job dispatch so the abort is mid-flight.
     await new Promise((r) => setTimeout(r, 100));
     const t0 = Date.now();
     controller.abort(new Error("request deadline"));
     await expect(pending).rejects.toThrow("request deadline");
-    // Must not ride the 30s worker timeout.
     expect(Date.now() - t0).toBeLessThan(5_000);
   });
 
@@ -237,7 +233,6 @@ describe("warm worker pool", () => {
 
     await abortAfterDispatch("warm-abort-1");
     await abortAfterDispatch("warm-abort-2");
-    // The killed handle was dropped, so the second solve had to spawn anew.
     expect(spawnCount() - baseline).toBe(2);
   });
 });

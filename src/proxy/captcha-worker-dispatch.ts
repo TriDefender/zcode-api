@@ -202,8 +202,6 @@ export async function solveViaWorkerOrInProcess(req: {
           (looked.length ? `; looked for: ${looked.join(", ")}` : ""),
       );
     }
-    // Cancellation covers the worker faces only: a main-thread in-process
-    // solve cannot be terminated and is bounded by its own timeouts.
     return (await happy()).solveTraceless(req);
   }
   if (warmWorkerTarget() > 0) {
@@ -385,9 +383,6 @@ function dispatchToWarm(
   return new Promise<string>((resolve, reject) => {
     const id = ++nextSolveId;
     const onAbort = () => {
-      // Stale-listener guard: if this dispatch already ended (ok:false reply,
-      // timeout), the handle may have been re-acquired by ANOTHER take, and a
-      // late abort from the original signal must not kill that solve.
       if (h.pending?.id !== id) return;
       killWarm(h, req.signal?.reason instanceof Error ? req.signal.reason.message : "captcha solve aborted");
       dropFromPool(h);
