@@ -150,7 +150,12 @@ describe("warm worker pool", () => {
   );
   fs.writeFileSync(
     hangingFixture,
-    ['import { parentPort } from "node:worker_threads";', "if (!parentPort) throw new Error('fixture requires parent port');"].join("\n"),
+    [
+      'import { parentPort } from "node:worker_threads";',
+      'import { appendFileSync } from "node:fs";',
+      `appendFileSync(${JSON.stringify(markerPath)}, "spawn\\n");`,
+      "if (!parentPort) throw new Error('fixture requires parent port');",
+    ].join("\n"),
     "utf8",
   );
   const spawnCount = (): number =>
@@ -189,7 +194,9 @@ describe("warm worker pool", () => {
     expect(spawnCount()).toBe(2);
   });
 
-  test("aborting a solve terminates a hung worker immediately", async () => {
+  // Not warm-pool behaviour: this covers the worker-per-solve path and lives
+  // here only to share the hanging fixture.
+  test("aborting a worker-per-solve solve mid-flight terminates the hung worker", async () => {
     process.env.ZCODE_CAPTCHA_WORKER = hangingFixture;
     delete process.env.ZCODE_CAPTCHA_WARM_WORKERS;
     mock.module("./captcha-worker-asset.js", () => ({ default: null }));
@@ -202,8 +209,36 @@ describe("warm worker pool", () => {
       prefix: "p",
       signal: controller.signal,
     });
+    // Let the worker spawn and the job dispatch so the abort is mid-flight.
+    await new Promise((r) => setTimeout(r, 100));
+    const t0 = Date.now();
     controller.abort(new Error("request deadline"));
     await expect(pending).rejects.toThrow("request deadline");
+    // Must not ride the 30s worker timeout.
+    expect(Date.now() - t0).toBeLessThan(5_000);
+  });
+
+  test("aborting a warm solve mid-flight drops the handle; the next solve respawns", async () => {
+    process.env.ZCODE_CAPTCHA_WORKER = hangingFixture;
+    process.env.ZCODE_CAPTCHA_WARM_WORKERS = "1";
+    mock.module("./captcha-worker-asset.js", () => ({ default: null }));
+    __resetCaptchaWorkerDispatchForTest();
+    const baseline = spawnCount();
+
+    const abortAfterDispatch = async (scene: string): Promise<void> => {
+      const controller = new AbortController();
+      const pending = solveViaWorkerOrInProcess({ scene, region: "r", prefix: "p", signal: controller.signal });
+      await new Promise((r) => setTimeout(r, 100));
+      const t0 = Date.now();
+      controller.abort(new Error("request deadline"));
+      await expect(pending).rejects.toThrow("request deadline");
+      expect(Date.now() - t0).toBeLessThan(5_000);
+    };
+
+    await abortAfterDispatch("warm-abort-1");
+    await abortAfterDispatch("warm-abort-2");
+    // The killed handle was dropped, so the second solve had to spawn anew.
+    expect(spawnCount() - baseline).toBe(2);
   });
 });
 
