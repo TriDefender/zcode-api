@@ -23,6 +23,7 @@ beforeEach(() => {
   delete process.env.ZCODE_PROVIDER;
   delete process.env.ZCODE_SOURCE_TITLE;
   delete process.env.ZCODE_REFERER_ORIGIN;
+  delete process.env.ZCODE_IDENTITY_DEVICE_MID;
   delete process.env.ZCODE_ASYNC_ENABLED;
   delete process.env.ZCODE_ASYNC_ORIGIN;
   delete process.env.ZCODE_CLAIM_ENABLED;
@@ -80,6 +81,35 @@ provider: zai
 identity:
   deviceMid: "  0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0  "
 `);
+    expect(loadConfig(path).identity.deviceMid).toBe("0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0");
+  });
+
+  // Android: NodeRunner injects the app-private UUID as an env var and never
+  // writes identity.deviceMid into config.yaml — the claim plane reads the
+  // resolved value, so dropping the env here made every claim POST hit biz
+  // 3001 "parameter error" (missing X-Device-Mid) on the app.
+  it("takes identity.deviceMid from ZCODE_IDENTITY_DEVICE_MID when YAML has none", () => {
+    const path = writeYaml(`
+server:
+  port: 9090
+provider: zai
+`);
+    process.env.ZCODE_IDENTITY_DEVICE_MID = "0d2c62ae-717c-4d88-9bbe-24c28fd45ed6";
+    expect(loadConfig(path).identity.deviceMid).toBe("0d2c62ae-717c-4d88-9bbe-24c28fd45ed6");
+  });
+
+  it("prefers ZCODE_IDENTITY_DEVICE_MID over YAML (blank env falls through)", () => {
+    const path = writeYaml(`
+server:
+  port: 9090
+provider: zai
+identity:
+  deviceMid: "0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0"
+`);
+    process.env.ZCODE_IDENTITY_DEVICE_MID = "11111111-2222-4333-8444-555555555555";
+    expect(loadConfig(path).identity.deviceMid).toBe("11111111-2222-4333-8444-555555555555");
+
+    process.env.ZCODE_IDENTITY_DEVICE_MID = "   ";
     expect(loadConfig(path).identity.deviceMid).toBe("0f1e2d3c-4b5a-4978-8796-a5b4c3d2e1f0");
   });
 });

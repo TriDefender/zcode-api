@@ -12,6 +12,7 @@ const ENV = {
   PROVIDER: "ZCODE_PROVIDER",
   SOURCE_TITLE: "ZCODE_SOURCE_TITLE",
   REFERER_ORIGIN: "ZCODE_REFERER_ORIGIN",
+  IDENTITY_DEVICE_MID: "ZCODE_IDENTITY_DEVICE_MID",
   ASYNC_ENABLED: "ZCODE_ASYNC_ENABLED",
   ASYNC_ORIGIN: "ZCODE_ASYNC_ORIGIN",
   ASYNC_MAX_RETRIES: "ZCODE_ASYNC_MAX_RETRIES",
@@ -139,6 +140,7 @@ export function loadConfig(path: string): ProxyConfig {
     sourceTitleYaml: parsed?.identity?.sourceTitle,
     refererEnv: process.env[ENV.REFERER_ORIGIN],
     refererYaml: parsed?.identity?.refererOrigin,
+    deviceMidEnv: process.env[ENV.IDENTITY_DEVICE_MID],
     deviceMidYaml: parsed?.identity?.deviceMid,
   });
 
@@ -396,6 +398,7 @@ interface IdentityInputs {
   sourceTitleYaml?: string;
   refererEnv?: string;
   refererYaml?: string;
+  deviceMidEnv?: string;
   deviceMidYaml?: string;
 }
 
@@ -408,7 +411,13 @@ function resolveIdentity(inp: IdentityInputs): ProxyIdentity {
   const refererOrigin = (inp.refererEnv ?? inp.refererYaml ?? DEFAULTS.REFERER_ORIGIN).trim()
     || DEFAULTS.REFERER_ORIGIN;
 
-  const deviceMid = typeof inp.deviceMidYaml === "string" ? inp.deviceMidYaml.trim() : "";
+  // env > YAML (identity.ts applies the same order to the request headers, so
+  // both planes agree on one fingerprint). Android has no deviceMid to persist
+  // — NodeRunner injects ZCODE_IDENTITY_DEVICE_MID instead, and the claim plane
+  // reads this resolved value (a missing X-Device-Mid is rejected as biz 3001).
+  const deviceMid = [inp.deviceMidEnv, inp.deviceMidYaml]
+    .map((v) => (typeof v === "string" ? v.trim() : ""))
+    .find((v) => v.length > 0) ?? "";
   return { appVersion: DEFAULT_APP_VERSION, sourceTitle, refererOrigin, ...(deviceMid ? { deviceMid } : {}) };
 }
 
