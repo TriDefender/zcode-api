@@ -41,6 +41,19 @@ function claimCaptchaRequired(config: ProxyConfig, resolveCredential: () => Prom
     .catch(() => true);
 }
 
+/**
+ * Device identity for the claim plane. Configured value (YAML, or the
+ * `ZCODE_IDENTITY_DEVICE_MID` env NodeRunner injects on Android) first — the
+ * gateway answers biz 3001 "parameter error" to any billing call whose
+ * `X-Device-Mid` is missing or not a UUID (client.ts file header). The billing
+ * face has no fallback of its own, so a config without `identity.deviceMid`
+ * used to enumerate plans (marketing face falls back here) and then fail the
+ * claim POST with 3001 — hence the shared derived fallback.
+ */
+export function claimDeviceMid(config: ProxyConfig): string {
+  return config.identity.deviceMid?.trim() || stableMarketingDeviceMid();
+}
+
 export function startAutoClaim(config: ProxyConfig, auth: AuthManager): ClaimScheduler {
   const scheduler = new ClaimScheduler({
     // AuthManager first (fresh), then the encrypted store — on Android the
@@ -59,8 +72,8 @@ export function startAutoClaim(config: ProxyConfig, auth: AuthManager): ClaimSch
         jwt,
         appVersion: config.identity.appVersion,
         platform: claimPlatform(),
-        deviceMid: config.identity.deviceMid,
-        marketingDeviceMid: config.identity.deviceMid ?? stableMarketingDeviceMid(),
+        deviceMid: claimDeviceMid(config),
+        marketingDeviceMid: claimDeviceMid(config),
       }),
     getCaptcha: async () => {
       const token = await getCaptchaToken(config.identity.appVersion);
@@ -112,8 +125,8 @@ export async function runClaimCli(config: ProxyConfig, mode: "list" | "now"): Pr
     jwt,
     appVersion: config.identity.appVersion,
     platform: claimPlatform(),
-    deviceMid: config.identity.deviceMid,
-    marketingDeviceMid: config.identity.deviceMid ?? stableMarketingDeviceMid(),
+    deviceMid: claimDeviceMid(config),
+    marketingDeviceMid: claimDeviceMid(config),
   });
 
   let plans: ClaimablePlan[];
