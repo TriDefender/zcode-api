@@ -24,15 +24,21 @@ import { appendFileSync } from "node:fs";
 
 const DUMP_PATH = process.env.ZCODE_DUMP_UPSTREAM;
 
-/** Header names whose values must be masked before dumping. */
+/**
+ * Header names whose values must be masked before dumping. The captcha
+ * verify-param is the one-time solve token (masked; issue #83 — the previous
+ * entries used the never-emitted `x-zcode-captcha-*` spelling, so the real
+ * header leaked in clear on disk). The verify-region stays visible: it is a
+ * structural routing constant ("cn"/"sgp"), useful when debugging the
+ * three-field passthrough.
+ */
 const SENSITIVE_HEADERS = new Set([
   "authorization",
   "x-zcode-authorization",
   "x-api-key",
   "proxy-authorization",
   "proxy-api-key",
-  "x-zcode-captcha-verify-param",
-  "x-zcode-captcha-verify-region",
+  "x-aliyun-captcha-verify-param",
   "cookie",
 ]);
 

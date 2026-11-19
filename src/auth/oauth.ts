@@ -379,7 +379,20 @@ class PollOAuthClient extends OAuthFlowClient {
       return { retry: true };
     }
     if (resp.status >= 400 && resp.status < 500 && resp.status !== 408 && resp.status !== 429) {
-      throw new Error(`${this.provider} login poll failed: status=${resp.status}`);
+      // Surface the upstream envelope when the 4xx body carries a nonzero
+      // code (issue #83: a 400 poll hid `code=3004 msg=invalid_flow` behind a
+      // bare status — the reporter had to replay the callback by hand to see
+      // why the flow died). Same shape as the envelope-code error below.
+      let detail = "";
+      try {
+        const raw = safeJsonParse(await resp.text()) as ZcodeEnvelope | null;
+        if (raw && typeof raw.code === "number" && raw.code !== 0) {
+          detail = ` code=${raw.code} msg=${raw.msg ?? "(none)"}`;
+        }
+      } catch {
+        // Body unreadable — throw the bare status below.
+      }
+      throw new Error(`${this.provider} login poll failed: status=${resp.status}${detail}`);
     }
     if (!resp.ok) {
       return { retry: true };

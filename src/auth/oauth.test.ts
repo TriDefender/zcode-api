@@ -211,6 +211,20 @@ describe("ZaiOAuthClient (server-mediated cli login)", () => {
     expect(calls.length).toBe(2);
   });
 
+  it("poll 4xx surfaces the upstream envelope code/msg when present (issue #83)", async () => {
+    // Live shape from issue #83: the flow-invalidation 400 carries
+    // {"code":3004,"msg":"invalid_flow"} — previously discarded with the body.
+    const { impl } = scriptedFetch([
+      () => envelopeResponse(initData()),
+      () => new Response(JSON.stringify({ code: 3004, msg: "invalid_flow" }), { status: 400 }),
+    ]);
+    const client = new ZaiCnOAuthClient(impl, async () => {});
+    const started = await client.start();
+    await expect(client.complete(started)).rejects.toThrow(
+      /status=400 code=3004 msg=invalid_flow/,
+    );
+  });
+
   it("poll retries on 429 and 408", async () => {
     const { impl, calls } = scriptedFetch([
       () => envelopeResponse(initData({ poll_interval_sec: 1 })),

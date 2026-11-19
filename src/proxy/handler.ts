@@ -1009,7 +1009,16 @@ async function upstreamErrorPassthrough(
 }
 
 const DEBUG_BODY_PREVIEW = 200;
-const SENSITIVE_HEADERS = new Set(["authorization", "x-api-key", "cookie", "set-cookie", "proxy-authorization"]);
+// Captcha verify-param masked alongside credentials (issue #83); the
+// verify-region ("cn"/"sgp") stays visible for routing debugging.
+const SENSITIVE_HEADERS = new Set([
+  "authorization",
+  "x-api-key",
+  "cookie",
+  "set-cookie",
+  "proxy-authorization",
+  "x-aliyun-captcha-verify-param",
+]);
 
 function debugLine(reqId: string, msg: string): void {
   console.log(`${reqId} debug: ${msg}`);

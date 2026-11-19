@@ -17,4 +17,17 @@ describe("dumpHeaders", () => {
     expect(dumpHeaders(new Headers({ "X-ZCode-Authorization": "Bearer x" })))
       .toEqual({ "x-zcode-authorization": "<redacted>" });
   });
+
+  it("masks the captcha verify-param but keeps the routing region visible (issue #83)", () => {
+    const param = '{"certifyId":"synthetic","sessionId":"secret"}';
+    const dumped = dumpHeaders(
+      new Headers({
+        "x-aliyun-captcha-verify-param": param,
+        "x-aliyun-captcha-verify-region": "cn",
+      }),
+    );
+    expect(dumped["x-aliyun-captcha-verify-param"]).toBe(`${param.slice(0, 8)}…${param.slice(-4)} (len=${param.length})`);
+    expect(JSON.stringify(dumped)).not.toContain("secret");
+    expect(dumped["x-aliyun-captcha-verify-region"]).toBe("cn");
+  });
 });
