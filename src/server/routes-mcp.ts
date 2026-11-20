@@ -61,7 +61,7 @@ function resolveMcpAuth(cred: Credential | null, plan: ProxyConfig["plan"]): Mcp
     return {
       ok: false,
       reason: "not_logged_in",
-      message: "not logged in — run: zcode-proxy auth login <zai|bigmodel>",
+      message: "not logged in — run: zcode-proxy auth login <zai|zai_cn>",
     };
   }
   try {

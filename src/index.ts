@@ -176,7 +176,7 @@ Usage:
                                     Start with verbose per-request diagnostics
   zcode-proxy --cli                 Classic CLI mode (bare --cli = serve)
   zcode-proxy android               Android entry: proxy + localhost control listener
-  zcode-proxy auth login <provider> Login via OAuth (provider: zai | bigmodel)
+  zcode-proxy auth login <provider> Login via OAuth (provider: zai | zai_cn)
   zcode-proxy auth login <provider> --import
                                     Import API key from ~/.zcode/v2/config.json
   zcode-proxy auth logout           Clear stored credentials
@@ -190,8 +190,8 @@ Examples:
   zcode-proxy                       Terminal UI: login, start/stop, live logs
   zcode-proxy debug                 Terminal UI with per-request diagnostics
   zcode-proxy serve debug           CLI: start with extra debug logging
-  zcode-proxy auth login bigmodel   OAuth login for Bigmodel
-  zcode-proxy auth login bigmodel --import
+  zcode-proxy auth login zai_cn     OAuth login for Z.ai 中国版 (linked BigModel)
+  zcode-proxy auth login zai --import
                                     Import existing key from ZCode config
   zcode-proxy auth status           Check if logged in
 `);
@@ -408,7 +408,7 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   if (ensureConfigFile(path)) {
     ensureDeviceMidInConfig(path);
     console.log(`Created ${path} from bundled template.`);
-    console.log(`Run: zcode-proxy auth login <zai|bigmodel>\n`);
+    console.log(`Run: zcode-proxy auth login <zai|zai_cn>\n`);
   }
   const config = loadConfig(path);
 
@@ -420,7 +420,10 @@ async function serve(configPath: string | undefined, debug: boolean): Promise<vo
   const auth = new AuthManager();
   const cred = await loadCredential();
   if (!cred) {
-    console.error("Not logged in. Run: zcode-proxy auth login " + config.provider);
+    // The login flavor for the configured family: bigmodel-family configs log
+    // in via zai_cn (linked BigModel) — the bigmodel OAuth flavor is gone.
+    const flavor = config.provider === "bigmodel" ? "zai_cn" : config.provider;
+    console.error(`Not logged in. Run: zcode-proxy auth login ${flavor}`);
     process.exit(1);
   }
   auth.setOAuthCredential(cred);
@@ -867,19 +870,11 @@ function fmtQuotaExpiry(expiresAt: number): string {
 }
 
 async function authLogin(args: string[]): Promise<void> {
-  const provider = args[0] as ProviderId | undefined;
+  const provider = args[0] as LoginProviderId | undefined;
   const importMode = args.includes("--import");
 
-  if (!provider || (provider !== "zai" && provider !== "zai_cn" && provider !== "bigmodel")) {
-    console.error("Usage: zcode-proxy auth login <zai|zai_cn|bigmodel> [--import]");
-    process.exit(1);
-  }
-  // The bigmodel OAuth login (bigmodel.cn auth-code/poll) is deprecated —
-  // superseded by the zai_cn "Z.ai (CN)" zchat login (decision 2026-11-14).
-  // --import of an existing bigmodel key stays supported.
-  if (!importMode && provider === "bigmodel") {
-    console.error("bigmodel OAuth login is deprecated — use 'zai_cn' (Z.ai 中国版; linked BigModel login) instead,");
-    console.error("or pass --import to register an existing bigmodel API key.");
+  if (!provider || (provider !== "zai" && provider !== "zai_cn")) {
+    console.error("Usage: zcode-proxy auth login <zai|zai_cn> [--import]");
     process.exit(1);
   }
 
@@ -894,8 +889,7 @@ async function authLogin(args: string[]): Promise<void> {
   if (importMode) {
     cred = importFromZCodeConfig(provider);
   } else {
-    // The guard above exits on bigmodel+!importMode — only zai|zai_cn reach OAuth.
-    const { accessToken, userId, jwt, linkedBigModel } = await runOAuth(provider as LoginProviderId);
+    const { accessToken, userId, jwt, linkedBigModel } = await runOAuth(provider);
     console.log("\nResolving API key...");
     const resolver = new KeyResolver();
     cred = await resolver.resolveCodingPlanCredential(accessToken, provider, userId, linkedBigModel);
@@ -988,7 +982,7 @@ async function authStatus(): Promise<void> {
   const cred = await loadCredential();
   if (!cred) {
     console.log("Not logged in.");
-    console.log("Run: zcode-proxy auth login <zai|bigmodel>");
+    console.log("Run: zcode-proxy auth login <zai|zai_cn>");
     return;
   }
   console.log(`Logged in: ${cred.provider}`);
@@ -1014,7 +1008,7 @@ async function runOAuth(provider: LoginProviderId): Promise<OAuthResult> {
   return result;
 }
 
-function importFromZCodeConfig(provider: ProviderId): Credential {
+function importFromZCodeConfig(provider: LoginProviderId): Credential {
   const configPath = join(homedir(), ".zcode", "v2", "config.json");
   let raw: string;
   try {
@@ -1032,8 +1026,7 @@ function importFromZCodeConfig(provider: ProviderId): Credential {
   // The official config.json keys by FAMILY — even after a zai_cn login the
   // entries stay `builtin:zai-*` (live-verified 2026-11-14; resolveCodingPlan
   // ProviderName folds zai_cn into Z.ai). The credential keeps the zai_cn flavor.
-  const family = provider === "zai_cn" ? "zai" : provider;
-  const providerKey = `builtin:${family}-coding-plan`;
+  const providerKey = `builtin:zai-coding-plan`;
   const entry = config.provider?.[providerKey];
   const apiKey = entry?.options?.apiKey?.trim();
 
@@ -1042,7 +1035,7 @@ function importFromZCodeConfig(provider: ProviderId): Credential {
     process.exit(1);
   }
 
-  const startPlanKey = `builtin:${family}-start-plan`;
+  const startPlanKey = `builtin:zai-start-plan`;
   const jwt = config.provider?.[startPlanKey]?.options?.apiKey?.trim() || undefined;
 
   console.log(`Imported from ${configPath}`);

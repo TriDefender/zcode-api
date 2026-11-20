@@ -171,7 +171,7 @@ describe("ZaiOAuthClient (server-mediated cli login)", () => {
       expect(interstitial).toStartWith("https://zcode.z.ai/app/oauth/login?");
       const inner = new URL(interstitial);
       expect(inner.searchParams.get("redirect")).toBe("zcode://oauth/callback");
-      expect(inner.searchParams.get("app_version")).toBe("3.18.2");
+      expect(inner.searchParams.get("app_version")).toBe("3.19.1");
     } finally {
       await client.close();
     }
@@ -294,7 +294,7 @@ describe("ZaiCnOAuthClient (3.18.2 desktop \"Z.ai (CN)\" flavor — NOTEPAD「20
       expect(interstitial).toStartWith("https://zcode.z.ai/app/oauth/login?");
       const inner = new URL(interstitial);
       expect(inner.searchParams.get("redirect")).toBe("zcode://oauth/callback");
-      expect(inner.searchParams.get("app_version")).toBe("3.18.2");
+      expect(inner.searchParams.get("app_version")).toBe("3.19.1");
       // 3.18.2 host `t===Qr` branch: the interstitial itself carries the flavor.
       expect(inner.searchParams.get("provider")).toBe("zai_cn");
     } finally {

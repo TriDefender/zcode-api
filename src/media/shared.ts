@@ -46,7 +46,7 @@ export function resolveMediaAuth(cred: Credential | null, plan: ProxyConfig["pla
     return {
       ok: false,
       reason: "not_logged_in",
-      message: "not logged in — run: zcode-proxy auth login <zai|bigmodel>",
+      message: "not logged in — run: zcode-proxy auth login <zai|zai_cn>",
     };
   }
   try {

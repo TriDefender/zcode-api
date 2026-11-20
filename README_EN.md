@@ -255,7 +255,7 @@ If you've set `ZCODE_PROXY_API_KEY`, your tool must send the same value; without
 Yes. Credentials are encrypted with machine-bound information. To migrate across machines, set the same `ZCODE_PROXY_CREDENTIAL_SECRET` on both sides, then log in / copy `~/.zcode-proxy/credentials.json`.
 
 **No browser on my server — how do I log in?**
-Just log in directly: `bun run src/index.ts auth login zai` (or `zai_cn`). The login link can be opened in any device's browser; after you authorize, the local side completes automatically (no callback page needed). An existing bigmodel API key can be imported with `auth login bigmodel --import` (bigmodel OAuth login and the paste mode have been removed).
+Just log in directly: `bun run src/index.ts auth login zai` (or `zai_cn`). The login link can be opened in any device's browser; after you authorize, the local side completes automatically (no callback page needed). The bigmodel OAuth login and the paste mode have been removed (fully superseded by `zai_cn`).
 
 **What does it actually do in the background?**
 It's a "translator + courier": it translates the standard requests from your tools into the same requests the official client sends, forwards them, and translates the responses back as-is. All traffic stays between your machine and the official servers — it never passes through any third party.

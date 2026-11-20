@@ -17,7 +17,7 @@ auth:
   proxyApiKey: "your-proxy-secret"
 
   # Upstream credentials come from the OAuth login flow — run this first:
-  #   bun run src/index.ts auth login <zai|bigmodel>
+  #   bun run src/index.ts auth login <zai|zai_cn>
   # Parsed but currently not honored — the credential store path is fixed at
   # ~/.zcode-proxy/credentials.json:
   # oauthCredentialsPath: "~/.zcode-proxy/credentials.json"

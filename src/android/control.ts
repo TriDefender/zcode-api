@@ -275,8 +275,10 @@ async function dispatch(
       // ({ok:false}; the contract the Kotlin shell relies on) instead of
       // surfacing as a TypeError → HTTP 500, which reads as a silent hang.
       // Checked BEFORE the tear-down so a bad command cannot kill an
-      // in-flight flow.
-      if (cmd.provider !== "zai" && cmd.provider !== "zai_cn" && cmd.provider !== "bigmodel") {
+      // in-flight flow. bigmodel is rejected here too: its OAuth login is
+      // removed (superseded by zai_cn, 2026-11-20) and the poll-login factory
+      // only builds zai|zai_cn clients.
+      if (cmd.provider !== "zai" && cmd.provider !== "zai_cn") {
         return { ok: false, error: "invalid_provider" };
       }
       // Tear down any previous in-flight flow so its callback port is released.

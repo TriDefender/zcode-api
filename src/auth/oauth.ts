@@ -450,6 +450,11 @@ export function createPollLoginClient(
       return new ZaiOAuthClient(fetchImpl, sleep);
     case "zai_cn":
       return new ZaiCnOAuthClient(fetchImpl, sleep);
+    default:
+      // Runtime bypass of the LoginProviderId type (e.g. a stale Android
+      // shell still sending "bigmodel" — its OAuth login is removed): fail
+      // loudly instead of returning undefined and crashing at .login().
+      throw new Error(`unsupported login provider: ${String(provider)}`);
   }
 }
 

@@ -20,7 +20,11 @@ import { handleMcpRoute, type McpRouteOptions } from "./routes-mcp.js";
 import {
   handleAsrFlash,
   handleAsrSubmitQueryUnsupported,
+  handleHappyhorseVideoCreate,
+  handleHappyhorseVideoQuery,
   handleImagesGenerations,
+  handleModel3dCreate,
+  handleModel3dQuery,
   handleTtsCreate,
   handleVideoTaskCreate,
   handleVideoTaskDelete,
@@ -234,6 +238,35 @@ export function createFetchHandler(opts: ServerOptions): (req: Request) => Promi
       }
       if (path === "/api/v3/tts/create" && method === "POST") {
         return handleTtsCreate(req, mediaOpts);
+      }
+      // ToolHub task faces (2026-11-20): HappyHorse video + the 3D family —
+      // REST over the official plugins' invoke/tasks-query plane. Task ids
+      // are NOT the SeedDance shape: hyper3d ids run 600+ chars and carry
+      // `:`/`~` (kind:uuid~subscription_key), so this face has its own guard.
+      if (path === "/api/v3/happyhorse/videos" && method === "POST") {
+        return handleHappyhorseVideoCreate(req, mediaOpts);
+      }
+      if (path.startsWith("/api/v3/happyhorse/videos/") && method === "GET") {
+        const taskId = decodeTaskIdSegment(path.slice("/api/v3/happyhorse/videos/".length));
+        if (!/^[A-Za-z0-9_~:.-]{1,2048}$/.test(taskId)) {
+          return arkErrorResponse(400, "invalid_parameter", "task id must be 1-2048 characters of [A-Za-z0-9_~:.-]");
+        }
+        return handleHappyhorseVideoQuery(mediaOpts, taskId);
+      }
+      if (path.startsWith("/api/v3/models3d/")) {
+        const rest = path.slice("/api/v3/models3d/".length);
+        const createMatch = /^([a-z0-9-]+)\/tasks$/.exec(rest);
+        const queryMatch = /^([a-z0-9-]+)\/tasks\/(.+)$/.exec(rest);
+        if (createMatch && method === "POST") {
+          return handleModel3dCreate(req, mediaOpts, createMatch[1]);
+        }
+        if (queryMatch && method === "GET") {
+          const taskId = decodeTaskIdSegment(queryMatch[2]);
+          if (!/^[A-Za-z0-9_~:.-]{1,2048}$/.test(taskId)) {
+            return arkErrorResponse(400, "invalid_parameter", "task id must be 1-2048 characters of [A-Za-z0-9_~:.-]");
+          }
+          return handleModel3dQuery(mediaOpts, queryMatch[1], taskId);
+        }
       }
     }
 

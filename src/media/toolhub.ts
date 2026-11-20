@@ -35,6 +35,13 @@ export interface ToolHubDeps {
   fetchImpl: typeof fetch;
   /** Retry backoff between same-key attempts (production 5s; tests inject ~1ms). */
   retryDelayMs?: number;
+  /**
+   * Billing-scenario header value (`X-Usage-Scenario`, 3.19.1 plugin family:
+   * happyhorse → "happyhorse-video", 3D vendors → the tool name). The seed
+   * plugins (image/video-generation) do NOT send it — absent here keeps the
+   * seed faces byte-identical.
+   */
+  usageScenario?: string;
 }
 
 /** ToolHub envelope code → number (safe integers + canonical decimal strings only). */
@@ -63,7 +70,11 @@ async function toolhubPost(
   try {
     resp = await deps.fetchImpl(deps.origin + path, {
       method: "POST",
-      headers: { ...deps.headers, ...(init.headers ?? {}) },
+      headers: {
+        ...deps.headers,
+        ...(deps.usageScenario ? { "X-Usage-Scenario": deps.usageScenario } : {}),
+        ...(init.headers ?? {}),
+      },
       body: init.body,
       // 身份头只能发往 ZCode 自己的 origin，禁止跟随重定向（镜像插件）。
       redirect: "manual",
@@ -234,7 +245,31 @@ export interface VideoSubmitResult {
  * `replayed=true` + `upstream_req_id` so nothing is double-charged.
  */
 export async function submitVideo(deps: ToolHubDeps, body: Record<string, unknown>): Promise<VideoSubmitResult> {
-  const headers = { "Content-Type": "application/json", "Idempotency-Key": randomUUID() };
+  return submitToolhubTask(deps, "video_generate", body);
+}
+
+/**
+ * Generic ToolHub task submit for ANY `{vendor}_{category}` tool (2026-11-20:
+ * happyhorse_video / hyper3d_model3d / meshy_model3d / hi3d_model3d — the
+ * requiresPaidPlan marketplace family; semantics identical to the official
+ * stdio plugins' `submitTask`: key = caller-supplied request_id when present
+ * (the plugin replays `request_id` with the SAME body), else a fresh UUID).
+ */
+export async function submitToolhubTask(
+  deps: ToolHubDeps,
+  tool: string,
+  body: Record<string, unknown>,
+  idempotencyKey?: string,
+): Promise<VideoSubmitResult> {
+  // Plugin contract: `key = requestId || randomUUID()` — any non-empty string
+  // the caller supplies IS the key. Header-safe visible ASCII, ≤128 chars;
+  // an invalid shape fails loudly (a silent fresh key would break the
+  // caller's dedup retries — the exact failure mode request_id exists for).
+  if (idempotencyKey !== undefined && !/^[!-~]{1,128}$/.test(idempotencyKey)) {
+    throw new MediaUpstreamError("request_id must be 1-128 printable ASCII characters", "param");
+  }
+  const key = idempotencyKey ?? randomUUID();
+  const headers = { "Content-Type": "application/json", "Idempotency-Key": key };
   // `uncertain` mirrors the plugin's flag: ONLY result-unconfirmed transients
   // (network/timeout/unparseable 5xx/3702) and UNKNOWN/CALLING states mean the
   // task may already exist upstream. HTTP 429 / envelope 3002 are definitive
@@ -246,14 +281,14 @@ export async function submitVideo(deps: ToolHubDeps, body: Record<string, unknow
     if (attempt > 1) await sleep(deps.retryDelayMs ?? 5_000);
     let result: ToolHubResult;
     try {
-      result = await toolhubPost(deps, "/api/v1/toolhub/tool/video_generate/invoke", {
+      result = await toolhubPost(deps, `/api/v1/toolhub/tool/${tool}/invoke`, {
         headers,
         body: JSON.stringify(body),
         timeoutMs: 60_000,
       });
     } catch (err) {
       throw err instanceof MediaUpstreamError
-        ? new MediaUpstreamError(`video submit failed: ${err.message}`, err.kind)
+        ? new MediaUpstreamError(`${tool} submit failed: ${err.message}`, err.kind)
         : err;
     }
     if (!result.ok) {
@@ -274,14 +309,57 @@ export async function submitVideo(deps: ToolHubDeps, body: Record<string, unknow
   }
   if (rateLimited && !uncertain) {
     throw new MediaUpstreamError(
-      "video submit was rate limited upstream after retries — no task was created; wait and retry later",
+      `${tool} submit was rate limited upstream after retries — no task was created; wait and retry later`,
       "rate_limit",
     );
   }
   throw new MediaUpstreamError(
-    "video submit could not be confirmed after retries — a task may already have been created and charged; wait before re-submitting",
+    `${tool} submit could not be confirmed after retries — a task may already have been created and charged; wait before re-submitting`,
     "upstream",
   );
+}
+
+/** Generic ToolHub task snapshot — raw output kept for per-vendor mapping. */
+export interface ToolhubTaskSnapshot {
+  status: string;
+  output: Record<string, unknown>;
+  failure?: { code?: string; message?: string };
+  usage?: Record<string, unknown>;
+}
+
+/** Query any ToolHub task tool (3704 not-found etc. throw typed inside toolhubPost). */
+export async function queryToolhubTask(deps: ToolHubDeps, tool: string, taskId: string): Promise<ToolhubTaskSnapshot> {
+  const result = await toolhubPost(deps, `/api/v1/toolhub/tool/${tool}/tasks/query`, {
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task_id: taskId }),
+    timeoutMs: 30_000,
+  });
+  if (!result.ok) {
+    // Terminal codes (3704 not-found, 3706 forbidden, …) already throw with
+    // their kind inside toolhubPost; a transient here is an in-flight hiccup
+    // (2005/2007/3702/network) or a rate limit (HTTP 429 / envelope 3002) —
+    // the latter surfaces as 429, not 502.
+    throw new MediaUpstreamError(`${tool} task query failed: ${result.message}`, result.code === 3002 ? "rate_limit" : "upstream");
+  }
+  const data = result.data as { status?: unknown; output?: unknown; failure?: unknown; usage?: unknown; files?: unknown };
+  const output = data.output && typeof data.output === "object" && !Array.isArray(data.output)
+    ? { ...(data.output as Record<string, unknown>) }
+    : {};
+  // hyper3d tolerant fallback (plugin completedProducts): a top-level
+  // `data.files` array stands in when output.files is absent.
+  if (output.files === undefined && Array.isArray(data.files)) output.files = data.files;
+  const snapshot: ToolhubTaskSnapshot = { status: typeof data.status === "string" ? data.status : "unknown", output };
+  if (data.failure && typeof data.failure === "object" && !Array.isArray(data.failure)) {
+    const failure = data.failure as Record<string, unknown>;
+    snapshot.failure = {
+      ...(failure.code !== undefined ? { code: String(failure.code) } : {}),
+      ...(typeof failure.message === "string" ? { message: failure.message } : {}),
+    };
+  }
+  if (data.usage && typeof data.usage === "object" && !Array.isArray(data.usage)) {
+    snapshot.usage = data.usage as Record<string, unknown>;
+  }
+  return snapshot;
 }
 
 export interface VideoTaskSnapshot {

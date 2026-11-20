@@ -34,6 +34,14 @@ import { generateImage, parseSeedImageRequest } from "../media/seed-image.js";
 import { createVideoTask, getVideoTask, parseSeedVideoCreateRequest } from "../media/seed-video.js";
 import { flashTranscribe, parseAsrFlashRequest } from "../media/seed-asr.js";
 import { parseTtsCreateRequest, synthesizeSpeech } from "../media/seed-tts.js";
+import {
+  createHappyhorseVideo,
+  createModel3dTask,
+  getHappyhorseVideo,
+  getModel3dTask,
+  isModel3dVendor,
+  parseHappyhorseSubmit,
+} from "../media/toolhub-tasks.js";
 import type { ToolHubDeps } from "../media/toolhub.js";
 import { VideoEditClient, type VideoEditDeps } from "../media/video-edit.js";
 
@@ -55,6 +63,12 @@ const BODY_CAPS = {
   video: 4 * 1024 * 1024,
   asr: 45 * 1024 * 1024,
   tts: 1024 * 1024,
+  /** happyhorse materials are https-only (data: rejected) → plugin MAX_BODY_BYTES. */
+  happyhorse: 4 * 1024 * 1024,
+  /** model3d data: materials: worst legal combo = meshy 4 × 20 MiB images ×
+   *  4/3 base64 inflation ≈ 106.7 MiB + envelope — a tighter cap would 413 a
+   *  spec-legal inline reference (the images-face lesson, AGENTS 承重墙 3). */
+  model3d: 108 * 1024 * 1024,
 } as const;
 
 type AuthedResult = { ok: true; origin: string; headers: Record<string, string> } | { response: Response };
@@ -220,6 +234,71 @@ export async function handleTtsCreate(req: Request, opts: MediaRouteOptions): Pr
       status: 200,
       headers: { "content-type": "application/json", "x-api-request-id": requestId },
     });
+  } catch (err) {
+    return asArkError(err);
+  }
+}
+
+// ── ToolHub task faces: HappyHorse + the 3D family (2026-11-20) ─────────────
+// Same ToolHub plane and identity headers as the faces above; REST bodies
+// mirror the official stdio plugins' tool schemas (see toolhub-tasks.ts).
+
+/** POST /api/v3/happyhorse/videos — HappyHorse submit face. */
+export async function handleHappyhorseVideoCreate(req: Request, opts: MediaRouteOptions): Promise<Response> {
+  const authed = await resolveAuth(opts);
+  if ("response" in authed) return authed.response;
+  try {
+    const body = await readJsonBodyWithCap(req, BODY_CAPS.happyhorse);
+    const parsed = parseHappyhorseSubmit(body);
+    if (!parsed.ok) throw new MediaUpstreamError(parsed.message, "param");
+    const result = await createHappyhorseVideo(depsFor(opts, authed).toolhub, parsed.req);
+    return new Response(JSON.stringify(result), { status: 200, headers: { "content-type": "application/json" } });
+  } catch (err) {
+    return asArkError(err);
+  }
+}
+
+/** GET /api/v3/happyhorse/videos/{task_id} — HappyHorse query face. */
+export async function handleHappyhorseVideoQuery(opts: MediaRouteOptions, taskId: string): Promise<Response> {
+  const authed = await resolveAuth(opts);
+  if ("response" in authed) return authed.response;
+  try {
+    const result = await getHappyhorseVideo(depsFor(opts, authed).toolhub, taskId);
+    return new Response(JSON.stringify(result), { status: 200, headers: { "content-type": "application/json" } });
+  } catch (err) {
+    return asArkError(err);
+  }
+}
+
+/** POST /api/v3/models3d/{vendor}/tasks — hyper3d | meshy | hi3d submit face. */
+export async function handleModel3dCreate(req: Request, opts: MediaRouteOptions, vendor: string): Promise<Response> {
+  if (!isModel3dVendor(vendor)) {
+    return arkErrorResponse(404, "not_found", `unknown 3D vendor "${vendor}" — supported: hyper3d, meshy, hi3d`);
+  }
+  const authed = await resolveAuth(opts);
+  if ("response" in authed) return authed.response;
+  try {
+    const body = await readJsonBodyWithCap(req, BODY_CAPS.model3d);
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      throw new MediaUpstreamError("request body must be a JSON object", "param");
+    }
+    const result = await createModel3dTask(depsFor(opts, authed).toolhub, vendor, body as Record<string, unknown>);
+    return new Response(JSON.stringify(result), { status: 200, headers: { "content-type": "application/json" } });
+  } catch (err) {
+    return asArkError(err);
+  }
+}
+
+/** GET /api/v3/models3d/{vendor}/tasks/{task_id} — 3D query face. */
+export async function handleModel3dQuery(opts: MediaRouteOptions, vendor: string, taskId: string): Promise<Response> {
+  if (!isModel3dVendor(vendor)) {
+    return arkErrorResponse(404, "not_found", `unknown 3D vendor "${vendor}" — supported: hyper3d, meshy, hi3d`);
+  }
+  const authed = await resolveAuth(opts);
+  if ("response" in authed) return authed.response;
+  try {
+    const result = await getModel3dTask(depsFor(opts, authed).toolhub, vendor, taskId);
+    return new Response(JSON.stringify(result), { status: 200, headers: { "content-type": "application/json" } });
   } catch (err) {
     return asArkError(err);
   }

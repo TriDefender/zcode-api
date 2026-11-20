@@ -439,3 +439,130 @@ describe("media routes — body caps and upstream error surfacing", () => {
     expect(body.error.code).toBe("invalid_parameter");
   });
 });
+
+describe("media routes — ToolHub task faces (happyhorse + model3d)", () => {
+  it("happyhorse submit reaches happyhorse_video/invoke and answers the task shape", async () => {
+    const stub = mediaUpstreamStub({
+      toolhub: (url, body) => {
+        if (url.endsWith("/toolhub/tool/happyhorse_video/invoke")) {
+          expect(body.prompt).toBe("a happy horse");
+          expect(body.duration).toBe(5);
+          return json({ code: 0, data: { state: "SUCCEEDED", output: { task_id: "hh-route-1" } } });
+        }
+        return json({ code: 0, data: {} });
+      },
+    });
+    const resp = await handler(makeConfig(), authed(), stub.fetch)(
+      new Request("http://localhost/api/v3/happyhorse/videos", {
+        method: "POST",
+        body: JSON.stringify({ prompt: "a happy horse", duration: 5 }),
+      }),
+    );
+    expect(resp.status).toBe(200);
+    expect(await resp.json()).toEqual({ task_id: "hh-route-1", status: "queued" });
+    expect(stub.calls[0].url).toContain("/api/v1/toolhub/tool/happyhorse_video/invoke");
+    expect(stub.calls[0].headers["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it("happyhorse query maps succeeded → video_url", async () => {
+    const stub = mediaUpstreamStub({
+      toolhub: (url, body) => {
+        if (url.endsWith("/happyhorse_video/tasks/query")) {
+          expect(body).toEqual({ task_id: "hh-route-1" });
+          return json({ code: 0, data: { status: "succeeded", output: { video_url: "https://v.test/a.mp4" } } });
+        }
+        return json({ code: 0, data: {} });
+      },
+    });
+    const resp = await handler(makeConfig(), authed(), stub.fetch)(
+      new Request("http://localhost/api/v3/happyhorse/videos/hh-route-1"),
+    );
+    expect(resp.status).toBe(200);
+    expect(await resp.json()).toEqual({ task_id: "hh-route-1", status: "succeeded", video_url: "https://v.test/a.mp4" });
+  });
+
+  it("happyhorse task ids accept the plugin charset (~ and :) up to 2048 chars", async () => {
+    const stub = mediaUpstreamStub({ toolhub: () => json({ code: 0, data: { status: "running" } }) });
+    const longId = "gen:" + "a".repeat(600) + "~sub-key";
+    const resp = await handler(makeConfig(), authed(), stub.fetch)(
+      new Request(`http://localhost/api/v3/happyhorse/videos/${longId}`),
+    );
+    expect(resp.status).toBe(200);
+    expect(stub.calls[0].body.task_id).toBe(longId);
+    const bad = await handler(makeConfig(), authed(), stub.fetch)(
+      new Request("http://localhost/api/v3/happyhorse/videos/has%20space"),
+    );
+    expect(bad.status).toBe(400);
+  });
+
+  it("model3d submit routes per vendor and rejects unknown vendors with 404", async () => {
+    const stub = mediaUpstreamStub({
+      toolhub: (url, body) => {
+        if (url.endsWith("/toolhub/tool/meshy_model3d/invoke")) {
+          expect(body).toEqual({ action: "generate", prompt: "a knight" });
+          return json({ code: 0, data: { state: "SUCCEEDED", output: { task_id: "meshy-1" } } });
+        }
+        return json({ code: 0, data: {} });
+      },
+    });
+    const ok = await handler(makeConfig(), authed(), stub.fetch)(
+      new Request("http://localhost/api/v3/models3d/meshy/tasks", {
+        method: "POST",
+        body: JSON.stringify({ action: "generate", prompt: "a knight" }),
+      }),
+    );
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ task_id: "meshy-1", status: "queued" });
+    const unknown = await handler(makeConfig(), authed(), stub.fetch)(
+      new Request("http://localhost/api/v3/models3d/tripo/tasks", { method: "POST", body: "{}" }),
+    );
+    expect(unknown.status).toBe(404);
+    const body = (await unknown.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("not_found");
+  });
+
+  it("model3d query surfaces files[] on success", async () => {
+    const stub = mediaUpstreamStub({
+      toolhub: () =>
+        json({
+          code: 0,
+          data: {
+            status: "succeeded",
+            output: { files: [{ name: "m.glb", url: "https://d.test/m.glb" }] },
+          },
+        }),
+    });
+    const resp = await handler(makeConfig(), authed(), stub.fetch)(
+      new Request("http://localhost/api/v3/models3d/hyper3d/tasks/gen~uuid~sub"),
+    );
+    expect(resp.status).toBe(200);
+    expect(await resp.json()).toEqual({
+      task_id: "gen~uuid~sub",
+      status: "succeeded",
+      files: [{ name: "m.glb", url: "https://d.test/m.glb" }],
+    });
+  });
+
+  it("start-plan callers get plan_unsupported on the new faces too", async () => {
+    const config = makeConfig({ plan: "start-plan" });
+    const resp = await handler(config, authed())(
+      new Request("http://localhost/api/v3/happyhorse/videos", { method: "POST", body: JSON.stringify({ prompt: "x" }) }),
+    );
+    expect(resp.status).toBe(400);
+    const body = (await resp.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("plan_unsupported");
+  });
+
+  it("model3d body cap 413s oversized inline material before any upstream call", async () => {
+    const stub = mediaUpstreamStub({ toolhub: () => json({ code: 0, data: {} }) });
+    const big = Buffer.alloc(4).toString("base64"); // header content-length dominates
+    const body = JSON.stringify({ action: "generate", images: [`data:image/png;base64,${"A".repeat(110 * 1024 * 1024)}`, big] });
+    const resp = await handler(makeConfig(), authed(), stub.fetch)(
+      new Request("http://localhost/api/v3/models3d/meshy/tasks", { method: "POST", body }),
+    );
+    expect(resp.status).toBe(413);
+    const parsed = (await resp.json()) as { error: { code: string } };
+    expect(parsed.error.code).toBe("request_too_large");
+    expect(stub.calls.length).toBe(0);
+  });
+});

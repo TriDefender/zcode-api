@@ -117,7 +117,7 @@ export async function runClaimCli(config: ProxyConfig, mode: "list" | "now"): Pr
   const cred = await loadCredential();
   const jwt = cred?.jwt;
   if (!jwt) {
-    console.error("Claim requires a logged-in oauth credential (no JWT stored). Run: zcode-proxy auth login <zai|bigmodel>");
+    console.error("Claim requires a logged-in oauth credential (no JWT stored). Run: zcode-proxy auth login <zai|zai_cn>");
     process.exit(1);
   }
   const client = createClaimClient({

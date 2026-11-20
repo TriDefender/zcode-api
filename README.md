@@ -254,7 +254,7 @@ ssh -N -L 8090:127.0.0.1:8090 user@host
 要。凭据加密时绑定了本机信息。跨机器迁移可以两边都设 `ZCODE_PROXY_CREDENTIAL_SECRET` 为同一个值再登录/拷贝 `~/.zcode-proxy/credentials.json`。
 
 **服务器上没有浏览器怎么登录？**
-直接登录即可：`bun run src/index.ts auth login zai`（或 `zai_cn`）。登录链接在任何设备的浏览器打开都行，授权后本机自动完成（无需回调页面）。存量 bigmodel API key 可用 `auth login bigmodel --import` 导入（bigmodel OAuth 登录与粘贴模式已移除）。
+直接登录即可：`bun run src/index.ts auth login zai`（或 `zai_cn`）。登录链接在任何设备的浏览器打开都行，授权后本机自动完成（无需回调页面）。bigmodel OAuth 登录与粘贴模式已移除（被 `zai_cn` 完全取代）。
 
 **它在后台到底做了什么？**
 它就是一个"翻译官 + 传话员"：把你的工具发出的标准请求翻译成官方客户端的同款请求转发上去，再把回复原样翻译回来。所有流量都只在你本机和官方服务器之间，不经过任何第三方。
