@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # Build the Android APK inside the zcode-android-build container
-# (image llama-android-builder:latest = JDK17 + Gradle 8.5 + Android SDK 35).
+# (image llama-android-builder:latest = JDK17 + Gradle 8.9 + Android SDK 35).
 #
 # Usage: bun run build:android-apk [assembleDebug|assembleRelease]
 #
 # Two modes:
 #   1. Long-lived container `zcode-android-build-e` (recommended — Gradle caches
 #      stay warm; the container keeps android-35/build-tools-35 installed via
-#      sdkmanager on top of the image's android-34). Started once:
+#      sdkmanager; the image installs android-34 at build time and the script
+#      upgrades to android-35 on first use). Started once:
 #        docker run -d --name zcode-android-build-e \
 #          -v "<repo-root>:/work" -v zcode-gradle-cache:/root/.gradle \
 #          -w /work/Android-APP llama-android-builder:latest sleep infinity

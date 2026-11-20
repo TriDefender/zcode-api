@@ -39,7 +39,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -860,7 +860,7 @@ private fun LogsPreviewCard(
             Spacer(Modifier.width(10.dp))
             Text("查看全部", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = cs.primary)
             Icon(
-                Icons.Filled.KeyboardArrowRight,
+                Icons.AutoMirrored.Filled.KeyboardArrowRight,
                 contentDescription = null,
                 tint = cs.primary,
                 modifier = Modifier.size(18.dp),
