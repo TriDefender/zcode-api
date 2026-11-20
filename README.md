@@ -26,7 +26,7 @@
 - 💬 **自带网页聊天** —— 打开 `/webui` 就是一个本地 ChatGPT 风格聊天页，随手测试模型。
 - 🌙 **闲时通道 & 套餐秒抢**（可选）—— 错峰时段的免费额度通道、限量体验套餐自动领取，都是内置功能。
 - 🔌 **套餐内 MCP 聚合端点** —— ZCode 官方插件 MCP（天眼查 / Wind / 同花顺 iFinD…，134+ 工具）聚合到**单一** `/mcp` 端点（streamable HTTP，工具名 `{plugin}__{tool}` 命名空间化——客户端只配一个 MCP server 即可，需 coding-plan 登录，浏览器 `GET /mcp` 查看目录）；自带网页聊天还能外挂你自己的 MCP 服务器给模型当工具用。
-- 🎨 **套餐内 Seed 系媒体接口** —— 生图（Seedream）、生视频（SeedDance 任务式）、语音识别 / 语音合成（Seed-ASR / Seed-Audio）以火山方舟同形状的 `/api/v3/*` REST 端点暴露在本机（默认开启，翻译到官方 ToolHub / video_edit 网关；需 coding-plan 登录，消耗套餐内额度，端点与体限详见 [`config.example.yaml`](config.example.yaml)）。
+- 🎨 **套餐内 Seed 系媒体接口** —— 生图（Seedream）、生视频（SeedDance 任务式）、语音识别 / 语音合成（Seed-ASR / Seed-Audio）以火山方舟同形状的 `/api/v3/*` REST 端点暴露在本机（默认开启，翻译到官方 ToolHub / video_edit 网关；需 coding-plan 登录，消耗套餐内额度，端点与体限详见 [`config.example.yaml`](config.example.yaml)）；另有 HappyHorse AI 视频与 3D 模型生成（hyper3d / meshy / hi3d）的任务式端点在同一前缀下（同走官方 ToolHub 网关，需 coding-plan 登录）。
 - 🪟 **全平台** —— Windows / macOS / Linux 一份代码直接跑，也能编译成单文件程序或 Docker 部署。
 
 ## 🚀 一分钟上手
@@ -248,7 +248,7 @@ ssh -N -L 8090:127.0.0.1:8090 user@host
 环境变量换一个：`ZCODE_PROXY_PORT=8081 bun run src/index.ts`，或改 `config.yaml` 的 `server.port`。
 
 **工具一直连不上 / 401？**
-如果你设置过 `ZCODE_PROXY_API_KEY`，工具里必须填同一个值；不设置则免密。注意密钥开启后除 `/webui` 外**所有路由**（包括 `/health`）都要带密钥。
+如果你设置过 `ZCODE_PROXY_API_KEY`，工具里必须填同一个值；不设置则免密。注意密钥开启后除 `/webui` 与 serve 模式下的 `GET /login` 登录页（静态页；登录接口本身仍在密钥门后）外**所有路由**（包括 `/health`）都要带密钥。
 
 **换电脑 / 重装系统后要重新登录吗？**
 要。凭据加密时绑定了本机信息。跨机器迁移可以两边都设 `ZCODE_PROXY_CREDENTIAL_SECRET` 为同一个值再登录/拷贝 `~/.zcode-proxy/credentials.json`。

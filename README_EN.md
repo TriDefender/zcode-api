@@ -27,7 +27,7 @@ Codex, Silly Tavern … can all use your plan quota directly.
 - 💬 **Web chat included** — open `/webui` for a local ChatGPT-style chat page to try out models.
 - 🌙 **Off-peak channel & plan grabber** (optional) — a free-quota channel for off-peak hours and automatic claiming of limited trial plans are both built in.
 - 🔌 **In-plan MCP aggregate endpoint** — official ZCode plugin MCPs (Tianyancha / Wind / iFinD…, 134+ tools) are merged behind a **single** `/mcp` endpoint (streamable HTTP, tools namespaced `{plugin}__{tool}` — clients configure just one MCP server; requires a coding-plan login, `GET /mcp` in a browser shows the catalogue); the built-in web chat can also attach your own MCP servers as tools for the model.
-- 🎨 **In-plan Seed media endpoints** — image generation (Seedream), video generation (SeedDance task-based), speech recognition / synthesis (Seed-ASR / Seed-Audio) are exposed as Volcano Ark-shaped `/api/v3/*` REST endpoints on the local proxy (on by default; translated to the official ToolHub / video_edit gateways — requires a coding-plan login and spends plan entitlements; endpoints and body limits are documented in [`config.example.yaml`](config.example.yaml)).
+- 🎨 **In-plan Seed media endpoints** — image generation (Seedream), video generation (SeedDance task-based), speech recognition / synthesis (Seed-ASR / Seed-Audio) are exposed as Volcano Ark-shaped `/api/v3/*` REST endpoints on the local proxy (on by default; translated to the official ToolHub / video_edit gateways — requires a coding-plan login and spends plan entitlements; endpoints and body limits are documented in [`config.example.yaml`](config.example.yaml)). Task-based generation faces for HappyHorse AI video and 3D models (hyper3d / meshy / hi3d) sit on the same prefix (official ToolHub gateway, coding-plan login required).
 - 🪟 **Cross-platform** — Windows / macOS / Linux run from one codebase; can also be compiled into a single-file executable or deployed with Docker.
 
 ## 🚀 Quick Start
@@ -249,7 +249,7 @@ Log in first: `bun run src/index.ts auth login zai` (or `zai_cn` — BigModel / 
 Pick another one via an environment variable: `ZCODE_PROXY_PORT=8081 bun run src/index.ts`, or change `server.port` in `config.yaml`.
 
 **My tool can't connect / gets a 401?**
-If you've set `ZCODE_PROXY_API_KEY`, your tool must send the same value; without it, no key is required. Note that once the key is enabled, **all routes** except `/webui` (including `/health`) require it.
+If you've set `ZCODE_PROXY_API_KEY`, your tool must send the same value; without it, no key is required. Note that once the key is enabled, **all routes** except `/webui` and the serve-mode `GET /login` page (static HTML; the login endpoints themselves stay behind the key), including `/health`, require it.
 
 **Do I need to log in again after switching computers or reinstalling the OS?**
 Yes. Credentials are encrypted with machine-bound information. To migrate across machines, set the same `ZCODE_PROXY_CREDENTIAL_SECRET` on both sides, then log in / copy `~/.zcode-proxy/credentials.json`.

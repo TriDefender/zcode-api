@@ -108,9 +108,10 @@ mcp:
     # chatglm.site variant is the TEST env origin.
     upstreamOrigin: https://zcode.z.ai
 
-# Seed-family media faces — Volcano-shaped REST endpoints translated to the
-# ToolHub / official video_edit MCP upstreams (same identity headers as /mcp,
-# coding-plan only — start-plan gets 400 `plan_unsupported`):
+# Media faces — Volcano-shaped REST endpoints (Seed family) plus ToolHub task
+# faces (HappyHorse / 3D), translated to the ToolHub / official video_edit MCP
+# upstreams (same identity headers as /mcp, coding-plan only — start-plan
+# gets 400 `plan_unsupported`):
 #   POST /api/v3/images/generations              (Seedream-shaped image gen)
 #   POST /api/v3/contents/generations/tasks      (SeedDance-shaped video tasks)
 #   GET  /api/v3/contents/generations/tasks/{id} (task polling; DELETE → 501)
@@ -120,8 +121,19 @@ mcp:
 # Images: data: references must fit the 14 MiB request-body cap (a 10 MiB
 # image base64-encodes to ≈13.3 MiB); videos: data: audio ≤2 MiB inline; ASR
 # request body ≤45 MiB (the upstream nginx cap — chunk oversized audio
-# client-side, one flash request per piece). Every call spends paid plan
-# entitlements, so auth.proxyApiKey is strongly recommended.
+# client-side, one flash request per piece); TTS body ≤1 MiB. Every
+# Seed-family call spends paid plan entitlements, so auth.proxyApiKey is
+# strongly recommended.
+# ToolHub task faces (same plane and coding-plan gate, task-shaped):
+#   POST /api/v3/happyhorse/videos (+ GET .../{task_id})
+#                                    (HappyHorse AI video; material images
+#                                    are https-ONLY — data: is rejected; body
+#                                    ≤4 MiB)
+#   POST /api/v3/models3d/{vendor}/tasks (+ GET .../{task_id})
+#                                    (3D generation: hyper3d | meshy | hi3d;
+#                                    data: images allowed; body ≤108 MiB —
+#                                    worst legal combo is meshy 4 × 20 MiB
+#                                    decoded images ≈106.7 MiB after base64)
 # Env overrides: ZCODE_MEDIA_GATEWAY, ZCODE_MEDIA_GATEWAY_ORIGIN.
 media:
   enabled: true
@@ -170,7 +182,7 @@ async:
 # client version or the server rejects with `ineligible` — an app_version
 # below the floor can also surface as a silently empty preview list
 # (measured floor 3.14.0 for the 2026-09 campaign; the built-in appVersion
-# "3.18.2" satisfies it).
+# "3.19.1" satisfies it).
 #
 # Env overrides: ZCODE_CLAIM_ENABLED, ZCODE_CLAIM_AUTO, ZCODE_CLAIM_ORIGIN,
 # ZCODE_CLAIM_POLL_INTERVAL_MS.
